@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os';
 import path from 'node:path';
 import { MAX_PUSH_DEVICES, PushSubscriptionStore } from './push-subscriptions';
-import { DEFAULT_PUSH_PREFERENCES, parseRegisterPushDevice, type RegisterPushDeviceInput } from './push-types';
+import {
+  DEFAULT_PUSH_PREFERENCES,
+  parsePushPreferences,
+  parseRegisterPushDevice,
+  type RegisterPushDeviceInput,
+} from './push-types';
 
 const roots: string[] = [];
 const b64 = (bytes: number, fill: number): string => Buffer.alloc(bytes, fill).toString('base64url');
@@ -33,6 +38,18 @@ function registration(endpoint = 'https://push.example.test/device/one', name = 
 }
 
 describe('push registration validation', () => {
+  test('legacy stored event preference migrates to attention', () => {
+    expect(
+      parsePushPreferences({
+        events: { needsYou: false, question: true, failed: true, completed: true },
+        interactiveOnly: false,
+      }),
+    ).toEqual({
+      events: { attention: false, question: true, failed: true, completed: true },
+      interactiveOnly: false,
+    });
+  });
+
   test('accepts the browser subscription shape and rejects non-HTTPS or malformed keys', () => {
     expect(parseRegisterPushDevice(registration()).subscription.endpoint).toStartWith('https://');
     expect(() =>

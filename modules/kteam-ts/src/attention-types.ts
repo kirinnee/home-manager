@@ -23,6 +23,8 @@ export const MAX_ATTENTION_SUBJECT_LEN = 240;
 export const MAX_ATTENTION_DETAIL_LEN = 2_000;
 export const MAX_ATTENTION_SOURCE_REF_LEN = 512;
 
+/** `permission` is reserved for the source adapter, but the daemon does not
+ * yet produce permission events; see the UNIMPLEMENTED marker there. */
 export const ATTENTION_SOURCES = ['task', 'question', 'permission', 'agent-raised'] as const;
 export type AttentionSource = (typeof ATTENTION_SOURCES)[number];
 

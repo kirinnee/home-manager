@@ -60,7 +60,7 @@ describe('NotificationSettings — quiet by default', () => {
     const html = render(controls('default', { enabled: true }));
     // The master switch is the first role="switch"; active requires granted.
     expect(html.slice(html.indexOf('role="switch"'))).toContain('aria-checked="false"');
-    expect(html).not.toContain(NOTIFY_KIND_LABELS.needsYou.label);
+    expect(html).not.toContain(NOTIFY_KIND_LABELS.attention.label);
   });
 });
 

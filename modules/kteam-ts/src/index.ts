@@ -43,6 +43,8 @@ import { isTaskError } from './tasks';
 import { parsePinCli, pinCliRequest, renderPinCli } from './pins-cli';
 import { isPinError } from './pins-types';
 import { parseTaskCli, renderTaskCli, taskCliRequest } from './tasks-cli';
+import { parseAttentionCli, attentionCliRequest, renderAttentionCli } from './attention-cli';
+import { isAttentionError } from './attention-types';
 import { renderAnalytics } from './analytics-cli';
 
 const VERSION = KTEAM_VERSION;
@@ -358,6 +360,35 @@ program
       process.stdout.write(renderPinCli(command, response));
     } catch (error) {
       if (isPinError(error)) {
+        process.stderr.write(`${error.message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
+  });
+
+program
+  .command('attention')
+  .description('raise or resolve a durable request for this session (defaults to this one)')
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .argument('[args...]')
+  .action(async (argv: string[]) => {
+    try {
+      const command = parseAttentionCli(argv);
+      const requestSpec = attentionCliRequest(command, process.env.KTEAM_SESSION_ID);
+      const response = await (
+        await client()
+      ).request<unknown>(requestSpec.path, {
+        method: requestSpec.method,
+        ...(requestSpec.body === undefined
+          ? {}
+          : { body: JSON.stringify(requestSpec.body), headers: { 'content-type': 'application/json' } }),
+      });
+      process.stdout.write(renderAttentionCli(command, response));
+    } catch (error) {
+      if (isAttentionError(error)) {
         process.stderr.write(`${error.message}\n`);
         process.exitCode = 1;
         return;

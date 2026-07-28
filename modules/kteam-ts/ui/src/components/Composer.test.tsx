@@ -344,6 +344,22 @@ describe('Composer self-refocus policy', () => {
 });
 
 describe('Composer dictation integration', () => {
+  test('mounts the global shortcut on the live dictation handle without disturbing the markdown overlay', async () => {
+    const source = await Bun.file(new URL('./Composer.tsx', import.meta.url)).text();
+    expect(source).toContain("import { useDictationShortcut } from '../lib/stt/use-dictation-shortcut'");
+    expect(source).toContain('binding: dictation.shortcut');
+    expect(source).toContain('handle: dictation.handle');
+    expect(source).toContain('composerRef: ref');
+    expect(source).toContain(
+      '<ComposerHighlight text={draft} overlayRef={highlightRef} enabled={markdownHighlight} />',
+    );
+
+    const shortcut = await Bun.file(new URL('../lib/stt/use-dictation-shortcut.ts', import.meta.url)).text();
+    const code = shortcut.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    expect(code).not.toMatch(/\.focus\s*\(/);
+    expect(code).not.toMatch(/setSelectionRange\s*\(/);
+  });
+
   test('keeps the microphone absent when this page has no mediaDevices API', () => {
     const html = renderComposer({ onFiles: () => {} });
     expect(html).not.toContain('Dictate a message');

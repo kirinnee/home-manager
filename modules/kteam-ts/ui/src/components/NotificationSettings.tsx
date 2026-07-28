@@ -17,7 +17,7 @@ import { NOTIFY_KINDS, type NotifyKind } from '../lib/notify';
 import { cn } from '../lib/utils';
 
 export const NOTIFY_KIND_LABELS: Record<NotifyKind, { label: string; description: string }> = {
-  needsYou: { label: 'Needs you', description: 'A session is waiting at the prompt (awaiting user).' },
+  attention: { label: 'Attention', description: 'A session is waiting at the prompt (awaiting user).' },
   question: { label: 'Questions', description: 'A session asked you a structured question.' },
   failed: { label: 'Failures', description: 'A session failed, stalled, or could not be stopped.' },
   completed: { label: 'Completions', description: 'A session finished its task.' },
@@ -110,7 +110,7 @@ export function NotificationSettingsView({ controls }: { controls: NotifyControl
         disabled={denied}
         onChange={next => void setEnabled(next)}
         label="Notify me"
-        description="System notification when a session needs you. Turning this on asks the browser for permission."
+        description="System notification when a session needs attention. Turning this on asks the browser for permission."
       />
       {denied && (
         <p role="status" className="m-0 text-ui leading-base text-warn">

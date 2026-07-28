@@ -18,6 +18,8 @@ import type { TaskApi } from './tasks-api';
 import { resolveTaskActor, taskApiRequestFrom } from './tasks-api';
 import type { PinApi } from './pins-api';
 import { isPinPath, pinWardenDenial } from './pins-api';
+import type { AttentionApi } from './attention-api';
+import { isAttentionPath, attentionWardenDenial } from './attention-api';
 import type { PushApi } from './push-api';
 import { isPushPath, pushWardenDenial } from './push-api';
 import { isTaskPath, taskWardenDenial } from './tasks-contract';
@@ -71,6 +73,8 @@ export interface ApiServerOptions {
   tasks?: TaskApi;
   /** Daemon-owned per-session pins. Omitted in tests that don't exercise pins. */
   pins?: PinApi;
+  /** Durable, daemon-owned per-session attention records. */
+  attention?: AttentionApi;
   /** Admin-only Web Push enrollment and per-device management. */
   push?: PushApi;
   /** Fleet-wide historical analytics over the daemon-owned SQLite index. */
@@ -118,6 +122,8 @@ async function wardenScopeDenial(
   if (taskDenial) return forbidden(taskDenial);
   const pinDenial = pinWardenDenial(method, pathname);
   if (pinDenial) return forbidden(pinDenial);
+  const attentionDenial = attentionWardenDenial(method, pathname);
+  if (attentionDenial) return forbidden(attentionDenial);
   const pushDenial = pushWardenDenial(method, pathname);
   if (pushDenial) return forbidden(pushDenial);
   if (method === 'GET') return undefined; // every other read is fine
@@ -300,10 +306,11 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
     }
   };
   const unsubscribe = options.service.subscribe(broadcast);
-  // A `pins.updated` mutation broadcasts the whole new snapshot to matching
-  // sockets, so a reader on another device sees an agent's pin appear live.
+  // Per-session task, pin and attention mutations broadcast whole snapshots,
+  // so every matching reader converges without polling or cursor replay.
   const unsubscribeTasks = options.tasks?.subscribe(broadcast);
   const unsubscribePins = options.pins?.subscribe(broadcast);
+  const unsubscribeAttention = options.attention?.subscribe(broadcast);
 
   const server = Bun.serve<SocketData>({
     hostname: options.host,
@@ -608,6 +615,20 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               requestId: request.headers.get('x-kteam-request-id') ?? undefined,
             });
             if (pinResponse) return json(pinResponse.body, pinResponse.status);
+            return json(unknownRoute(request.method, url.pathname), 404);
+          }
+
+          // MUST precede the generic session match, exactly like pins/tasks.
+          // Provenance comes from authenticated actor context, never the body.
+          if (options.attention && isAttentionPath(url.pathname)) {
+            const attentionResponse = await options.attention.handle({
+              method: request.method,
+              url,
+              body: request.method === 'POST' ? await body<unknown>(request) : undefined,
+              actorSource: actor,
+              requestId: request.headers.get('x-kteam-request-id') ?? undefined,
+            });
+            if (attentionResponse) return json(attentionResponse.body, attentionResponse.status);
             return json(unknownRoute(request.method, url.pathname), 404);
           }
 
@@ -916,6 +937,7 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
     unsubscribe();
     unsubscribeTasks?.();
     unsubscribePins?.();
+    unsubscribeAttention?.();
     return originalStop(closeActiveConnections);
   }) as typeof server.stop;
   return server;

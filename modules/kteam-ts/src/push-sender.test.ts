@@ -22,14 +22,14 @@ function device(id: string): PushDeviceRecord {
 
 const payload: PushNotificationPayload = {
   version: 1,
-  eventKey: 's1:needsYou:awaiting_user:1:',
+  eventKey: 's1:attention:awaiting_user:1:',
   title: '[Noel] Diene Exec',
   body: 'Waiting for you at the prompt.',
   tag: 'kteam-s1',
   url: '/session/s1',
   count: 1,
   sessionId: 's1',
-  kind: 'needsYou',
+  kind: 'attention',
 };
 
 const vapid = { publicKey: b64(65, 3), privateKey: b64(32, 4), createdAt: '2026-07-28T00:00:00.000Z' };

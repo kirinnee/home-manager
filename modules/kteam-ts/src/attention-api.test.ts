@@ -108,6 +108,7 @@ describe('body parsing', () => {
     });
     expect(() => parseAttentionActionBody({ action: 'add', source: 'forged' })).toThrow();
     expect(() => parseAttentionActionBody({ action: 'resolve' })).toThrow();
+    expect(() => parseAttentionActionBody({ action: 'resolve', id: 'legacy-uuid' })).toThrow();
   });
 });
 

@@ -43,7 +43,7 @@ function bodyFor(view: SessionView, kind: PushNotificationKind): string {
       const question = view.state.pendingQuestion?.questions[0]?.question;
       return question ? truncate(question, 120) : 'Asked you a question.';
     }
-    case 'needsYou':
+    case 'attention':
       return 'Waiting for you at the prompt.';
     case 'failed': {
       const label =

@@ -11,6 +11,7 @@ import { SessionManager } from './session-manager';
 import { createSttService } from './stt-service';
 import { PinApi, PinService } from './pins';
 import { TaskService } from './tasks';
+import { AttentionApi, AttentionService, AttentionSources } from './attention';
 import { TaskApi } from './tasks-api';
 import { AnalyticsIndex } from './analytics-index';
 import { loadDaemonSecretsEnvironment } from './daemon-secrets';
@@ -92,16 +93,29 @@ const taskService = new TaskService(paths, manager);
 await taskService.initialize();
 const taskApi = new TaskApi(taskService);
 // One writable pin store + idempotency controller for the daemon lifetime.
-// The `has` adapter is the only thing PinService needs from the session world.
-const pinApi = new PinApi(
-  new PinService(paths, {
-    has: async (id: string) =>
-      manager.get(id).then(
-        () => true,
-        () => false,
-      ),
-  }),
-);
+const sessionExists = {
+  has: async (id: string) =>
+    manager.get(id).then(
+      () => true,
+      () => false,
+    ),
+};
+const pinApi = new PinApi(new PinService(paths, sessionExists));
+// Attention is a separate durable primitive; its source adapter listens to the
+// existing task/session streams but never presents notifications itself.
+const attentionSessions = {
+  resolve: async (ref: string) =>
+    manager.get(ref).then(
+      view => ({
+        id: view.config.id,
+        name: view.config.teammate ?? view.config.name ?? null,
+      }),
+      () => null,
+    ),
+};
+const attentionService = new AttentionService(paths, attentionSessions);
+const attentionApi = new AttentionApi(attentionService, manager);
+const attentionSources = new AttentionSources(attentionService, manager, taskService);
 const stt = createSttService({ paths });
 const pushService = await PushService.create(paths, manager);
 let analytics: AnalyticsIndex | undefined;
@@ -118,12 +132,14 @@ const apiOptions = {
   stt,
   tasks: taskApi,
   pins: pinApi,
+  attention: attentionApi,
   push: pushService.api,
   analytics,
 };
 // Retry EADDRINUSE: a dying predecessor (service-manager restart) can hold the
 // port for seconds while it drains; give it up to 30 s before failing.
 const server = await bindWithRetry(() => startApiServer(apiOptions)).catch(async error => {
+  attentionSources.close();
   await pushService.close();
   await Promise.allSettled([manager.close(), stt.close()]);
   throw error;
@@ -155,6 +171,7 @@ const stop = async (reason: string) => {
     (async () => {
       // Stop accepting status events before the manager closes; then drain any
       // already-encrypted outbound attempts within the shared grace period.
+      attentionSources.close();
       await pushService.close();
       await Promise.all([manager.close(), stt.close(), ...(analytics ? [analytics.close()] : [])]);
       return true;
@@ -184,6 +201,7 @@ process.on('SIGTERM', () => {
 // must never be silent (2026-07-23 silent-partial-boot incident).
 try {
   await manager.bootstrap();
+  await attentionSources.start();
   await learning.start().catch(error => console.error(`kteamd: learning start failed: ${String(error)}`));
   const problems = manager.bootstrapErrors.length;
   console.log(

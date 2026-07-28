@@ -81,7 +81,7 @@ function task(status: 'blocked' | 'in_progress'): ScopedTaskSummary {
     },
     descriptionChars: 0,
     sessionId: SID,
-  } as ScopedTaskSummary;
+  } as unknown as ScopedTaskSummary;
 }
 
 const taskSnapshot = (status: 'blocked' | 'in_progress'): SessionTaskListResponse => ({

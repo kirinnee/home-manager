@@ -29,6 +29,7 @@ import { ViewTabs } from '../components/ViewTabs';
 import { SessionHeader } from '../components/SessionHeader';
 import { Transcript } from '../components/Transcript';
 import { SidePaneWorkspace } from '../components/SidePane';
+import { appendSkillInvocation } from '../components/SkillsSurface';
 import { ThinkingIndicator } from '../components/Harness';
 import { displayCallsign } from '../lib/callsign';
 import {
@@ -1149,7 +1150,13 @@ export function SessionChatPage({
   // pins as session-scoped surfaces. `active` lets a retained background pane
   // drop an open (focus-trapped) sheet; the desktop pane is safe to retain.
   return (
-    <SidePaneWorkspace sessionId={sessionId} compact={compact} active={active !== false} cwd={view?.config.cwd}>
+    <SidePaneWorkspace
+      sessionId={sessionId}
+      compact={compact}
+      active={active !== false}
+      cwd={view?.config.cwd}
+      onInsertSkill={invocation => setDraft(current => appendSkillInvocation(current, invocation))}
+    >
       {chatPage}
     </SidePaneWorkspace>
   );

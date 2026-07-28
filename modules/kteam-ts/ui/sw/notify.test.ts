@@ -70,6 +70,7 @@ describe('targetPath', () => {
 describe('push payload and grouped presentation', () => {
   test('accepts the bounded same-origin contract and rejects arbitrary URLs/tags/counts', () => {
     expect(parsePushPayload(payload)).toEqual(payload);
+    expect(parsePushPayload({ ...payload, kind: 'needsYou' })).toEqual({ ...payload, kind: 'attention' });
     expect(parsePushPayload({ ...payload, url: 'https://evil.example/x' })).toBeNull();
     expect(parsePushPayload({ ...payload, tag: 'other-s1' })).toBeNull();
     expect(parsePushPayload({ ...payload, count: 0 })).toBeNull();

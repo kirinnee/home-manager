@@ -101,6 +101,22 @@ describe('parseAttentionFile', () => {
     expect(parseAttentionFile('not-json', SID).fatal).toBe(true);
     expect(parseAttentionFile(JSON.stringify({ v: 999 }), SID).fatal).toBe(true);
   });
+
+  test('rejects an allocator that could reuse an existing id', () => {
+    const parsed = parseAttentionFile(
+      JSON.stringify({
+        v: 1,
+        sessionId: SID,
+        nextId: 1,
+        items: [item({ id: 'A1' })],
+        resolved: [],
+        count: 1,
+        updatedAt: '2026-07-28T03:00:00.000Z',
+      }),
+      SID,
+    );
+    expect(parsed.parseErrorIds).toContain('<nextId>');
+  });
 });
 
 describe('AttentionStore', () => {
