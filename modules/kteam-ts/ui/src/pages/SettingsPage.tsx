@@ -19,6 +19,13 @@ import { Link } from '../lib/router';
 import { useUiControls } from '../lib/store';
 import { cn } from '../lib/utils';
 
+const SETTINGS_SHEET_HEIGHT = 'min(90dvh, calc(var(--app-h, 100dvh) - var(--gap-xs)))';
+
+/** Settings has one scroll owner on every layout. Explicit vertical panning is
+ * important on the sheet: a gesture commonly starts on a radio button, and the
+ * fixed app shell is intentionally unable to accept a chained page scroll. */
+const SETTINGS_SCROLLER_CLASS = 'min-h-0 w-full overflow-y-auto overscroll-contain scroll-thin [touch-action:pan-y]';
+
 export const TEXT_SCALE_OPTIONS: ReadonlyArray<{
   id: TextScale;
   label: string;
@@ -210,7 +217,7 @@ function hashSetting(): SettingId | null {
  * SettingsSheet; there is deliberately no second settings implementation. */
 export function SettingsPage() {
   return (
-    <div data-settings-scroller className="h-full min-h-0 w-full overflow-y-auto scroll-thin pb-4">
+    <div data-settings-scroller className={cn('h-full pb-4', SETTINGS_SCROLLER_CLASS)}>
       <div className="mx-auto flex w-full max-w-[760px] flex-col gap-3 py-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Link
@@ -250,7 +257,11 @@ export function SettingsSheet({
       labelledBy={titleId}
       closeLabel="Close settings"
       panelClassName="kt-details bg-surface"
-      maxHeight="min(90dvh, calc(var(--app-h, 100dvh) - var(--gap-xs)))"
+      // A definite flex height makes the child below a real scrollport in
+      // WebKit as well as Chromium. It is the same keyboard-safe expression as
+      // maxHeight, so the sheet still shrinks with the visual viewport.
+      maxHeight={SETTINGS_SHEET_HEIGHT}
+      height={SETTINGS_SHEET_HEIGHT}
       zIndexClass="z-50"
     >
       <div className="shrink-0 border-b border-border-soft px-panel pb-row-y">
@@ -262,7 +273,7 @@ export function SettingsSheet({
       <div
         data-settings-scroller
         data-settings-sheet-scroller
-        className="min-h-0 flex-1 overflow-y-auto scroll-thin px-panel pb-4"
+        className={cn('flex-1 px-panel pb-4', SETTINGS_SCROLLER_CLASS)}
       >
         <SettingsContent target={target} />
       </div>

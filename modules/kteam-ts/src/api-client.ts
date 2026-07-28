@@ -13,6 +13,7 @@ import type { KTeamPaths } from './paths';
 import { loadDaemonConfig } from './daemon-config';
 import { displayName } from './names';
 import { KTEAM_VERSION } from './version';
+import type { AnalyticsResponse } from './analytics-types';
 
 /** Compare two dotted numeric versions. >0 when `a` is newer, <0 when older,
  *  0 when equal or either is unparseable (treat unknown as "no skew"). */
@@ -229,6 +230,14 @@ export class ApiClient {
   }
   usage() {
     return this.request<UsageFeedView>('/v1/usage');
+  }
+  /** Fleet-wide historical analytics. The daemon queries its SQLite index;
+   *  this request never asks the CLI to scan session directories/transcripts. */
+  analytics(query?: string) {
+    const search = new URLSearchParams();
+    if (query?.trim()) search.set('q', query.trim());
+    const suffix = search.size ? `?${search.toString()}` : '';
+    return this.request<AnalyticsResponse>(`/v1/analytics${suffix}`);
   }
   scratchPlan(limit = 20) {
     return this.request<ScratchPlanView[]>(`/v1/gc?limit=${limit}`);

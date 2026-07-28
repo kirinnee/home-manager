@@ -14,7 +14,7 @@ import {
 } from './analytics-types';
 import { AnalyticsQueryError, matcherLikePattern, parseAnalyticsQuery } from './analytics-query';
 
-export const ANALYTICS_SCHEMA_VERSION = 4;
+export const ANALYTICS_SCHEMA_VERSION = 6;
 export const ANALYTICS_RAW_LIMIT = 200;
 export const ANALYTICS_GROUP_LIMIT = 500;
 
@@ -27,6 +27,7 @@ const BACKGROUND_REFRESH_MS = 60 * 1000;
 
 const OUTPUT_TYPES_SQL = "'chat.assistant.text','chat.assistant.thinking','chat.assistant.reasoning','tool.use'";
 const FAILURE_TYPES_SQL = "'session.failed','session.crashed'";
+const MIGRATION_TYPES_SQL = "'session.migrating','session.migrated'";
 
 export interface AnalyticsIndexOptions {
   databasePath: string;
@@ -53,6 +54,9 @@ interface ExpectedSourceRow {
   output_tokens: number | null;
   cached_input_tokens: number | null;
   cache_write_input_tokens: number | null;
+  pricing_model: string | null;
+  pricing_model_ambiguous: number | null;
+  codex_current_model: string | null;
   codex_base_input: number | null;
   codex_base_output: number | null;
   codex_base_cached: number | null;
@@ -71,6 +75,9 @@ interface ClaudeUsageRow {
   outputTokens: number;
   cachedInputTokens: number;
   cacheWriteInputTokens: number;
+  cacheWrite5mInputTokens: number | null;
+  cacheWrite1hInputTokens: number | null;
+  pricingModel: string | null;
 }
 
 interface CodexAccumulator {
@@ -82,6 +89,9 @@ interface CodexAccumulator {
   lastOutput: number;
   lastCached: number;
   lastCacheWrite: number;
+  currentModel: string | null;
+  pricingModel: string | null;
+  modelAmbiguous: boolean;
   seen: boolean;
 }
 
@@ -99,6 +109,14 @@ function tokenNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
+function modelName(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function matchingEvidence<T extends string | number>(previous: T | null, next: T | null): T | null {
+  return previous !== null && next !== null && previous === next ? next : null;
+}
+
 function nullableNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -112,6 +130,7 @@ function asCount(value: unknown): number {
 }
 
 const LABEL_COLUMNS: Record<AnalyticsLabel, string> = {
+  id: 'session_id',
   wrapper: 'wrapper',
   binary: 'wrapper',
   model: 'model',
@@ -130,7 +149,7 @@ const LABEL_COLUMNS: Record<AnalyticsLabel, string> = {
 const SESSION_COLUMNS = `
   session_id, wrapper, model, harness, mode, status, label, cwd, parent,
   day, week, created_at, started_at, finished_at, turns, context_percent,
-  first_output_at, had_stall, had_failure, indexed_at
+  first_output_at, had_stall, had_failure, had_migration, indexed_at
 `;
 
 /**
@@ -223,6 +242,7 @@ export class AnalyticsIndex {
       DROP TRIGGER IF EXISTS analytics_sessions_update;
       DROP TRIGGER IF EXISTS analytics_session_source_update;
       DROP TRIGGER IF EXISTS analytics_events_insert;
+      DROP TRIGGER IF EXISTS analytics_events_update;
       DROP TRIGGER IF EXISTS analytics_chat_insert;
       DROP TRIGGER IF EXISTS analytics_chat_source_insert;
       DROP TRIGGER IF EXISTS analytics_chat_source_update;
@@ -256,11 +276,15 @@ export class AnalyticsIndex {
         first_output_at TEXT,
         had_stall INTEGER NOT NULL DEFAULT 0,
         had_failure INTEGER NOT NULL DEFAULT 0,
+        had_migration INTEGER NOT NULL DEFAULT 0,
         token_known INTEGER NOT NULL DEFAULT 0,
         input_tokens INTEGER,
         output_tokens INTEGER,
         cached_input_tokens INTEGER,
         cache_write_input_tokens INTEGER,
+        cache_write_5m_input_tokens INTEGER,
+        cache_write_1h_input_tokens INTEGER,
+        pricing_model TEXT,
         indexed_at TEXT NOT NULL,
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
       );
@@ -305,6 +329,9 @@ export class AnalyticsIndex {
         output_tokens INTEGER,
         cached_input_tokens INTEGER,
         cache_write_input_tokens INTEGER,
+        pricing_model TEXT,
+        pricing_model_ambiguous INTEGER NOT NULL DEFAULT 0,
+        codex_current_model TEXT,
         codex_base_input INTEGER NOT NULL DEFAULT 0,
         codex_base_output INTEGER NOT NULL DEFAULT 0,
         codex_base_cached INTEGER NOT NULL DEFAULT 0,
@@ -329,6 +356,9 @@ export class AnalyticsIndex {
         output_tokens INTEGER NOT NULL,
         cached_input_tokens INTEGER NOT NULL,
         cache_write_input_tokens INTEGER NOT NULL,
+        cache_write_5m_input_tokens INTEGER,
+        cache_write_1h_input_tokens INTEGER,
+        pricing_model TEXT,
         PRIMARY KEY (session_id, usage_id),
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
       );
@@ -359,6 +389,9 @@ export class AnalyticsIndex {
           NULL,
           CASE WHEN COALESCE(NEW.status, json_extract(NEW.state_json, '$.status')) = 'stalled' THEN 1 ELSE 0 END,
           CASE WHEN COALESCE(NEW.status, json_extract(NEW.state_json, '$.status')) = 'failed' THEN 1 ELSE 0 END,
+          CASE WHEN EXISTS (
+            SELECT 1 FROM events e WHERE e.session_id = NEW.id AND e.type IN (${MIGRATION_TYPES_SQL})
+          ) THEN 1 ELSE 0 END,
           CURRENT_TIMESTAMP
         );
         INSERT OR IGNORE INTO analytics_expected_sources
@@ -392,6 +425,9 @@ export class AnalyticsIndex {
           NULL,
           CASE WHEN COALESCE(NEW.status, json_extract(NEW.state_json, '$.status')) = 'stalled' THEN 1 ELSE 0 END,
           CASE WHEN COALESCE(NEW.status, json_extract(NEW.state_json, '$.status')) = 'failed' THEN 1 ELSE 0 END,
+          CASE WHEN EXISTS (
+            SELECT 1 FROM events e WHERE e.session_id = NEW.id AND e.type IN (${MIGRATION_TYPES_SQL})
+          ) THEN 1 ELSE 0 END,
           CURRENT_TIMESTAMP
         )
         ON CONFLICT(session_id) DO UPDATE SET
@@ -412,6 +448,7 @@ export class AnalyticsIndex {
           context_percent = excluded.context_percent,
           had_stall = MAX(analytics_sessions.had_stall, excluded.had_stall),
           had_failure = MAX(analytics_sessions.had_failure, excluded.had_failure),
+          had_migration = MAX(analytics_sessions.had_migration, excluded.had_migration),
           indexed_at = excluded.indexed_at;
       END;
 
@@ -430,7 +467,10 @@ export class AnalyticsIndex {
           input_tokens = NULL,
           output_tokens = NULL,
           cached_input_tokens = NULL,
-          cache_write_input_tokens = NULL
+          cache_write_input_tokens = NULL,
+          cache_write_5m_input_tokens = NULL,
+          cache_write_1h_input_tokens = NULL,
+          pricing_model = NULL
         WHERE session_id = NEW.id;
       END;
 
@@ -440,12 +480,20 @@ export class AnalyticsIndex {
         UPDATE analytics_sessions SET
           had_stall = CASE WHEN NEW.type = 'session.stalled' THEN 1 ELSE had_stall END,
           had_failure = CASE WHEN NEW.type IN (${FAILURE_TYPES_SQL}) THEN 1 ELSE had_failure END,
+          had_migration = CASE WHEN NEW.type IN (${MIGRATION_TYPES_SQL}) THEN 1 ELSE had_migration END,
           first_output_at = CASE
             WHEN NEW.type IN (${OUTPUT_TYPES_SQL})
               AND (first_output_at IS NULL OR NEW.time < first_output_at) THEN NEW.time
             ELSE first_output_at
           END
         WHERE session_id = NEW.session_id;
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS analytics_events_update
+      AFTER UPDATE OF type ON events
+      WHEN NEW.type IN (${MIGRATION_TYPES_SQL})
+      BEGIN
+        UPDATE analytics_sessions SET had_migration = 1 WHERE session_id = NEW.session_id;
       END;
 
       CREATE TRIGGER IF NOT EXISTS analytics_chat_insert
@@ -487,7 +535,10 @@ export class AnalyticsIndex {
           input_tokens = NULL,
           output_tokens = NULL,
           cached_input_tokens = NULL,
-          cache_write_input_tokens = NULL
+          cache_write_input_tokens = NULL,
+          cache_write_5m_input_tokens = NULL,
+          cache_write_1h_input_tokens = NULL,
+          pricing_model = NULL
         WHERE session_id = NEW.session_id AND EXISTS (
           SELECT 1 FROM analytics_expected_sources expected
           LEFT JOIN analytics_usage_sources usage_index
@@ -522,7 +573,10 @@ export class AnalyticsIndex {
           input_tokens = NULL,
           output_tokens = NULL,
           cached_input_tokens = NULL,
-          cache_write_input_tokens = NULL
+          cache_write_input_tokens = NULL,
+          cache_write_5m_input_tokens = NULL,
+          cache_write_1h_input_tokens = NULL,
+          pricing_model = NULL
         WHERE session_id = NEW.session_id AND EXISTS (
           SELECT 1 FROM analytics_expected_sources expected
           LEFT JOIN analytics_usage_sources usage_index
@@ -575,6 +629,9 @@ export class AnalyticsIndex {
           CASE WHEN COALESCE(s.status, json_extract(s.state_json, '$.status')) = 'failed'
             OR EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id AND e.type IN (${FAILURE_TYPES_SQL}))
             THEN 1 ELSE 0 END,
+          CASE WHEN EXISTS (
+            SELECT 1 FROM events e WHERE e.session_id = s.id AND e.type IN (${MIGRATION_TYPES_SQL})
+          ) THEN 1 ELSE 0 END,
           CURRENT_TIMESTAMP
         FROM sessions s WHERE 1
         ON CONFLICT(session_id) DO UPDATE SET
@@ -596,6 +653,7 @@ export class AnalyticsIndex {
           first_output_at = COALESCE(excluded.first_output_at, analytics_sessions.first_output_at),
           had_stall = MAX(analytics_sessions.had_stall, excluded.had_stall),
           had_failure = MAX(analytics_sessions.had_failure, excluded.had_failure),
+          had_migration = MAX(analytics_sessions.had_migration, excluded.had_migration),
           indexed_at = excluded.indexed_at;
 
         DELETE FROM analytics_sessions WHERE session_id NOT IN (SELECT id FROM sessions);
@@ -637,7 +695,10 @@ export class AnalyticsIndex {
         input_tokens = NULL,
         output_tokens = NULL,
         cached_input_tokens = NULL,
-        cache_write_input_tokens = NULL
+        cache_write_input_tokens = NULL,
+        cache_write_5m_input_tokens = NULL,
+        cache_write_1h_input_tokens = NULL,
+        pricing_model = NULL
       WHERE EXISTS (
         SELECT 1 FROM analytics_expected_sources expected
         LEFT JOIN analytics_usage_sources usage_index
@@ -726,6 +787,8 @@ export class AnalyticsIndex {
           ${metric('output_tokens', 'output_tokens')},
           ${metric('cached_input_tokens', 'cached_input_tokens')},
           ${metric('cache_write_input_tokens', 'cache_write_input_tokens')},
+          ${metric('cache_write_5m_input_tokens', 'cache_write_5m_input_tokens')},
+          ${metric('cache_write_1h_input_tokens', 'cache_write_1h_input_tokens')},
           ${metric('turns', 'turns')},
           ${metric('duration_ms', 'duration_ms')},
           ${metric('ttfo_ms', 'ttfo_ms')},
@@ -763,6 +826,8 @@ export class AnalyticsIndex {
         outputTokens: this.measure(row, 'output_tokens', measureTotal),
         cachedInputTokens: this.measure(row, 'cached_input_tokens', measureTotal),
         cacheWriteInputTokens: this.measure(row, 'cache_write_input_tokens', measureTotal),
+        cacheWrite5mInputTokens: this.measure(row, 'cache_write_5m_input_tokens', measureTotal),
+        cacheWrite1hInputTokens: this.measure(row, 'cache_write_1h_input_tokens', measureTotal),
         turns: this.measure(row, 'turns', measureTotal),
         durationMs: this.measure(row, 'duration_ms', measureTotal),
         timeToFirstOutputMs: this.measure(row, 'ttfo_ms', measureTotal),
@@ -846,17 +911,21 @@ export class AnalyticsIndex {
       day: nullableText('day'),
       week: nullableText('week'),
       createdAt: nullableText('created_at'),
+      pricingModel: nullableText('pricing_model'),
       tokens: nullableNumber(row.total_tokens),
       inputTokens: nullableNumber(row.input_tokens),
       outputTokens: nullableNumber(row.output_tokens),
       cachedInputTokens: nullableNumber(row.cached_input_tokens),
       cacheWriteInputTokens: nullableNumber(row.cache_write_input_tokens),
+      cacheWrite5mInputTokens: nullableNumber(row.cache_write_5m_input_tokens),
+      cacheWrite1hInputTokens: nullableNumber(row.cache_write_1h_input_tokens),
       turns: nullableNumber(row.turns),
       durationMs: nullableNumber(row.duration_ms),
       timeToFirstOutputMs: nullableNumber(row.ttfo_ms),
       contextEndPercent: nullableNumber(row.context_percent),
       stalled: booleanNumber(row.had_stall),
       failed: booleanNumber(row.had_failure),
+      migrated: booleanNumber(row.had_migration),
       completed: row.status === 'completed',
     };
   }
@@ -1007,6 +1076,8 @@ export class AnalyticsIndex {
           usage_index.anchor_hash,
           usage_index.has_usage, usage_index.input_tokens, usage_index.output_tokens,
           usage_index.cached_input_tokens, usage_index.cache_write_input_tokens,
+          usage_index.pricing_model, usage_index.pricing_model_ambiguous,
+          usage_index.codex_current_model,
           usage_index.codex_base_input, usage_index.codex_base_output,
           usage_index.codex_base_cached, usage_index.codex_base_cache_write,
           usage_index.codex_last_input, usage_index.codex_last_output,
@@ -1067,6 +1138,9 @@ export class AnalyticsIndex {
         lastOutput: reset ? 0 : (source.codex_last_output ?? 0),
         lastCached: reset ? 0 : (source.codex_last_cached ?? 0),
         lastCacheWrite: reset ? 0 : (source.codex_last_cache_write ?? 0),
+        currentModel: reset ? null : source.codex_current_model,
+        pricingModel: reset ? null : source.pricing_model,
+        modelAmbiguous: reset ? false : booleanNumber(source.pricing_model_ambiguous),
         seen: reset ? false : booleanNumber(source.has_usage),
       };
       let carry = Buffer.alloc(0);
@@ -1121,14 +1195,30 @@ export class AnalyticsIndex {
         const upsertMessage = this.database.query(`
           INSERT INTO analytics_usage_messages
             (session_id, usage_id, source_file, input_tokens, output_tokens,
-             cached_input_tokens, cache_write_input_tokens)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+             cached_input_tokens, cache_write_input_tokens,
+             cache_write_5m_input_tokens, cache_write_1h_input_tokens, pricing_model)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(session_id, usage_id) DO UPDATE SET
             source_file = excluded.source_file,
             input_tokens = excluded.input_tokens,
             output_tokens = excluded.output_tokens,
             cached_input_tokens = excluded.cached_input_tokens,
-            cache_write_input_tokens = excluded.cache_write_input_tokens
+            cache_write_input_tokens = excluded.cache_write_input_tokens,
+            cache_write_5m_input_tokens = CASE
+              WHEN analytics_usage_messages.cache_write_5m_input_tokens IS NOT NULL
+                AND excluded.cache_write_5m_input_tokens IS NOT NULL
+                AND analytics_usage_messages.cache_write_5m_input_tokens = excluded.cache_write_5m_input_tokens
+              THEN excluded.cache_write_5m_input_tokens ELSE NULL END,
+            cache_write_1h_input_tokens = CASE
+              WHEN analytics_usage_messages.cache_write_1h_input_tokens IS NOT NULL
+                AND excluded.cache_write_1h_input_tokens IS NOT NULL
+                AND analytics_usage_messages.cache_write_1h_input_tokens = excluded.cache_write_1h_input_tokens
+              THEN excluded.cache_write_1h_input_tokens ELSE NULL END,
+            pricing_model = CASE
+              WHEN analytics_usage_messages.pricing_model IS NOT NULL
+                AND excluded.pricing_model IS NOT NULL
+                AND analytics_usage_messages.pricing_model = excluded.pricing_model
+              THEN excluded.pricing_model ELSE NULL END
         `);
         for (const usage of claudeMessages.values())
           upsertMessage.run(
@@ -1139,6 +1229,9 @@ export class AnalyticsIndex {
             usage.outputTokens,
             usage.cachedInputTokens,
             usage.cacheWriteInputTokens,
+            usage.cacheWrite5mInputTokens,
+            usage.cacheWrite1hInputTokens,
+            usage.pricingModel,
           );
         this.database
           .query(
@@ -1147,10 +1240,14 @@ export class AnalyticsIndex {
               session_id, source_file, harness, device, inode, anchor_hash, byte_offset,
               source_size, source_mtime_ms, has_usage,
               input_tokens, output_tokens, cached_input_tokens, cache_write_input_tokens,
+              pricing_model, pricing_model_ambiguous, codex_current_model,
               codex_base_input, codex_base_output, codex_base_cached, codex_base_cache_write,
               codex_last_input, codex_last_output, codex_last_cached, codex_last_cache_write,
               error, retry_at, indexed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+            ) VALUES (
+              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+              ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?
+            )
             ON CONFLICT(session_id, source_file) DO UPDATE SET
               harness = excluded.harness,
               device = excluded.device,
@@ -1164,6 +1261,9 @@ export class AnalyticsIndex {
               output_tokens = excluded.output_tokens,
               cached_input_tokens = excluded.cached_input_tokens,
               cache_write_input_tokens = excluded.cache_write_input_tokens,
+              pricing_model = excluded.pricing_model,
+              pricing_model_ambiguous = excluded.pricing_model_ambiguous,
+              codex_current_model = excluded.codex_current_model,
               codex_base_input = excluded.codex_base_input,
               codex_base_output = excluded.codex_base_output,
               codex_base_cached = excluded.codex_base_cached,
@@ -1192,6 +1292,9 @@ export class AnalyticsIndex {
             outputTokens,
             cachedTokens,
             cacheWriteTokens,
+            codex.modelAmbiguous ? null : codex.pricingModel,
+            codex.modelAmbiguous ? 1 : 0,
+            codex.currentModel,
             codex.baseInput,
             codex.baseOutput,
             codex.baseCached,
@@ -1268,17 +1371,46 @@ export class AnalyticsIndex {
       const cacheWrite = tokenNumber(usage.cache_creation_input_tokens ?? 0);
       if (cached === undefined || cacheWrite === undefined)
         throw new Error('Claude usage record has invalid cache token counts');
-      claudeMessages.set(id, {
+      const cacheCreationValue = usage.cache_creation;
+      const cacheCreation = record(cacheCreationValue);
+      let cacheWrite5m: number | null = null;
+      let cacheWrite1h: number | null = null;
+      if (cacheWrite === 0 && cacheCreationValue === undefined) {
+        cacheWrite5m = 0;
+        cacheWrite1h = 0;
+      } else if (cacheCreation) {
+        const fiveMinutes = tokenNumber(cacheCreation.ephemeral_5m_input_tokens);
+        const oneHour = tokenNumber(cacheCreation.ephemeral_1h_input_tokens);
+        if (fiveMinutes !== undefined && oneHour !== undefined && fiveMinutes + oneHour === cacheWrite) {
+          cacheWrite5m = fiveMinutes;
+          cacheWrite1h = oneHour;
+        }
+      }
+      const next: ClaudeUsageRow = {
         id,
         inputTokens: direct + cached + cacheWrite,
         outputTokens: output,
         cachedInputTokens: cached,
         cacheWriteInputTokens: cacheWrite,
-      });
+        cacheWrite5mInputTokens: cacheWrite5m,
+        cacheWrite1hInputTokens: cacheWrite1h,
+        pricingModel: modelName(message.model),
+      };
+      const previous = claudeMessages.get(id);
+      if (previous) {
+        next.cacheWrite5mInputTokens = matchingEvidence(previous.cacheWrite5mInputTokens, next.cacheWrite5mInputTokens);
+        next.cacheWrite1hInputTokens = matchingEvidence(previous.cacheWrite1hInputTokens, next.cacheWrite1hInputTokens);
+        next.pricingModel = matchingEvidence(previous.pricingModel, next.pricingModel);
+      }
+      claudeMessages.set(id, next);
       return;
     }
     if (harness !== 'codex') return;
     const payload = record(root.payload);
+    if (root.type === 'turn_context') {
+      codex.currentModel = modelName(payload?.model);
+      return;
+    }
     const info = record(payload?.info);
     const total = record(info?.total_token_usage);
     if (root.type !== 'event_msg' || payload?.type !== 'token_count' || !total) return;
@@ -1290,6 +1422,17 @@ export class AnalyticsIndex {
     const cacheWrite = tokenNumber(total.cache_write_input_tokens ?? 0);
     if (cached === undefined || cacheWrite === undefined)
       throw new Error('Codex usage record has invalid cache token counts');
+    if (!codex.modelAmbiguous) {
+      if (codex.currentModel === null) {
+        codex.modelAmbiguous = true;
+        codex.pricingModel = null;
+      } else if (!codex.seen) {
+        codex.pricingModel = codex.currentModel;
+      } else if (codex.pricingModel !== codex.currentModel) {
+        codex.modelAmbiguous = true;
+        codex.pricingModel = null;
+      }
+    }
     // A resumed/compacted Codex stream may restart its cumulative counter.
     // Preserve the completed segment before accepting the smaller new one.
     if (codex.seen && (input < codex.lastInput || output < codex.lastOutput)) {
@@ -1337,7 +1480,9 @@ export class AnalyticsIndex {
       .query(
         `
         UPDATE analytics_sessions SET token_known = 0, input_tokens = NULL,
-          output_tokens = NULL, cached_input_tokens = NULL, cache_write_input_tokens = NULL
+          output_tokens = NULL, cached_input_tokens = NULL, cache_write_input_tokens = NULL,
+          cache_write_5m_input_tokens = NULL, cache_write_1h_input_tokens = NULL,
+          pricing_model = NULL
         WHERE session_id = ?
       `,
       )
@@ -1355,14 +1500,21 @@ export class AnalyticsIndex {
             AND usage_index.source_size = expected.source_size
             AND usage_index.source_mtime_ms = expected.source_mtime_ms
             THEN 1 ELSE 0 END) AS complete,
-          SUM(CASE WHEN usage_index.has_usage = 1 THEN 1 ELSE 0 END) AS with_usage
+          SUM(CASE WHEN usage_index.has_usage = 1 THEN 1 ELSE 0 END) AS with_usage,
+          SUM(CASE WHEN usage_index.has_usage = 1 AND usage_index.harness = 'codex'
+            THEN 1 ELSE 0 END) AS codex_usage
         FROM analytics_expected_sources expected
         LEFT JOIN analytics_usage_sources usage_index
           ON usage_index.session_id = expected.session_id AND usage_index.source_file = expected.source_file
         WHERE expected.session_id = ?
       `,
       )
-      .get(sessionId) as { expected: number; complete: number | null; with_usage: number | null };
+      .get(sessionId) as {
+      expected: number;
+      complete: number | null;
+      with_usage: number | null;
+      codex_usage: number | null;
+    };
     const expected = asCount(coverage.expected);
     const complete = asCount(coverage.complete);
     const withUsage = asCount(coverage.with_usage);
@@ -1371,7 +1523,9 @@ export class AnalyticsIndex {
         .query(
           `
           UPDATE analytics_sessions SET token_known = 0, input_tokens = NULL,
-            output_tokens = NULL, cached_input_tokens = NULL, cache_write_input_tokens = NULL
+            output_tokens = NULL, cached_input_tokens = NULL, cache_write_input_tokens = NULL,
+            cache_write_5m_input_tokens = NULL, cache_write_1h_input_tokens = NULL,
+            pricing_model = NULL
           WHERE session_id = ?
         `,
         )
@@ -1402,11 +1556,68 @@ export class AnalyticsIndex {
       cached_input_tokens: number;
       cache_write_input_tokens: number;
     };
+    const splitEvidence = this.database
+      .query(
+        `
+        SELECT
+          COUNT(*) AS messages,
+          SUM(CASE WHEN cache_write_5m_input_tokens IS NOT NULL
+            AND cache_write_1h_input_tokens IS NOT NULL THEN 1 ELSE 0 END) AS known,
+          SUM(cache_write_5m_input_tokens) AS five_minutes,
+          SUM(cache_write_1h_input_tokens) AS one_hour
+        FROM analytics_usage_messages WHERE session_id = ?
+      `,
+      )
+      .get(sessionId) as {
+      messages: number;
+      known: number | null;
+      five_minutes: number | null;
+      one_hour: number | null;
+    };
+    const splitKnown =
+      asCount(coverage.codex_usage) === 0 &&
+      asCount(splitEvidence.messages) > 0 &&
+      asCount(splitEvidence.known) === asCount(splitEvidence.messages);
+    const cacheWrite5m = splitKnown ? asCount(splitEvidence.five_minutes) : null;
+    const cacheWrite1h = splitKnown ? asCount(splitEvidence.one_hour) : null;
+    const pricingEvidence = this.database
+      .query(
+        `
+        SELECT
+          COUNT(*) AS evidence,
+          COUNT(pricing_model) AS exact,
+          COUNT(DISTINCT pricing_model) AS models,
+          MIN(pricing_model) AS pricing_model
+        FROM (
+          SELECT pricing_model
+          FROM analytics_usage_messages WHERE session_id = ?
+          UNION ALL
+          SELECT CASE WHEN pricing_model_ambiguous = 0 THEN pricing_model ELSE NULL END
+          FROM analytics_usage_sources
+          WHERE session_id = ? AND harness = 'codex' AND has_usage = 1
+        ) transcript_evidence
+      `,
+      )
+      .get(sessionId, sessionId) as {
+      evidence: number;
+      exact: number;
+      models: number;
+      pricing_model: string | null;
+    };
+    const pricingModel =
+      asCount(pricingEvidence.evidence) > 0 &&
+      asCount(pricingEvidence.exact) === asCount(pricingEvidence.evidence) &&
+      asCount(pricingEvidence.models) === 1 &&
+      typeof pricingEvidence.pricing_model === 'string'
+        ? pricingEvidence.pricing_model
+        : null;
     this.database
       .query(
         `
         UPDATE analytics_sessions SET token_known = 1, input_tokens = ?, output_tokens = ?,
-          cached_input_tokens = ?, cache_write_input_tokens = ? WHERE session_id = ?
+          cached_input_tokens = ?, cache_write_input_tokens = ?,
+          cache_write_5m_input_tokens = ?, cache_write_1h_input_tokens = ?, pricing_model = ?
+        WHERE session_id = ?
       `,
       )
       .run(
@@ -1414,6 +1625,9 @@ export class AnalyticsIndex {
         totals.output_tokens,
         totals.cached_input_tokens,
         totals.cache_write_input_tokens,
+        cacheWrite5m,
+        cacheWrite1h,
+        pricingModel,
         sessionId,
       );
   }

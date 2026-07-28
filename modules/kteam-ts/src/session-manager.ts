@@ -262,9 +262,25 @@ interface WardenSweep {
   anomalies: WardenAnomaly[];
   fingerprint: string;
 }
-interface ResumeGuard {
-  status: SessionStatus;
+interface ResumePolicy {
+  /** Automatic callers retain the historical label+cwd duplicate-work
+   *  suppression. Explicit admin/peer resume and terminal send set or resolve
+   *  this false, so a batch label can never gate a deliberate recipient. */
+  dedupeSharedRecoveryScope: boolean;
+  /** Automatic retries must not clear human/retry state as if an operator had
+   *  explicitly recovered the session. */
+  automatic: boolean;
+  expectedStatus?: SessionStatus;
   retryAttempt?: number;
+}
+
+function implicitResumePolicy(actor: KTeamEvent['source'] | undefined): ResumePolicy | undefined {
+  // Admin and peer API calls are explicit operator/lead actions. A warden API
+  // call is automated recovery even though it reaches the same public method;
+  // no actor means an internal daemon caller. Unknown future automation kinds
+  // default to the safer deduped path rather than silently gaining an override.
+  if (actor === 'admin-cli' || actor === 'admin-ui' || actor?.startsWith('peer:')) return undefined;
+  return { automatic: true, dedupeSharedRecoveryScope: true };
 }
 interface QuotaWaiter {
   abort: AbortController;
@@ -272,6 +288,25 @@ interface QuotaWaiter {
 }
 
 class ResumeCancelled extends Error {}
+
+class ReviveRefused extends Error {}
+
+class ReviveDedupeConflict extends ReviveRefused {
+  constructor(
+    readonly target: SessionConfig,
+    readonly conflict: SessionConfig,
+  ) {
+    const conflictName = conflict.teammate ?? conflict.id;
+    const label = target.label?.trim() ?? '';
+    const cwd = path.resolve(target.cwd);
+    super(
+      `automatic revive suppressed for session ${target.id}: live session ${conflictName} (${conflict.id}) ` +
+        `shares label ${label} and checkout ${cwd}, the legacy automatic-recovery dedupe scope; ` +
+        `run \`kteam resume ${target.id}\` to explicitly recover the original session`,
+    );
+    this.name = 'ReviveDedupeConflict';
+  }
+}
 
 const terminalStatuses: SessionStatus[] = ['completed', 'failed', 'stalled', 'stopped'];
 const protectedStatuses: SessionStatus[] = [...terminalStatuses, 'kill_failed'];
@@ -1962,7 +1997,9 @@ export class SessionManager implements KTeamService {
   }
 
   /** Terminal/dead-pane send: relaunch through resume() with the message as
-   *  the next tracked turn. */
+   *  the next tracked turn. Explicit message delivery bypasses batch-label
+   *  dedupe; if a genuine safety refusal still prevents relaunch, retain the
+   *  message durably instead of turning that transport decision into loss. */
   private async reviveWithMessage(
     id: string,
     request: SendRequest,
@@ -1971,7 +2008,61 @@ export class SessionManager implements KTeamService {
     const attachmentBlock = await this.attachments.buildImageReferenceBlock(id, request.attachmentIds ?? []);
     const complete = [message, attachmentBlock].filter(Boolean).join('\n\n');
     if (!complete) throw new Error('message or attachment is required');
-    return { ...(await this.resume(id, complete)), disposition: 'revived' };
+    try {
+      return {
+        ...(await this.resume(id, complete, {
+          automatic: false,
+          dedupeSharedRecoveryScope: false,
+        })),
+        disposition: 'revived',
+      };
+    } catch (error) {
+      if (!(error instanceof ReviveRefused)) throw error;
+      return await this.queueForExplicitRevive(id, request, error);
+    }
+  }
+
+  private async queueForExplicitRevive(
+    id: string,
+    request: SendRequest,
+    refusal: ReviveRefused,
+  ): Promise<SessionView & { disposition: SendDisposition }> {
+    const view = await this.get(id);
+    const queueId = crypto.randomUUID();
+    const message = request.message?.trim() ?? '';
+    const channel = path.join(view.directory, 'channel');
+    await mkdir(channel, { recursive: true, mode: 0o700 });
+    await appendFile(
+      path.join(channel, 'inbox.jsonl'),
+      `${JSON.stringify({
+        at: now(),
+        type: 'message',
+        queueId,
+        queuedForRevive: true,
+        message,
+        attachmentIds: request.attachmentIds ?? [],
+        ...(request.from ? { from: request.from, fromName: request.fromName } : {}),
+        ...(refusal instanceof ReviveDedupeConflict ? { reviveConflict: refusal.conflict.id } : {}),
+        reviveRefusal: refusal.message,
+      })}\n`,
+    );
+    await this.emit(
+      id,
+      'control.send_queued',
+      {
+        queueId,
+        message,
+        attachmentIds: request.attachmentIds ?? [],
+        queuedForRevive: true,
+        native: false,
+        ...(refusal instanceof ReviveDedupeConflict ? { conflictSessionId: refusal.conflict.id } : {}),
+        reason: refusal.message,
+        ...(request.from ? { from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}) } : {}),
+        ...(request.replyExpected ? { replyExpected: true } : {}),
+      },
+      'client',
+    ).catch(() => undefined);
+    return { ...(await this.get(id)), disposition: 'queued-for-revive' };
   }
 
   /** Tracked idle-prompt delivery: write the turn artifacts, advance the turn,
@@ -2087,7 +2178,10 @@ export class SessionManager implements KTeamService {
         const pane = await this.tmux.state(view.config.tmuxSession);
         if (!pane.alive || pane.dead) {
           await this.emit(id, 'control.autorevive', { action, error: String(error) }, 'daemon').catch(() => undefined);
-          return await this.resume(id, reviveMessage);
+          return await this.resume(id, reviveMessage, {
+            automatic: true,
+            dedupeSharedRecoveryScope: true,
+          });
         }
       }
       throw error;
@@ -2365,11 +2459,10 @@ export class SessionManager implements KTeamService {
     return /\bexited\b/i.test(detail) ? this.harnessExitReason(config, pane) : detail;
   }
 
-  /** Refuse resurrection when another live teammate already owns the same
-   *  labelled work in the same checkout. This is the durable successor signal
-   *  available to every revive path (send, control auto-revive, quota wake,
-   *  and transient retry), all of which converge on resume(). */
-  private liveSuccessorFor(view: SessionView): SessionConfig | undefined {
+  /** Legacy automatic-recovery collision detector. A label is a batch slug,
+   *  not lineage, so this heuristic may suppress only automatic revivers.
+   *  Explicit resume and message delivery must never consult it. */
+  private liveRecoveryScopeConflictFor(view: SessionView): SessionConfig | undefined {
     const label = view.config.label?.trim();
     if (!label) return undefined;
     const cwd = path.resolve(view.config.cwd);
@@ -2383,8 +2476,9 @@ export class SessionManager implements KTeamService {
     return undefined;
   }
 
-  async resume(id: string, message?: string, guard?: ResumeGuard): Promise<SessionView> {
+  async resume(id: string, message?: string, policy?: ResumePolicy): Promise<SessionView> {
     id = this.resolveRef(id);
+    const effectivePolicy = policy ?? implicitResumePolicy(currentActor());
     // Same pending-not-refused contract as send(): wait for an in-flight first
     // launch instead of rejecting outright. A resume that lands mid-launch and
     // succeeds anyway would fight the bootstrap for the same tmux name.
@@ -2404,21 +2498,22 @@ export class SessionManager implements KTeamService {
     });
     this.launching.set(id, { at: Date.now(), bootstrap: resumeLaunch });
     try {
-      // Automatic retries are not a human action; only explicit resumes clear.
-      if (!guard) await this.clearNeedsHuman(id);
-      if (!guard) this.cancelRetry(id);
+      // Automatic retries are not a human action; explicit resumes and sends
+      // retain the established state-clearing behaviour.
+      if (!effectivePolicy?.automatic) await this.clearNeedsHuman(id);
+      if (!effectivePolicy?.automatic) this.cancelRetry(id);
       let startMonitorAfterUnlock = false;
       const resumed = await this.serialized(id, async () => {
-        const automaticRetry = guard?.status === 'retrying';
+        const automaticRetry = effectivePolicy?.automatic === true && effectivePolicy.expectedStatus === 'retrying';
         let view = await this.get(id);
         if (view.state.status === 'kill_failed')
-          throw new Error('the previous tmux kill failed; use stop again before resume');
+          throw new ReviveRefused('the previous tmux kill failed; use stop again before resume');
         if (
-          guard &&
-          (view.state.status !== guard.status ||
-            (guard.retryAttempt !== undefined && view.state.retryAttempt !== guard.retryAttempt))
+          effectivePolicy?.expectedStatus !== undefined &&
+          (view.state.status !== effectivePolicy.expectedStatus ||
+            (effectivePolicy.retryAttempt !== undefined && view.state.retryAttempt !== effectivePolicy.retryAttempt))
         ) {
-          throw new ResumeCancelled(`resume guard changed from ${guard.status}`);
+          throw new ResumeCancelled(`resume guard changed from ${effectivePolicy.expectedStatus}`);
         }
         const paneState = await this.tmux.state(view.config.tmuxSession);
         if (
@@ -2438,13 +2533,9 @@ export class SessionManager implements KTeamService {
             return await this.sendUnlocked(view, message);
           }
         }
-        const successor = this.liveSuccessorFor(view);
-        if (successor) {
-          const successorName = successor.teammate ?? successor.id;
-          throw new Error(
-            `refusing to revive session ${id}: live successor ${successorName} (${successor.id}) already owns ` +
-              `label ${view.config.label} in ${path.resolve(view.config.cwd)}; continue there or stop it first`,
-          );
+        if (effectivePolicy?.dedupeSharedRecoveryScope) {
+          const conflict = this.liveRecoveryScopeConflictFor(view);
+          if (conflict) throw new ReviveDedupeConflict(view.config, conflict);
         }
         // The old monitor must be disarmed before resume deliberately kills or
         // replaces its pane. Otherwise that monitor observes resume's own kill
@@ -5667,7 +5758,9 @@ export class SessionManager implements KTeamService {
         if (!latest || latest.state.status !== 'rate_limited' || signal.aborted) return;
         await this.emit(id, 'quota.available', quota, 'watcher');
         await this.resume(id, 'The account quota is available again. Continue from the persisted conversation.', {
-          status: 'rate_limited',
+          automatic: true,
+          dedupeSharedRecoveryScope: true,
+          expectedStatus: 'rate_limited',
         }).catch(async error => {
           if (!(error instanceof ResumeCancelled))
             await this.emit(id, 'retry.failed', { message: String(error) }, 'watcher');
@@ -5710,7 +5803,9 @@ export class SessionManager implements KTeamService {
         this.retryTimers.delete(id);
         if (this.closed || this.deleting.has(id)) return;
         void this.resume(id, 'The transient failure has cleared. Continue from the persisted conversation.', {
-          status: 'retrying',
+          automatic: true,
+          dedupeSharedRecoveryScope: true,
+          expectedStatus: 'retrying',
           retryAttempt: attempt,
         }).catch(async error => {
           if (!(error instanceof ResumeCancelled) && !this.closed && !this.deleting.has(id)) {

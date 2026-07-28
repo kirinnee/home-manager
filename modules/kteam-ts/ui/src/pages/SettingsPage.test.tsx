@@ -61,6 +61,11 @@ describe('SettingsPage', () => {
     expect(html).toContain('data-bottom-sheet="kt-settings-sheet"');
     expect(html).toContain('role="dialog"');
     expect(html).toContain('aria-label="Close settings"');
+    expect(html).toContain('height:min(90dvh');
+    expect(html).toContain('data-settings-sheet-scroller');
+    expect(html).toContain('overflow-y-auto');
+    expect(html).toContain('overscroll-contain');
+    expect(html).toContain('[touch-action:pan-y]');
     for (const definition of SETTINGS_DEFINITIONS) {
       expect(html).toContain(`data-setting-id="${definition.id}"`);
       expect(html).toContain(`>${definition.label}<`);

@@ -64,6 +64,24 @@ function assistantRecord(content: unknown[], stopReason = 'tool_use'): Record<st
   };
 }
 
+function queuedCommandRecord(prompt: string): Record<string, unknown> {
+  return {
+    parentUuid: '45a35be7-0629-474f-ba2e-de7570558f0a',
+    isSidechain: false,
+    attachment: {
+      type: 'queued_command',
+      prompt,
+      commandMode: 'prompt',
+      origin: { kind: 'human' },
+      timestamp: '2026-07-27T02:00:31.604Z',
+    },
+    type: 'attachment',
+    uuid: 'b4c13ff5-4dcf-40f3-b212-5c3bfb5b8bcc',
+    timestamp: '2026-07-27T02:00:31.604Z',
+    sessionId: SESSION_ID,
+  };
+}
+
 const jsonl = (record: unknown): string => `${JSON.stringify(record)}\n`;
 
 describe('Claude transcript normalization', () => {
@@ -151,6 +169,47 @@ describe('Claude transcript normalization', () => {
       data: { text: 'Fixture user prompt.' },
     });
     expect(normalizeClaudeTranscriptRecord({ type: 'progress', data: { synthetic: true } })).toEqual([]);
+  });
+
+  test('normalizes a consumed human native-queue prompt as chat.user', () => {
+    const events = normalizeClaudeTranscriptRecord(queuedCommandRecord('mission control -- rework it please!'));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      source: 'claude',
+      type: 'chat.user',
+      timestamp: '2026-07-27T02:00:31.604Z',
+      sessionId: SESSION_ID,
+      recordUuid: 'b4c13ff5-4dcf-40f3-b212-5c3bfb5b8bcc',
+      parentUuid: '45a35be7-0629-474f-ba2e-de7570558f0a',
+      data: { text: 'mission control -- rework it please!', nativeQueuedHuman: true },
+    });
+  });
+
+  test('does not turn native-queue bookkeeping or task notifications into human chat', () => {
+    expect(
+      normalizeClaudeTranscriptRecord({
+        type: 'queue-operation',
+        operation: 'enqueue',
+        timestamp: '2026-07-27T02:00:31.604Z',
+        sessionId: SESSION_ID,
+        content: 'mission control -- rework it please!',
+      }),
+    ).toEqual([]);
+
+    const taskNotification = queuedCommandRecord('<task-notification>done</task-notification>');
+    (taskNotification.attachment as Record<string, unknown>).commandMode = 'task-notification';
+    expect(normalizeClaudeTranscriptRecord(taskNotification)).toEqual([]);
+
+    const originlessPrompt = queuedCommandRecord('origin is required');
+    delete (originlessPrompt.attachment as Record<string, unknown>).origin;
+    expect(normalizeClaudeTranscriptRecord(originlessPrompt)).toEqual([]);
+
+    const nonHumanPrompt = queuedCommandRecord('human provenance is required');
+    ((nonHumanPrompt.attachment as Record<string, unknown>).origin as Record<string, unknown>).kind = 'task';
+    expect(normalizeClaudeTranscriptRecord(nonHumanPrompt)).toEqual([]);
+
+    expect(normalizeClaudeTranscriptRecord(queuedCommandRecord('   '))).toEqual([]);
   });
 });
 

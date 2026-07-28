@@ -5,16 +5,11 @@
 // permission prompt, a finished job) is invisible until they look. This module
 // decides WHEN that fact becomes a system notification.
 //
-// WHY LOCAL NOTIFICATIONS AND NOT WEB PUSH. Web Push would deliver with the app
-// fully closed, but it needs VAPID keys, a daemon-side RFC 8291 encrypter, a
-// subscription store and new /v1 routes — all in the most contended files in
-// the tree — and its delivery cannot be verified from this host. Local
-// notifications need none of that: the store already holds ONE WebSocket with
-// every status transition, and `registration.showNotification` fires from a
-// foreground OR backgrounded tab/PWA on desktop and Android (until the OS
-// freezes the page; iOS freezes quickly). That is the honest 90% for a reader
-// who keeps the PWA open; the module is shaped so a phase-2 push sender can
-// reuse classify/plan/payload unchanged.
+// DELIVERY TRANSPORTS. The existing WebSocket is the foreground fast path and
+// uses this core while the page is alive. Real Web Push reuses the same payload
+// identity when the installed PWA is suspended or closed. One deterministic
+// eventKey plus one OS tag per session lets the presentation layer collapse the
+// transport twins instead of buzzing twice.
 //
 // SPLIT: everything here is a pure function or an in-memory ledger — no DOM, no
 // Notification global, no store import — so bun:test covers every decision.
@@ -23,6 +18,7 @@
 // the service worker (sw/notify.ts).
 
 import type { SessionStatus, SessionView } from '../types';
+import { displayCallsign } from './callsign';
 
 // ---------------------------------------------------------------------------
 // Preferences
@@ -170,13 +166,19 @@ export function classifyTransition(prev: SessionStatus | undefined, next: Sessio
  *  notification (the brief's ten-second case, with margin — status flaps
  *  around a turn boundary are common). */
 export const NOTIFY_COOLDOWN_MS = 60_000;
+/** Recent updates to one conversation share a rolling count. The OS-level
+ * notification itself is the unread boundary: dismiss/tap removes it, while
+ * this window preserves context when the push service collapses queued payloads
+ * before a sleeping phone wakes. */
+export const NOTIFY_GROUP_WINDOW_MS = 15 * 60_000;
 
 /** Per-session status baseline + per-(session, kind) cooldown. In-memory on
  *  purpose: a reload re-baselines silently, which is the safe direction —
  *  a missed notification costs a glance, a re-notified storm costs trust. */
 export class NotifyLedger {
   private statuses = new Map<string, SessionStatus>();
-  private fired = new Map<string, number>();
+  private fired = new Map<string, { at: number; eventKey: string }>();
+  private groups = new Map<string, { at: number; count: number }>();
 
   status(id: string): SessionStatus | undefined {
     return this.statuses.get(id);
@@ -186,13 +188,28 @@ export class NotifyLedger {
     this.statuses.set(id, status);
   }
 
-  /** True (and records the firing) when (id, kind) is outside the cooldown. */
-  shouldFire(id: string, kind: NotifyKind, at: number, cooldownMs = NOTIFY_COOLDOWN_MS): boolean {
+  /** True (and records the firing) unless this is the SAME logical transition
+   * inside the cooldown. A new turn/question key is allowed immediately so
+   * sequential messages update the grouped notification instead of vanishing. */
+  shouldFire(
+    id: string,
+    kind: NotifyKind,
+    at: number,
+    eventKey = `${id}:${kind}`,
+    cooldownMs = NOTIFY_COOLDOWN_MS,
+  ): boolean {
     const key = `${id}\n${kind}`;
     const last = this.fired.get(key);
-    if (last !== undefined && at - last < cooldownMs) return false;
-    this.fired.set(key, at);
+    if (last !== undefined && last.eventKey === eventKey && at - last.at < cooldownMs) return false;
+    this.fired.set(key, { at, eventKey });
     return true;
+  }
+
+  nextGroupCount(id: string, at: number, windowMs = NOTIFY_GROUP_WINDOW_MS): number {
+    const previous = this.groups.get(id);
+    const count = !previous || at - previous.at > windowMs ? 1 : Math.min(100, previous.count + 1);
+    this.groups.set(id, { at, count });
+    return count;
   }
 
   /** Drop state for sessions that left the list, so a long-lived tab watching
@@ -203,6 +220,7 @@ export class NotifyLedger {
       const id = key.slice(0, key.indexOf('\n'));
       if (!liveIds.has(id)) this.fired.delete(key);
     }
+    for (const id of this.groups.keys()) if (!liveIds.has(id)) this.groups.delete(id);
   }
 }
 
@@ -213,8 +231,7 @@ export class NotifyLedger {
 export interface NotificationSpec {
   title: string;
   body: string;
-  /** Same tag = the OS replaces rather than stacks, so a flap that beat the
-   *  cooldown still cannot pile up. Per (session, kind). */
+  /** Same tag = one Telegram-style conversation entry per session. */
   tag: string;
   /** SPA path the click deep-links to. Carried in `Notification.data` and
    *  resolved by the service worker's notificationclick (sw/notify.ts). */
@@ -222,6 +239,11 @@ export interface NotificationSpec {
   /** Absent on the burst summary. */
   sessionId?: string;
   kind?: NotifyKind;
+  /** Deterministic across WebSocket and Web Push for the same transition. */
+  eventKey: string;
+  /** Number of recent lines collapsed into this conversation. `body` remains
+   * the latest line; the presentation layer appends "+N more". */
+  count: number;
 }
 
 const QUESTION_PREVIEW_LEN = 120;
@@ -247,17 +269,32 @@ function bodyFor(view: SessionView, kind: NotifyKind): string {
   }
 }
 
-export function buildNotification(view: SessionView, kind: NotifyKind): NotificationSpec {
+export function notificationEventKey(view: SessionView, kind: NotifyKind): string {
+  const question = kind === 'question' ? (view.state.pendingQuestion?.toolUseId ?? '') : '';
+  return [view.config.id, kind, view.state.status, String(view.state.turn), question].join(':');
+}
+
+export function notificationTitle(view: SessionView): string {
   const id = view.config.id;
-  const teammate = view.config.teammate;
-  const name = view.config.name || id;
+  const task = view.config.name?.trim() || id;
+  // Older sessions can already carry a composed title. Preserve it verbatim so
+  // the callsign is never doubled into `[Noel] [Noel] …`.
+  if (task.startsWith('[')) return task;
+  const callsign = displayCallsign(view.config.teammate);
+  return callsign ? `[${callsign}] ${task}` : task;
+}
+
+export function buildNotification(view: SessionView, kind: NotifyKind, count = 1): NotificationSpec {
+  const id = view.config.id;
   return {
-    title: teammate && !name.includes(teammate) ? `${teammate} — ${name}` : name,
+    title: notificationTitle(view),
     body: bodyFor(view, kind),
-    tag: `kteam-${id}-${kind}`,
+    tag: `kteam-${id}`,
     url: `/session/${encodeURIComponent(id)}`,
     sessionId: id,
     kind,
+    eventKey: notificationEventKey(view, kind),
+    count: Math.max(1, Math.min(100, Math.floor(count))),
   };
 }
 
@@ -275,12 +312,26 @@ export const NOTIFY_BURST_LIMIT = 3;
 
 export const SUMMARY_TAG = 'kteam-summary';
 
-export function summaryNotification(count: number): NotificationSpec {
+/** Portable FNV-1a over sorted member keys. The daemon uses the same function
+ * shape, so a WebSocket summary and its Web Push twin share one event key. */
+export function fleetNotificationEventKey(eventKeys: readonly string[]): string {
+  let hash = 0x811c9dc5;
+  const joined = [...eventKeys].sort().join('\n');
+  for (let index = 0; index < joined.length; index += 1) {
+    hash ^= joined.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `fleet:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+export function summaryNotification(count: number, eventKey = `fleet-summary:${count}`): NotificationSpec {
   return {
     title: 'kteam',
     body: `${count} sessions need your attention.`,
     tag: SUMMARY_TAG,
     url: '/',
+    eventKey,
+    count: 1,
   };
 }
 
@@ -304,11 +355,15 @@ export function planNotifications(
     if (!kind) continue;
     if (!prefs.enabled || !prefs.events[kind]) continue;
     if (prefs.interactiveOnly && view.config.mode !== 'interactive') continue;
-    if (!ledger.shouldFire(id, kind, at)) continue;
-    specs.push(buildNotification(view, kind));
+    const eventKey = notificationEventKey(view, kind);
+    if (!ledger.shouldFire(id, kind, at, eventKey)) continue;
+    specs.push(buildNotification(view, kind, ledger.nextGroupCount(id, at)));
   }
   ledger.prune(live);
-  if (specs.length > NOTIFY_BURST_LIMIT) return [summaryNotification(specs.length)];
+  if (specs.length > NOTIFY_BURST_LIMIT) {
+    const summaryKey = fleetNotificationEventKey(specs.map(spec => spec.eventKey));
+    return [summaryNotification(specs.length, summaryKey)];
+  }
   return specs;
 }
 

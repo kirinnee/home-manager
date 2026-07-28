@@ -118,6 +118,46 @@ interface InAppBrowserSurfaceProps {
   titleId: string;
 }
 
+export interface InAppBrowserFrameProps {
+  destination: BrowserDestination;
+}
+
+/** The deployed iframe engine, without browser chrome. The unified Browser
+ *  surface reuses this exact body while owning the shared address/navigation
+ *  controls around it. Keeping the loopback guard and sandbox here prevents
+ *  the two hosts from drifting apart. */
+export function InAppBrowserFrame({ destination }: InAppBrowserFrameProps) {
+  if (destination.scope !== 'device-loopback') {
+    return (
+      <div className="min-h-0 flex-1 bg-surface-2">
+        <iframe
+          src={destination.href}
+          title={`Embedded view of ${destination.hostname}`}
+          className="block h-full min-h-[240px] w-full border-0 bg-surface-2"
+          loading="eager"
+          referrerPolicy="no-referrer"
+          sandbox="allow-downloads allow-forms allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center bg-surface-2 px-panel py-8 text-center">
+      <div className="max-w-sm">
+        <Smartphone size={30} aria-hidden="true" className="mx-auto text-accent" />
+        <h2 className="mb-0 mt-3 font-display text-title font-semibold tracking-display text-fg">
+          This address is on your phone
+        </h2>
+        <p className="mb-0 mt-2 text-ui leading-base text-muted">
+          Through the app's tunnel, localhost and loopback addresses point to this phone—not the agent's machine. This
+          preview cannot reach that dev server.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /** Exported for the unified SidePane host (SidePane.tsx), which re-hosts this
  *  exact surface — content only; the host owns the pane/sheet shells. */
 export function InAppBrowserSurface({ destination, onClose, presentation, titleId }: InAppBrowserSurfaceProps) {
@@ -177,31 +217,7 @@ export function InAppBrowserSurface({ destination, onClose, presentation, titleI
         )}
       </header>
 
-      {frameAllowed ? (
-        <div className="min-h-0 flex-1 bg-surface-2">
-          <iframe
-            src={destination.href}
-            title={`Embedded view of ${destination.hostname}`}
-            className="block h-full min-h-[240px] w-full border-0 bg-surface-2"
-            loading="eager"
-            referrerPolicy="no-referrer"
-            sandbox="allow-downloads allow-forms allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
-          />
-        </div>
-      ) : (
-        <div className="flex min-h-0 flex-1 items-center justify-center bg-surface-2 px-panel py-8 text-center">
-          <div className="max-w-sm">
-            <Smartphone size={30} aria-hidden="true" className="mx-auto text-accent" />
-            <h2 className="mb-0 mt-3 font-display text-title font-semibold tracking-display text-fg">
-              This address is on your phone
-            </h2>
-            <p className="mb-0 mt-2 text-ui leading-base text-muted">
-              Through the app's tunnel, localhost and loopback addresses point to this phone—not the agent's machine.
-              This preview cannot reach that dev server.
-            </p>
-          </div>
-        </div>
-      )}
+      <InAppBrowserFrame destination={destination} />
 
       <footer className="shrink-0 border-t border-border-soft bg-surface px-panel py-2">
         <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] gap-sm">

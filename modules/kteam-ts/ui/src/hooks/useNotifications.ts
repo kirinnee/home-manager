@@ -14,13 +14,13 @@
 // them, Safari hard-requires a gesture), and the human asked for quiet by
 // default anyway.
 //
-// DELIVERY PATH. `registration.showNotification` when a service worker is
-// registered (survives the page being backgrounded; clicks land in the worker,
-// which deep-links — sw/notify.ts), else `new Notification` with an onclick
-// (dev server / no worker), else nothing. Truthful capability reporting: the
-// Settings section shows "unsupported" rather than a switch that cannot work.
+// DELIVERY PATHS. The live WebSocket presents through the registered worker
+// while the page exists. A daemon-sent encrypted push reaches that same worker
+// when the installed PWA is suspended or closed. Both carry one eventKey/tag;
+// `renotify:false` makes a transport twin a silent replacement. A page-level
+// Notification constructor remains only the no-worker development fallback.
 
-import { useCallback, useEffect, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { useStore } from '../lib/store';
 import { navigate } from '../lib/router';
 import { getForegroundSession } from '../lib/pin-bridge';
@@ -32,6 +32,8 @@ import {
   type NotificationSpec,
   type NotifyPrefs,
 } from '../lib/notify';
+import { applicationServerKey, pushApi, type PushDeviceView } from '../lib/push-api';
+import { groupedNotificationBody, showGroupedNotification } from '../../sw/notify';
 
 /** `Notification.permission`, or 'unsupported' where the API is absent
  *  (iOS Safari outside an installed PWA is the case that matters here). */
@@ -81,18 +83,19 @@ export async function showNotification(spec: NotificationSpec): Promise<void> {
         ? await navigator.serviceWorker.getRegistration()
         : null;
     if (registration) {
-      await registration.showNotification(spec.title, {
-        body: spec.body,
-        tag: spec.tag,
-        data: { url: spec.url },
-      });
+      await showGroupedNotification(registration, { version: 1, ...spec });
       return;
     }
   } catch {
     /* fall through to the page-level constructor */
   }
   try {
-    const notification = new Notification(spec.title, { body: spec.body, tag: spec.tag });
+    const options: NotificationOptions & { renotify: boolean } = {
+      body: groupedNotificationBody(spec.body, spec.count),
+      tag: spec.tag,
+      renotify: false,
+    };
+    const notification = new Notification(spec.title, options);
     notification.onclick = () => {
       window.focus();
       navigate(spec.url);
@@ -143,33 +146,222 @@ export interface NotifyControls {
    *  leaves the switch off so the UI never claims a capability it lacks. */
   setEnabled: (enabled: boolean) => Promise<void>;
   update: (patch: Partial<NotifyPrefs>) => void;
+  push: PushControlState;
+  /** Admin-token-gated, per-device revocation. Revoking this browser also
+   * unsubscribes its PushManager endpoint and turns the local master off. */
+  revokeDevice: (id: string) => Promise<void>;
+  refreshPush: () => Promise<void>;
+}
+
+export type PushControlMode = 'checking' | 'active' | 'local-only' | 'unsupported';
+
+export interface PushControlState {
+  mode: PushControlMode;
+  devices: PushDeviceView[];
+  currentDeviceId: string | null;
+  message?: string;
+}
+
+export const PUSH_DEVICE_KEY = 'kteam-ui-push-device-v1';
+
+function currentDeviceId(): string | null {
+  try {
+    return localStorage.getItem(PUSH_DEVICE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberDevice(id: string | null): void {
+  try {
+    if (id) localStorage.setItem(PUSH_DEVICE_KEY, id);
+    else localStorage.removeItem(PUSH_DEVICE_KEY);
+  } catch {
+    /* private mode: endpoint still works; the next load re-identifies by endpoint */
+  }
+}
+
+export function supportsWebPush(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    window.isSecureContext &&
+    typeof navigator !== 'undefined' &&
+    'serviceWorker' in navigator &&
+    typeof PushManager !== 'undefined'
+  );
+}
+
+function deviceName(): string {
+  if (typeof navigator === 'undefined') return 'Browser device';
+  return navigator.platform?.trim() || 'Browser device';
+}
+
+async function serviceWorkerRegistration(): Promise<ServiceWorkerRegistration> {
+  if (!supportsWebPush()) throw new Error('Web Push needs a secure context and a service worker');
+  return await Promise.race([
+    navigator.serviceWorker.ready,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('service worker is not ready')), 5_000)),
+  ]);
+}
+
+async function registerPush(
+  prefs: NotifyPrefs,
+  create: boolean,
+): Promise<{ device: PushDeviceView; subscription: PushSubscription }> {
+  const registration = await serviceWorkerRegistration();
+  let subscription = await registration.pushManager.getSubscription();
+  if (!subscription && create) {
+    const publicKey = await pushApi.vapid();
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: applicationServerKey(publicKey),
+    });
+  }
+  if (!subscription) throw new Error('this browser has no push subscription');
+  const device = await pushApi.register(subscription, deviceName(), prefs);
+  rememberDevice(device.id);
+  return { device, subscription };
 }
 
 export function useNotifyControls(): NotifyControls {
   const prefs = useNotifyPrefs();
   const perm = useSyncExternalStore(subscribePermission, permission, () => 'unsupported' as const);
+  const [push, setPush] = useState<PushControlState>(() => ({
+    mode: supportsWebPush() ? 'checking' : 'unsupported',
+    devices: [],
+    currentDeviceId: null,
+  }));
 
-  const setEnabled = useCallback(async (enabled: boolean) => {
-    if (!enabled) {
-      setNotifyPrefs({ enabled: false });
+  const refreshPush = useCallback(async () => {
+    if (!supportsWebPush()) {
+      setPush({
+        mode: 'unsupported',
+        devices: [],
+        currentDeviceId: null,
+        message: 'Real Web Push is unavailable here; local notifications still work while the app is alive.',
+      });
       return;
     }
-    if (typeof Notification === 'undefined') return;
-    let state: NotificationPermission = Notification.permission;
-    if (state === 'default') {
-      try {
-        state = await Notification.requestPermission();
-      } catch {
-        state = Notification.permission;
+    setPush(current => ({ ...current, mode: 'checking', message: undefined }));
+    try {
+      let id = currentDeviceId();
+      if (getNotifyPrefs().enabled && Notification.permission === 'granted') {
+        const registered = await registerPush(getNotifyPrefs(), false).catch(() => null);
+        if (registered) id = registered.device.id;
       }
+      const devices = await pushApi.list();
+      setPush({
+        mode: id && devices.some(device => device.id === id) ? 'active' : 'local-only',
+        devices,
+        currentDeviceId: id,
+        ...(id && devices.some(device => device.id === id)
+          ? {}
+          : { message: 'Local fallback only on this device; closed-app delivery is not active.' }),
+      });
+    } catch (error) {
+      setPush({
+        mode: 'local-only',
+        devices: [],
+        currentDeviceId: currentDeviceId(),
+        message: error instanceof Error ? error.message : 'Could not reach the daemon push service.',
+      });
     }
-    refreshPermission();
-    setNotifyPrefs({ enabled: state === 'granted' });
   }, []);
 
-  const update = useCallback((patch: Partial<NotifyPrefs>) => {
-    setNotifyPrefs(patch);
-  }, []);
+  useEffect(() => {
+    void refreshPush();
+  }, [refreshPush, prefs.enabled, prefs.events, prefs.interactiveOnly]);
 
-  return { prefs, permission: perm, setEnabled, update };
+  const setEnabled = useCallback(
+    async (enabled: boolean) => {
+      if (!enabled) {
+        setNotifyPrefs({ enabled: false });
+        const id = currentDeviceId();
+        rememberDevice(null);
+        try {
+          if (id) await pushApi.revoke(id);
+        } catch {
+          // Unsubscribe locally anyway. A daemon copy left by an offline revoke
+          // is removed on the next 404/410 response from the push service.
+        }
+        try {
+          const registration = supportsWebPush() ? await serviceWorkerRegistration() : null;
+          await (await registration?.pushManager.getSubscription())?.unsubscribe();
+        } catch {
+          /* already absent / browser refused cleanup */
+        }
+        await refreshPush();
+        return;
+      }
+      if (typeof Notification === 'undefined') return;
+      let state: NotificationPermission = Notification.permission;
+      if (state === 'default') {
+        try {
+          state = await Notification.requestPermission();
+        } catch {
+          state = Notification.permission;
+        }
+      }
+      refreshPermission();
+      if (state !== 'granted') {
+        setNotifyPrefs({ enabled: false });
+        return;
+      }
+      const next = setNotifyPrefs({ enabled: true });
+      setPush(current => ({ ...current, mode: 'checking', message: undefined }));
+      try {
+        const registered = await registerPush(next, true);
+        const devices = await pushApi.list();
+        setPush({ mode: 'active', devices, currentDeviceId: registered.device.id });
+      } catch (error) {
+        // Permission still has value: preserve the WebSocket/local path and say
+        // plainly that closed-app delivery did not provision.
+        setPush({
+          mode: supportsWebPush() ? 'local-only' : 'unsupported',
+          devices: [],
+          currentDeviceId: currentDeviceId(),
+          message: error instanceof Error ? error.message : 'Could not create a Web Push subscription.',
+        });
+      }
+    },
+    [refreshPush],
+  );
+
+  const update = useCallback(
+    (patch: Partial<NotifyPrefs>) => {
+      const next = setNotifyPrefs(patch);
+      if (next.enabled && Notification.permission === 'granted') {
+        void registerPush(next, false)
+          .then(() => refreshPush())
+          .catch(error =>
+            setPush(current => ({
+              ...current,
+              mode: 'local-only',
+              message: error instanceof Error ? error.message : 'Could not sync push preferences.',
+            })),
+          );
+      }
+    },
+    [refreshPush],
+  );
+
+  const revokeDevice = useCallback(
+    async (id: string) => {
+      await pushApi.revoke(id);
+      if (id === currentDeviceId()) {
+        rememberDevice(null);
+        setNotifyPrefs({ enabled: false });
+        try {
+          const registration = await serviceWorkerRegistration();
+          await (await registration.pushManager.getSubscription())?.unsubscribe();
+        } catch {
+          /* endpoint is already revoked server-side */
+        }
+      }
+      await refreshPush();
+    },
+    [refreshPush],
+  );
+
+  return { prefs, permission: perm, setEnabled, update, push, revokeDevice, refreshPush };
 }

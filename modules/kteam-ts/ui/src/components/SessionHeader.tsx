@@ -53,6 +53,7 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  ChartNoAxesCombined,
   ChevronLeft,
   FolderGit2,
   ListTodo,
@@ -269,6 +270,11 @@ export const SessionHeader = memo(function SessionHeader({
       {filesAvailable && (
         <SidePaneTrigger surface="files" label="Files" icon={<FolderGit2 size={16} aria-hidden="true" />} />
       )}
+      <SidePaneTrigger
+        surface="analytics"
+        label="Analytics"
+        icon={<ChartNoAxesCombined size={16} aria-hidden="true" />}
+      />
       <SidePaneTrigger surface="tasks" label="Tasks" icon={<ListTodo size={16} aria-hidden="true" />} />
     </>
   );
@@ -364,6 +370,21 @@ export const SessionHeader = memo(function SessionHeader({
         >
           <FolderGit2 size={14} aria-hidden="true" />
           Files
+        </button>
+      )}
+      {sidePane && (
+        <button
+          type="button"
+          onClick={() => {
+            setDetailsOpen(false);
+            requestAnimationFrame(() => sidePane.open('analytics'));
+          }}
+          aria-label="Open analytics"
+          title="Session and parent-tree usage and cost"
+          className="kt-btn inline-flex min-h-[44px] items-center gap-sm"
+        >
+          <ChartNoAxesCombined size={14} aria-hidden="true" />
+          Analytics
         </button>
       )}
       {sidePane && (

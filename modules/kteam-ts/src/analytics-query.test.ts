@@ -27,10 +27,15 @@ describe('analytics query language', () => {
   });
 
   test('supports bounded raw filtering and quoted commas', () => {
-    const parsed = parseAnalyticsQuery(`{cwd='/tmp/a,b', wrapper=~claude-auto-*, label=don't-ship}`);
+    const parsed = parseAnalyticsQuery(`{id=session-1, cwd='/tmp/a,b', wrapper=~claude-auto-*, label=don't-ship}`);
     expect(parsed.aggregation).toBeUndefined();
     expect(parsed.groupBy).toEqual([]);
-    expect(parsed.matchers.map(matcher => matcher.value)).toEqual(['/tmp/a,b', 'claude-auto-*', "don't-ship"]);
+    expect(parsed.matchers.map(matcher => matcher.value)).toEqual([
+      'session-1',
+      '/tmp/a,b',
+      'claude-auto-*',
+      "don't-ship",
+    ]);
     expect(parseAnalyticsQuery(`{cwd="/tmp/o'brien,a"}`).matchers[0]?.value).toBe("/tmp/o'brien,a");
   });
 

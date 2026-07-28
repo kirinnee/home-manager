@@ -643,6 +643,8 @@ program
       // and fall back to the status-based guess.
       if (view.disposition === 'queued')
         console.log("queued in the TUI's native queue (auto-submits at the turn boundary)");
+      else if (view.disposition === 'queued-for-revive')
+        console.log('queued durably in the session inbox; explicit resume remains available');
       else if (view.disposition === 'revived') console.log('revived session with message');
       else if (view.disposition === 'delivered') console.log('delivered');
       else {
@@ -656,7 +658,9 @@ program
       // the peer was never given. The daemon ends the park the moment that peer
       // sends back — no polling, and the reflex layer treats the park as
       // healthy for its whole duration.
-      if (options.ask && self) {
+      if (options.ask && self && view.disposition === 'queued-for-revive') {
+        console.error('recipient was not revived; caller was not parked because no running agent received the message');
+      } else if (options.ask && self) {
         await api.signal(self, 'waiting', undefined, {
           peer: id,
           ...(options.until ? { until: options.until } : {}),

@@ -3,9 +3,32 @@
 // and the same reason: these must run on a clean checkout.
 
 import { describe, expect, test } from 'bun:test';
-import { alreadyAt, planClick, runClick, targetPath, type ClientLike } from './notify';
+import {
+  alreadyAt,
+  groupedNotificationBody,
+  parsePushPayload,
+  planClick,
+  planNotificationPresentation,
+  runClick,
+  showGroupedNotification,
+  targetPath,
+  type ClientLike,
+  type PushNotificationPayload,
+} from './notify';
 
 const ORIGIN = 'https://kteam.example.com';
+
+const payload: PushNotificationPayload = {
+  version: 1,
+  eventKey: 's1:question:awaiting_question:2:q2',
+  title: '[Noel] Diene Exec',
+  body: 'Use the new release?',
+  tag: 'kteam-s1',
+  url: '/session/s1',
+  count: 1,
+  sessionId: 's1',
+  kind: 'question',
+};
 
 interface FakeClient extends ClientLike {
   focused: boolean;
@@ -41,6 +64,52 @@ describe('targetPath', () => {
     expect(targetPath({ url: 42 })).toBe('/');
     expect(targetPath({ url: 'https://evil.example.com/x' })).toBe('/');
     expect(targetPath({ url: '//evil.example.com/x' })).toBe('/');
+  });
+});
+
+describe('push payload and grouped presentation', () => {
+  test('accepts the bounded same-origin contract and rejects arbitrary URLs/tags/counts', () => {
+    expect(parsePushPayload(payload)).toEqual(payload);
+    expect(parsePushPayload({ ...payload, url: 'https://evil.example/x' })).toBeNull();
+    expect(parsePushPayload({ ...payload, tag: 'other-s1' })).toBeNull();
+    expect(parsePushPayload({ ...payload, count: 0 })).toBeNull();
+    expect(parsePushPayload({ ...payload, kind: 'surprise' })).toBeNull();
+  });
+
+  test('latest line plus count reads like one Telegram conversation', () => {
+    expect(groupedNotificationBody('Latest line', 1)).toBe('Latest line');
+    expect(groupedNotificationBody('Latest line', 4)).toBe('Latest line\n+3 more');
+  });
+
+  test('same event key is the WebSocket/push twin and is skipped', () => {
+    expect(planNotificationPresentation(payload, [{ eventKey: payload.eventKey, count: 1 }])).toEqual({
+      action: 'skip',
+    });
+  });
+
+  test('a later line replaces silently with the highest honest collapsed count', () => {
+    const plan = planNotificationPresentation({ ...payload, eventKey: 'next', count: 2, body: 'Latest' }, [
+      { eventKey: payload.eventKey, count: 3 },
+    ]);
+    expect(plan).toMatchObject({ action: 'show', count: 4, body: 'Latest\n+3 more' });
+  });
+
+  test('showGroupedNotification uses one tag and renotify=false', async () => {
+    const shown: Array<{ title: string; options?: NotificationOptions & { renotify?: boolean } }> = [];
+    const result = await showGroupedNotification(
+      {
+        getNotifications: async () => [{ data: { eventKey: 'old', count: 1 } }],
+        showNotification: async (title, options) => {
+          shown.push({ title, options });
+        },
+      },
+      { ...payload, eventKey: 'new', count: 2 },
+    );
+    expect(result).toBe('shown');
+    expect(shown[0]).toMatchObject({
+      title: '[Noel] Diene Exec',
+      options: { tag: 'kteam-s1', renotify: false, body: 'Use the new release?\n+1 more' },
+    });
   });
 });
 

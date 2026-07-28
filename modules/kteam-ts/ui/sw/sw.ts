@@ -31,7 +31,7 @@
 
 import { PRECACHE_URLS, RELEASE_ID } from './precache.gen';
 import { activateRelease, fetchPolicy, installRelease, respond } from './policy';
-import { planClick, runClick, targetPath } from './notify';
+import { parsePushPayload, planClick, runClick, showGroupedNotification, targetPath } from './notify';
 
 /* `lib: WebWorker` types `self` as WorkerGlobalScope, which lacks
    skipWaiting/clients/the extendable events. Casting once here keeps every use
@@ -83,11 +83,34 @@ export function registerWorkerEvents(sw: ServiceWorkerGlobalScope): void {
     }
   });
 
+  sw.addEventListener('push', event => {
+    event.waitUntil(
+      (async () => {
+        let decoded: unknown;
+        try {
+          decoded = event.data ? JSON.parse(event.data.text()) : null;
+        } catch {
+          return;
+        }
+        const payload = parsePushPayload(decoded);
+        if (!payload) return;
+
+        // Foreground WebSocket delivery is the fast path. A visible client
+        // already has the live status and, when the reader opted into visible
+        // notifications, the page owns that presentation. Suppressing push
+        // here prevents two banners for the same daemon transition.
+        const windows = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
+        if (windows.some(client => client.visibilityState === 'visible')) return;
+        await showGroupedNotification(sw.registration, payload);
+      })(),
+    );
+  });
+
   sw.addEventListener('notificationclick', event => {
-    // Notifications are SHOWN by the page (registration.showNotification, with
-    // the session's SPA path in notification.data.url — hooks/useNotifications).
-    // Clicks land here, possibly with no page open at all: focus an existing
-    // app window and deep-link it, or open a new one. Decisions in
+    // Notifications are shown by the page's WebSocket fast path OR this
+    // worker's Push path, both with the session SPA path in data.url. Clicks
+    // land here, possibly with no page open at all: focus an existing app
+    // window and deep-link it, or open a new one. Decisions in
     // sw/notify.ts, tested without a worker scope; nothing here touches
     // CacheStorage. `includeUncontrolled` because the first-visit page is
     // deliberately never claimed (see the header note on clients.claim).

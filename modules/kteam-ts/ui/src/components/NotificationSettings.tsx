@@ -30,7 +30,10 @@ export const NOTIFY_DENIED_NOTE =
   'Notifications are blocked for this site in the browser. Allow them in the browser’s site settings, then come back and turn this on.';
 
 export const NOTIFY_SCOPE_NOTE =
-  'Notifications fire while this app is open or in the background. If the device closes the app completely, you will catch up here instead.';
+  'The WebSocket is the fast path while the app is alive; Web Push covers backgrounded or fully closed. Both use one session tag, so the same event appears once.';
+
+export const NOTIFY_IOS_NOTE =
+  'On iPhone or iPad, real Web Push requires iOS/iPadOS 16.4+ and this PWA installed to the Home Screen. An ordinary Safari tab cannot receive it. Every browser also requires a secure HTTPS context; the Cloudflare tunnel satisfies that requirement.';
 
 function Toggle({
   checked,
@@ -87,7 +90,7 @@ export function NotificationSettings() {
 /** The render half, over explicit controls — so tests can put every branch on
  *  screen without a Notification global (same split as the SW policy files). */
 export function NotificationSettingsView({ controls }: { controls: NotifyControls }) {
-  const { prefs, permission, setEnabled, update } = controls;
+  const { prefs, permission, setEnabled, update, push, revokeDevice } = controls;
 
   if (permission === 'unsupported') {
     return (
@@ -142,6 +145,46 @@ export function NotificationSettingsView({ controls }: { controls: NotifyControl
         </>
       )}
       <p className="m-0 text-meta leading-base text-faint">{NOTIFY_SCOPE_NOTE}</p>
+      <p className="m-0 text-meta leading-base text-faint">{NOTIFY_IOS_NOTE}</p>
+      {permission === 'granted' && (
+        <p
+          role="status"
+          className={cn(
+            'm-0 text-ui leading-base',
+            push.mode === 'active' ? 'text-ok' : push.mode === 'checking' ? 'text-muted' : 'text-warn',
+          )}
+        >
+          {push.mode === 'active'
+            ? 'Real Web Push is active for this device — closed-app delivery is ready.'
+            : push.mode === 'checking'
+              ? 'Checking closed-app Web Push…'
+              : (push.message ?? 'Local notification fallback only; closed-app delivery is not active on this device.')}
+        </p>
+      )}
+      {push.devices.length > 0 && (
+        <div className="flex flex-col gap-1" aria-label="Push devices">
+          <span className="text-meta font-semibold text-muted">Registered devices</span>
+          {push.devices.map(device => (
+            <div
+              key={device.id}
+              className="flex min-h-[44px] items-center justify-between gap-3 rounded-control border border-border bg-surface-2 px-control-x py-1"
+            >
+              <span className="min-w-0 text-ui text-fg">
+                {device.deviceName}
+                {device.id === push.currentDeviceId ? <span className="text-faint"> · this device</span> : null}
+              </span>
+              <button
+                type="button"
+                className="min-h-[44px] shrink-0 rounded-control px-2 text-ui font-semibold text-warn hover:bg-warn-bg"
+                onClick={() => void revokeDevice(device.id)}
+                aria-label={`Revoke push notifications for ${device.deviceName}`}
+              >
+                Revoke
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

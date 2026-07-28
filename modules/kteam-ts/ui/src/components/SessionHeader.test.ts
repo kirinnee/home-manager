@@ -52,6 +52,15 @@ describe('mobile Settings entry', () => {
   });
 });
 
+describe('analytics side-pane entry', () => {
+  test('is directly reachable on desktop and through the phone details sheet', async () => {
+    const source = await Bun.file(new URL('./SessionHeader.tsx', import.meta.url).pathname).text();
+    expect(source).toContain('surface="analytics"');
+    expect(source).toContain("requestAnimationFrame(() => sidePane.open('analytics'))");
+    expect(source).toContain('aria-label="Open analytics"');
+  });
+});
+
 describe('session top-bar identity', () => {
   test('makes the task primary and the callsign secondary on named sessions', () => {
     expect(sessionHeaderIdentity('Fix transcript scrolling', 'ada', 'session-id', 'batch')).toEqual({

@@ -2,7 +2,7 @@
 // banner when the daemon didn't substitute a token (i.e. we're on a non-loopback
 // origin).
 
-import { GraduationCap, ListTodo, RefreshCw, Search, Settings, ShieldCheck } from 'lucide-react';
+import { GraduationCap, RefreshCw, Search, Settings, ShieldCheck } from 'lucide-react';
 import { Link } from '../lib/router';
 import { ThemeToggle } from './ThemeToggle';
 import { HAS_TOKEN } from '../lib/api';
@@ -50,11 +50,6 @@ export const WARDEN_ENTRY = {
   title: 'Open fleet supervision and verdicts',
 } as const;
 
-export const TASKS_ENTRY = {
-  label: 'Tasks',
-  title: 'Open the task board',
-} as const;
-
 export const LEARNING_ENTRY = {
   label: 'Learning',
   title: 'Open fleet learning proposals',
@@ -68,7 +63,6 @@ export function AppBar({
   onApplyUpdate,
   settingsActive = false,
   wardenActive = false,
-  tasksActive = false,
   learningActive = false,
   showTheme = true,
 }: {
@@ -86,7 +80,6 @@ export function AppBar({
   onApplyUpdate?: () => void;
   settingsActive?: boolean;
   wardenActive?: boolean;
-  tasksActive?: boolean;
   learningActive?: boolean;
   /** The flat Settings page owns theme controls while it is active. */
   showTheme?: boolean;
@@ -175,7 +168,7 @@ export function AppBar({
           <Search size={11} aria-hidden="true" />
           <span className="mono">{paletteShortcutLabel()}</span>
         </button>
-        {/* Small desktop destination tabs. Drawer/rail widths get the same two
+        {/* Small desktop destination tabs. Drawer/rail widths get the same
             destinations inside the fleet sidebar, so the top bar does not turn
             into a second navigation row on a phone. The complete nav IA remains
             a later batch. */}
@@ -183,16 +176,6 @@ export function AppBar({
             the stylesheet than Tailwind's `.hidden`, so putting both classes
             on one anchor makes the button win and leak into 390px chrome. */}
         <nav aria-label="Destinations" className="hidden shrink-0 items-center gap-xs min-[1100px]:flex">
-          <Link
-            to="/tasks"
-            aria-current={tasksActive ? 'page' : undefined}
-            aria-label={TASKS_ENTRY.label}
-            title={TASKS_ENTRY.title}
-            className="kt-btn kt-btn--sm shrink-0 items-center gap-xs"
-          >
-            <ListTodo size={14} aria-hidden="true" />
-            <span className="text-meta font-medium">Tasks</span>
-          </Link>
           <Link
             to="/warden"
             aria-current={wardenActive ? 'page' : undefined}

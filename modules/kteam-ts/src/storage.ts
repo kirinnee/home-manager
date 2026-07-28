@@ -106,9 +106,16 @@ const DEFAULT_TERMINAL_STATUSES: readonly string[] = ['completed', 'failed', 'st
  *  a file we already have. Now kteam journals only what the harness does NOT
  *  record (its own control/lifecycle events) and transforms the rest on read.
  *
- *  The journals are authoritative and the DB is derived, so a database from an
- *  older generation is deleted and rebuilt rather than migrated. */
-const SCHEMA_VERSION = 4;
+ *  v5 versions each chat source by the normalizer semantics that produced its
+ *  pointers. A parser can begin recognizing a previously-silent harness record
+ *  without the transcript's inode/size/mtime changing; old source rows must not
+ *  suppress the one lazy rescan that discovers those new chat events.
+ *
+ *  The journals are authoritative and the DB is derived, so only explicitly
+ *  additive generations migrate in place; any other generation is deleted and
+ *  rebuilt from source files. */
+const SCHEMA_VERSION = 5;
+const CHAT_NORMALIZER_VERSION = 2;
 
 interface EventPointerRow {
   byte_offset: number;
@@ -424,7 +431,8 @@ export class EventStore {
     }
   }
 
-  /** Open the index, DISCARDING any database from another schema generation.
+  /** Open the index, migrating known-additive schema generations and
+   *  DISCARDING any other generation.
    *  This file holds nothing that is not derivable from the session journals
    *  (metadata + byte offsets), so rebuilding is always safe and is strictly
    *  better than the old behaviour of refusing to boot and asking an operator
@@ -436,12 +444,12 @@ export class EventStore {
         user_version: number;
       }
     ).user_version;
-    // v3 → v4 is additive (chat_pointers only), so keep the expensive event
+    // v3 → v4 and v4 → v5 are additive, so keep the expensive event
     // pointer index in place. On the measured 707-session / 961 MB store,
     // throwing v3 away made this rollout spend 23.5 s rebuilding bytes that
     // are unchanged. Older/unknown generations still take the proven clean
     // rebuild path below.
-    const canMigrateInPlace = version === 3 && SCHEMA_VERSION === 4;
+    const canMigrateInPlace = (version === 3 || version === 4) && SCHEMA_VERSION === 5;
     if (version !== SCHEMA_VERSION && !canMigrateInPlace) {
       const hasTables =
         database.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().length > 0;
@@ -519,6 +527,7 @@ export class EventStore {
         source_size INTEGER NOT NULL,
         source_mtime_ms INTEGER NOT NULL,
         pointer_count INTEGER NOT NULL,
+        normalizer_version INTEGER NOT NULL DEFAULT 1,
         PRIMARY KEY (session_id, source_file),
         FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
       );
@@ -537,6 +546,18 @@ export class EventStore {
         FOREIGN KEY (id) REFERENCES sessions(id) ON DELETE CASCADE
       );
     `);
+    // SQLite's CREATE TABLE IF NOT EXISTS does not add columns to a v4
+    // chat_sources table. Preserve its pointers and mark those rows as parser
+    // generation 1; chatSourceCurrent will then request one lazy rescan under
+    // the current normalizer instead of forcing a fleet-wide rebuild.
+    const chatSourceColumns = database
+      .query<{ name: string }, []>('PRAGMA table_info(chat_sources)')
+      .all()
+      .map(column => column.name);
+    if (!chatSourceColumns.includes('normalizer_version')) {
+      database.exec('ALTER TABLE chat_sources ADD COLUMN normalizer_version INTEGER NOT NULL DEFAULT 1');
+    }
+
     // The fleet feed's ONLY ordering index. (time, session_id, sequence) is the
     // full ordering key, so the merged cross-session page is answered by an
     // index walk with no temp b-tree and no fleet-wide counter behind it.
@@ -1102,10 +1123,11 @@ export class EventStore {
           source_size: number;
           source_mtime_ms: number;
           pointer_count: number;
+          normalizer_version: number;
         },
         [string, string]
       >(
-        `SELECT device, inode, source_size, source_mtime_ms, pointer_count
+        `SELECT device, inode, source_size, source_mtime_ms, pointer_count, normalizer_version
            FROM chat_sources WHERE session_id = ? AND source_file = ?`,
       )
       .get(sessionId, sourceFile);
@@ -1114,7 +1136,8 @@ export class EventStore {
       row.device !== info.dev.toString() ||
       row.inode !== info.ino.toString() ||
       row.source_size !== info.size ||
-      row.source_mtime_ms !== Math.trunc(info.mtimeMs)
+      row.source_mtime_ms !== Math.trunc(info.mtimeMs) ||
+      row.normalizer_version !== CHAT_NORMALIZER_VERSION
     )
       return false;
     const actual =
@@ -1169,14 +1192,15 @@ export class EventStore {
     this.database
       .query(
         `INSERT INTO chat_sources
-           (session_id, source_file, device, inode, source_size, source_mtime_ms, pointer_count)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+           (session_id, source_file, device, inode, source_size, source_mtime_ms, pointer_count, normalizer_version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id, source_file) DO UPDATE SET
            device = excluded.device,
            inode = excluded.inode,
            source_size = excluded.source_size,
            source_mtime_ms = excluded.source_mtime_ms,
-           pointer_count = excluded.pointer_count`,
+           pointer_count = excluded.pointer_count,
+           normalizer_version = excluded.normalizer_version`,
       )
       .run(
         sessionId,
@@ -1186,6 +1210,7 @@ export class EventStore {
         info.size,
         Math.trunc(info.mtimeMs),
         pointerCount,
+        CHAT_NORMALIZER_VERSION,
       );
   }
 

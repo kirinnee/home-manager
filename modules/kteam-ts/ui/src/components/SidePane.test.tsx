@@ -7,12 +7,14 @@
 //   2. Nothing autofocuses on open (no autoFocus attribute in pane markup).
 //   3. State is remembered PER SESSION and never leaks across ids.
 //   4. The mobile presentation advertises a dialog; the desktop one a pane.
+//   5. Stateful browser and terminal surfaces remain retained across tabs.
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   readSidePaneState,
   resetSidePaneStates,
+  RETAINED_SURFACES,
   sidePaneAnnouncement,
   SidePaneShell,
   SidePaneWorkspace,
@@ -54,6 +56,16 @@ describe('announcements', () => {
   });
 });
 
+describe('retention policy', () => {
+  test('browser and terminals survive tab switches; transient surfaces remount', () => {
+    expect(RETAINED_SURFACES.has('browser')).toBe(true);
+    expect(RETAINED_SURFACES.has('terminals')).toBe(true);
+    for (const surface of ['files', 'tasks', 'pins', 'skills', 'lineage', 'analytics'] as const) {
+      expect(RETAINED_SURFACES.has(surface)).toBe(false);
+    }
+  });
+});
+
 describe('desktop pane shell', () => {
   test('is a bounded non-modal complementary pane', () => {
     const html = renderToStaticMarkup(
@@ -63,7 +75,11 @@ describe('desktop pane shell', () => {
     );
     expect(html).toContain('role="complementary"');
     expect(html).toContain('aria-labelledby="side-pane-title"');
-    expect(html).toContain('width:clamp(320px, 44%, 680px)');
+    expect(html).toContain('width:520px');
+    expect(html).toContain('min-width:320px');
+    expect(html).toContain('max-width:min(760px, calc(100% - 368px))');
+    expect(html).toContain('role="separator"');
+    expect(html).toContain('aria-label="Resize session side pane"');
     expect(html).not.toContain('aria-modal');
   });
 
@@ -90,6 +106,9 @@ describe('workspace', () => {
     );
     expect(html).toContain('data-conversation="visible"');
     expect(html).toContain('role="complementary"');
+    expect(html).toContain('role="tablist"');
+    expect(html.match(/role="tab"/g)?.length).toBe(8);
+    expect(html).toContain('role="tabpanel"');
     expect(html).toContain('Opened Tasks beside the conversation');
     expect(html).not.toContain('aria-modal');
     expect(html).not.toContain('autofocus');
@@ -106,6 +125,33 @@ describe('workspace', () => {
     expect(html).not.toContain('Opened');
   });
 
+  test('the Browser tab has a usable home before any transcript link was opened', () => {
+    writeSidePaneState('session-a', { surface: 'browser', browser: null });
+    const html = renderToStaticMarkup(
+      <SidePaneWorkspace sessionId="session-a" compact={false}>
+        <main>Conversation</main>
+      </SidePaneWorkspace>,
+    );
+    expect(html).toContain('aria-label="Browser engine"');
+    expect(html).toContain('Where to?');
+    expect(html).toContain('Nothing opens until you choose where to go.');
+    expect(html).not.toContain('autofocus');
+  });
+
+  test('the Terminals tab hosts the real retained terminal deck', () => {
+    writeSidePaneState('session-a', { surface: 'terminals', browser: null });
+    const html = renderToStaticMarkup(
+      <SidePaneWorkspace sessionId="session-a" compact={false} cwd="/repo/worktree">
+        <main>Conversation</main>
+      </SidePaneWorkspace>,
+    );
+    expect(html).toContain('aria-label="Shell terminals"');
+    expect(html).toContain('No shell terminals open');
+    expect(html).toContain('/repo/worktree');
+    expect(html).not.toContain('Terminals are not available in this build.');
+    expect(html).not.toContain('autofocus');
+  });
+
   test('compact hosts the surface in the shared focus-trapped sheet', () => {
     writeSidePaneState('session-a', { surface: 'pins', browser: null });
     const html = renderToStaticMarkup(
@@ -116,6 +162,8 @@ describe('workspace', () => {
     // The conversation STAYS MOUNTED behind the sheet — draft and scroll survive.
     expect(html).toContain('data-conversation="visible"');
     expect(html).toContain('aria-modal="true"');
+    expect(html).toContain('kt-sheet-tabs');
+    expect(html.match(/role="tab"/g)?.length).toBe(8);
     expect(html).toContain(SIDE_PANE_SURFACES.pins.closeLabel);
     expect(html).not.toContain('role="complementary"');
   });

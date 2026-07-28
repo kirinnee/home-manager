@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
   createFilesProvider,
   createSkillsProvider,
+  loadSkillsCatalog,
   splitFileQuery,
   type ComposerSkillsResponse,
 } from './composer-autocomplete-providers';
@@ -34,6 +35,28 @@ function context(trigger: '/' | '@', query: string, signal = new AbortController
 }
 
 describe('/ skills provider', () => {
+  test('exposes the same normalized catalog to the side-pane surface', async () => {
+    responder = () =>
+      Response.json({
+        harness: 'codex',
+        harnessHomeResolved: false,
+        skills: [
+          { name: 'Zebra', description: 'z' },
+          { name: 'apple', description: 'a' },
+        ],
+      } satisfies ComposerSkillsResponse);
+
+    await expect(loadSkillsCatalog('session / one', new AbortController().signal)).resolves.toEqual({
+      harness: 'codex',
+      harnessHomeResolved: false,
+      skills: [
+        { name: 'apple', description: 'a' },
+        { name: 'Zebra', description: 'z' },
+      ],
+    });
+    expect(requests).toEqual(['/v1/sessions/session%20%2F%20one/skills']);
+  });
+
   test('uses the session-scoped endpoint and inserts what CODEX understands', async () => {
     const body: ComposerSkillsResponse = {
       harness: 'codex',

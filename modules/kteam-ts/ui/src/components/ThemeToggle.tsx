@@ -1,5 +1,5 @@
 // Desktop theme picker. Its standalone app-bar trigger opens a popover with the
-// five theme families and an explicit Auto / Light / Dark control. Mobile keeps
+// seven theme families and an explicit Auto / Light / Dark control. Mobile keeps
 // these same controls in Settings so the phone bar stays uncluttered.
 //
 // The family previews are the real thing, not an approximation: each swatch
@@ -40,6 +40,16 @@ export function closeThemePopoverForKeyboard(close: (returnFocus: boolean) => vo
   close(false);
 }
 
+/** Reveal one family card inside the picker-owned scrollport. Deliberately
+ * scoped to that element instead of `scrollIntoView()`, which would also walk
+ * and programmatically scroll the app's overflow-hidden shell. */
+export function scrollThemeFamilyIntoView(scroller: HTMLElement, target: HTMLElement) {
+  const viewport = scroller.getBoundingClientRect();
+  const card = target.getBoundingClientRect();
+  if (card.top < viewport.top) scroller.scrollTop += card.top - viewport.top;
+  else if (card.bottom > viewport.bottom) scroller.scrollTop += card.bottom - viewport.bottom;
+}
+
 /** A live, CSS-only preview of one family/mode pair. */
 function Swatch({ theme, current }: { theme: string; current: boolean }) {
   return (
@@ -75,6 +85,28 @@ export function ThemeSettings({
   const activeListRef = listRef ?? internalListRef;
   const { family, mode, resolved, families, setFamily, setMode } = theme;
 
+  const revealFamily = useCallback(
+    (target: HTMLElement) => {
+      const list = activeListRef.current;
+      const scroller = constrained ? list : target.closest<HTMLElement>('[data-settings-scroller]');
+      if (scroller) scrollThemeFamilyIntoView(scroller, target);
+    },
+    [activeListRef, constrained],
+  );
+
+  // Changing family also changes fonts and spacing. Recheck on the next frame,
+  // after useTheme has published the new root data-theme, so a card aligned to
+  // the old geometry cannot slip back under the scrollport edge.
+  useEffect(() => {
+    const list = activeListRef.current;
+    const target = list?.querySelector<HTMLButtonElement>(`[data-family="${family}"]`);
+    if (!target || document.activeElement !== target) return;
+    const frame = requestAnimationFrame(() => {
+      if (target.isConnected && document.activeElement === target) revealFamily(target);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeListRef, family, revealFamily]);
+
   const onListKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const keys = ['ArrowDown', 'ArrowRight', 'ArrowUp', 'ArrowLeft', 'Home', 'End'];
     if (!keys.includes(e.key)) return;
@@ -91,8 +123,14 @@ export function ThemeSettings({
             : Math.max(0, index - 1);
     const target = families[next];
     if (!target) return;
+    const list = activeListRef.current;
+    const targetButton = list?.querySelector<HTMLButtonElement>(`[data-family="${target.id}"]`);
+    if (!targetButton) return;
     setFamily(target.id);
-    activeListRef.current?.querySelector<HTMLButtonElement>(`[data-family="${target.id}"]`)?.focus();
+    // Own the scroll explicitly. `focus()` normally scrolls, but relying on
+    // that made the last cards engine-dependent and can move the fixed shell.
+    targetButton.focus({ preventScroll: true });
+    revealFamily(targetButton);
   };
 
   return (
@@ -271,7 +309,7 @@ export function ThemeToggle() {
   // tech repeats to the reader.
   //
   // The cycle turns on TAB STOPS (`tabIndex >= 0`), not on everything focusable,
-  // because the family list is a roving radiogroup: four of its five buttons sit
+  // because the family list is a roving radiogroup: six of its seven buttons sit
   // at `tabIndex={-1}` and Tab never visits them. A first/last comparison over
   // "everything focusable" would believe the cycle ends at the LAST family
   // button and happily let focus escape from the CHECKED one — which is where a
