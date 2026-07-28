@@ -17,6 +17,18 @@ import {
   parseCodexTranscriptLine,
 } from './codex-transcript';
 import {
+  codexRuntimeModelCatalog,
+  driveCodexModelPicker,
+  parseCodexPickerScreen,
+  preflightCodexModelPicker,
+  sendTmuxPickerKey,
+  waitForCodexRuntimeObservation,
+  waitForCodexThreadSettingsApplied,
+  type CodexPickerTransport,
+  type CodexPickerTarget,
+  type RuntimeModelCatalog,
+} from './codex-runtime';
+import {
   contextWindowForModel,
   contextWindowForSession,
   resolveDisplayModel,
@@ -184,6 +196,104 @@ interface MonitorHandle {
    *  considered immediately instead of after the full tick. */
   wake?: () => void;
 }
+
+/** Escape is a failure-only teardown key. Normal picker selection remains
+ * restricted to the digit-only driver in codex-runtime.ts. */
+export interface CodexPickerDismissTransport {
+  resolvePane: () => Promise<string>;
+  capturePane: (paneId: string) => Promise<{ visiblePane: string; promptReady: boolean }>;
+  sendEscape: (paneId: string) => Promise<void>;
+}
+
+export interface CodexPickerDismissOptions {
+  timeoutMs?: number;
+  pollMs?: number;
+  clock?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Dismiss only a currently parsed Codex picker on the exact pane resolved at
+ * cleanup start. Unknown or already-idle screens are left untouched. */
+export async function dismissCodexPicker(
+  transport: CodexPickerDismissTransport,
+  options: CodexPickerDismissOptions = {},
+): Promise<void> {
+  const timeoutMs = Math.max(0, options.timeoutMs ?? 2_000);
+  const pollMs = Math.max(0, options.pollMs ?? 50);
+  const clock = options.clock ?? Date.now;
+  const sleep = options.sleep ?? Bun.sleep;
+  const paneId = await transport.resolvePane();
+  if (!/^%\d+$/.test(paneId)) throw new Error('failed to resolve the Codex picker pane for cleanup');
+
+  const deadline = clock() + timeoutMs;
+  let lastVisible = 'an unknown picker';
+  for (;;) {
+    const pane = await transport.capturePane(paneId);
+    const screen = parseCodexPickerScreen(pane.visiblePane);
+    if (screen.kind === 'none' && pane.promptReady) return;
+    if (screen.kind === 'none')
+      throw new Error('Codex picker cleanup could not verify that the exact pane returned to an idle prompt');
+    lastVisible = screen.title ?? screen.kind;
+    if (clock() >= deadline) break;
+    // Capture is intentionally repeated before every Escape. If Codex changes
+    // the pane to an idle or unknown screen, no key is sent into it.
+    await transport.sendEscape(paneId);
+    await sleep(pollMs);
+  }
+  throw new Error(`Codex picker cleanup did not close ${lastVisible} within ${Math.ceil(timeoutMs / 1000)}s`);
+}
+
+async function dismissCodexPickerInTmux(tmux: TmuxController, tmuxSession: string): Promise<void> {
+  await dismissCodexPicker({
+    resolvePane: async () => {
+      const resolved = await run(['tmux', 'display-message', '-p', '-t', tmuxSession, '#{pane_id}']);
+      const paneId = resolved.stdout.trim();
+      if (resolved.code !== 0 || !/^%\d+$/.test(paneId))
+        throw new Error(resolved.stderr.trim() || 'failed to resolve the Codex picker pane for cleanup');
+      return paneId;
+    },
+    capturePane: async paneId => {
+      const [captured, cursor] = await Promise.all([
+        run(['tmux', 'capture-pane', '-p', '-t', paneId]),
+        run(['tmux', 'display-message', '-p', '-t', paneId, '#{cursor_x}|#{cursor_y}']),
+      ]);
+      if (captured.code !== 0)
+        throw new Error(captured.stderr.trim() || 'failed to capture the Codex picker pane for cleanup');
+      const [rawX, rawY] = cursor.stdout.trim().split('|');
+      const cursorX = Number(rawX);
+      const cursorY = Number(rawY);
+      if (cursor.code !== 0 || !Number.isFinite(cursorX) || !Number.isFinite(cursorY))
+        throw new Error(cursor.stderr.trim() || 'failed to inspect the Codex picker pane for cleanup');
+      return { visiblePane: captured.stdout, promptReady: tmux.promptReady(captured.stdout, cursorY, cursorX) };
+    },
+    sendEscape: async paneId => {
+      const sent = await run(['tmux', 'send-keys', '-t', paneId, 'Escape']);
+      if (sent.code !== 0) throw new Error(sent.stderr.trim() || 'failed to dismiss the Codex picker');
+    },
+  });
+}
+
+/** Production is deliberately bound to the screen-verified picker driver and
+ * raw transcript confirmation helpers. The object is a narrow prototype-test
+ * seam only; it does not broaden the runtime-control API. */
+interface CodexRuntimeControl {
+  preflightModelPicker: typeof preflightCodexModelPicker;
+  driveModelPicker: typeof driveCodexModelPicker;
+  sendPickerKey: typeof sendTmuxPickerKey;
+  dismissPicker: (tmuxSession: string) => Promise<void>;
+  waitForThreadSettingsApplied: typeof waitForCodexThreadSettingsApplied;
+  waitForRuntimeObservation: typeof waitForCodexRuntimeObservation;
+}
+
+const defaultCodexRuntimeControl: CodexRuntimeControl = {
+  preflightModelPicker: preflightCodexModelPicker,
+  driveModelPicker: driveCodexModelPicker,
+  sendPickerKey: sendTmuxPickerKey,
+  dismissPicker: async () => undefined,
+  waitForThreadSettingsApplied: waitForCodexThreadSettingsApplied,
+  waitForRuntimeObservation: waitForCodexRuntimeObservation,
+};
+
 interface StoredEnvelope {
   source?: KTeamEvent['source'];
   turn?: number;
@@ -340,6 +450,19 @@ class ReviveDedupeConflict extends ReviveRefused {
 const terminalStatuses: SessionStatus[] = ['completed', 'failed', 'stalled', 'stopped'];
 const protectedStatuses: SessionStatus[] = [...terminalStatuses, 'kill_failed'];
 const waitingStatuses: SessionStatus[] = ['waiting', 'awaiting_question', 'awaiting_user', 'rate_limited'];
+const CODEX_PICKER_QUARANTINE_KIND = 'codex_picker_cleanup';
+
+function rejectKillFailedPaneInput(): never {
+  throw new Error(
+    'input is blocked because the previous tmux shutdown was not confirmed; run `kteam stop <session>` successfully before sending or retrying runtime control',
+  );
+}
+
+function rejectUnconfirmedCodexPickerInput(): never {
+  throw new Error(
+    'input is blocked because Codex picker cleanup was not confirmed; run `kteam resume <session>` or `kteam stop <session>` before sending or retrying runtime control',
+  );
+}
 /** Statuses a session can hold BEFORE its tmux pane has ever been created.
  *  In these the absence of a pane means "not launched yet", never "crashed". */
 const preLaunchStatuses: SessionStatus[] = ['created', 'starting'];
@@ -666,6 +789,13 @@ export class SessionManager implements KTeamService {
   private readonly monitors = new Map<string, MonitorHandle>();
   private readonly listeners = new Set<(event: KTeamEvent) => void>();
   private readonly queues = new Map<string, Promise<void>>();
+  /** Keep model/effort gestures mutually exclusive while allowing the Codex
+   * transcript reducer to take `queues` and publish the acknowledgement. */
+  private readonly runtimeControlQueues = new Map<string, Promise<void>>();
+  private readonly codexRuntimeControl: CodexRuntimeControl = {
+    ...defaultCodexRuntimeControl,
+    dismissPicker: async tmuxSession => await dismissCodexPickerInTmux(this.tmux, tmuxSession),
+  };
   private readonly deleting = new Set<string>();
   private readonly autoContinued = new Set<string>();
   /** One-shot flags for done-markers deferred while the pane is still working. */
@@ -2281,6 +2411,8 @@ export class SessionManager implements KTeamService {
         );
       }
       const probe = await this.get(id);
+      if (probe.state.status === 'kill_failed') rejectKillFailedPaneInput();
+      if (probe.state.needsHumanKind === CODEX_PICKER_QUARANTINE_KIND) rejectUnconfirmedCodexPickerInput();
       const paneProbe = await this.tmux.state(probe.config.tmuxSession);
       if (terminalStatuses.includes(probe.state.status) || !paneProbe.alive || paneProbe.dead) {
         return await this.reviveWithMessage(id, request);
@@ -2292,6 +2424,8 @@ export class SessionManager implements KTeamService {
       // terminal status while we waited must take the resume path (its live
       // pane, if any, is an unmonitored leftover â never type into it).
       // resume() takes the lock itself, so signal the caller instead.
+      if (view.state.status === 'kill_failed') rejectKillFailedPaneInput();
+      if (view.state.needsHumanKind === CODEX_PICKER_QUARANTINE_KIND) rejectUnconfirmedCodexPickerInput();
       if (terminalStatuses.includes(view.state.status)) return { kind: 'revive' as const };
       const paneState = await this.tmux.state(view.config.tmuxSession);
       if (!paneState.alive || paneState.dead) return { kind: 'revive' as const };
@@ -2410,72 +2544,262 @@ export class SessionManager implements KTeamService {
     return { ...(await this.get(id)), disposition: outcome.disposition };
   }
 
+  /** Session-scoped because wrapper identity, provider config, credentials and
+   * project config all participate in the authoritative model catalog. */
+  async runtimeModels(id: string): Promise<RuntimeModelCatalog> {
+    id = this.resolveRef(id);
+    const view = await this.get(id);
+    if (view.config.harness === 'claude') {
+      return {
+        harness: 'claude',
+        source: 'wrapper-inventory',
+        choices: runtimeModelsForWrapper(view.config.binary).map(choice => ({
+          ...choice,
+          reasoningEfforts: [],
+        })),
+      };
+    }
+    const binary = resolveBinary(view.config.binary);
+    if (!binary) throw new Error(`could not resolve Codex wrapper ${view.config.binary}`);
+    return {
+      harness: 'codex',
+      source: 'codex-app-server',
+      choices: await codexRuntimeModelCatalog.get(binary, view.config.cwd),
+    };
+  }
+
   /** Native `/model`, `/effort`, `/clear`, or `/compact` control that
    * deliberately bypasses send(): it never queues behind active work, does not
-   * relaunch the harness, and does not optimistically rewrite observed runtime
-   * state. The harness transcript remains the source of truth where available. */
+   * relaunch the harness, and never optimistically rewrites observed settings.
+   * Targeted Codex switches succeed only after a post-input raw
+   * thread_settings_applied record and the same persisted session observation. */
   async runtime(id: string, request: RuntimeControlRequest): Promise<SessionView> {
     id = this.resolveRef(id);
-    return await this.serialized(id, async () => {
-      const view = await this.get(id);
-      // Every runtime control shares the same preconditions: a live, running
-      // pane sitting at an idle prompt. None of them queue, revive a terminal
-      // session, or type over live work.
-      if (terminalStatuses.includes(view.state.status))
-        throw new Error('an in-session command requires a running session');
+    return await this.serializedRuntimeControl(id, async () => {
+      let pendingCodex:
+        | {
+            target: CodexPickerTarget;
+            transcriptFile: string;
+            transcriptBaseline: number;
+            observedAtBaseline?: string;
+          }
+        | undefined;
 
-      const pane = await this.tmux.state(view.config.tmuxSession);
-      if (!pane.alive || pane.dead) throw new Error('an in-session command requires a live harness pane');
-      if (!pane.promptReady)
-        throw new Error('an in-session command is available only while the harness is waiting at an idle prompt');
+      // Picker driving must exclude other control mutations, but observation
+      // waits must NOT hold this queue: the transcript reducer uses it too.
+      const immediate = await this.serialized(id, async (): Promise<SessionView | undefined> => {
+        const view = await this.get(id);
+        if (view.state.status === 'kill_failed') rejectKillFailedPaneInput();
+        if (view.state.needsHumanKind === CODEX_PICKER_QUARANTINE_KIND) rejectUnconfirmedCodexPickerInput();
+        if (terminalStatuses.includes(view.state.status))
+          throw new Error('an in-session command requires a running session');
 
-      if (request.action === 'clear' || request.action === 'compact') {
-        return await this.runSessionCommand(id, view, request.action);
-      }
+        const pane = await this.tmux.state(view.config.tmuxSession);
+        if (!pane.alive || pane.dead) throw new Error('an in-session command requires a live harness pane');
+        if (!pane.promptReady)
+          throw new Error('an in-session command is available only while the harness is waiting at an idle prompt');
 
-      const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
-      let command: string;
-      let requestedModel: string | undefined;
-      let requestedEffort: string | undefined;
-      if (request.action === 'effort') {
-        if (view.config.harness !== 'claude')
-          throw new Error('effort is set inside Codex’s native picker, not as a runtime command');
-        requestedEffort = request.effort?.trim();
-        if (!requestedEffort || !EFFORT_LEVELS.includes(requestedEffort as (typeof EFFORT_LEVELS)[number]))
-          throw new Error(`effort must be one of ${EFFORT_LEVELS.join(', ')}`);
-        command = `/effort ${requestedEffort}`;
-      } else if (view.config.harness === 'claude') {
-        requestedModel = request.model?.trim();
-        if (!requestedModel) throw new Error('model is required for a Claude runtime switch');
-        const allowed = runtimeModelsForWrapper(view.config.binary);
-        if (!allowed.length)
-          throw new Error(`in-session model switching is not supported for wrapper ${view.config.binary}`);
-        if (!allowed.some(option => option.value === requestedModel))
-          throw new Error(`model ${requestedModel} is not available on wrapper ${view.config.binary}`);
-        command = `/model ${requestedModel}`;
-      } else {
-        if (request.model?.trim())
-          throw new Error('Codex model and reasoning choices must be completed in its native picker');
-        command = '/model';
-      }
+        if (request.action === 'clear' || request.action === 'compact')
+          return await this.runSessionCommand(id, view, request.action);
 
-      const outcome = await this.tmux.inject(view.config.tmuxSession, command);
-      if (outcome !== 'handled-local')
-        throw new Error(`the harness consumed ${command} as a model turn instead of a native runtime control`);
-      await this.emit(
-        id,
-        'control.runtime_model',
-        {
-          harness: view.config.harness,
-          ...(requestedModel ? { requestedModel } : {}),
-          ...(requestedEffort ? { requestedEffort } : {}),
-          ...(!requestedModel && !requestedEffort ? { picker: true } : {}),
-        },
-        'client',
-        view.config.turn,
+        const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
+        let command: string;
+        let requestedModel: string | undefined;
+        let requestedEffort: string | undefined;
+        if (request.action === 'effort') {
+          if (view.config.harness !== 'claude')
+            throw new Error('effort is set inside Codex’s native picker, not as a runtime command');
+          requestedEffort = request.effort?.trim();
+          if (!requestedEffort || !EFFORT_LEVELS.includes(requestedEffort as (typeof EFFORT_LEVELS)[number]))
+            throw new Error(`effort must be one of ${EFFORT_LEVELS.join(', ')}`);
+          command = `/effort ${requestedEffort}`;
+        } else if (view.config.harness === 'claude') {
+          requestedModel = request.model?.trim();
+          if (!requestedModel) throw new Error('model is required for a Claude runtime switch');
+          const allowed = runtimeModelsForWrapper(view.config.binary);
+          if (!allowed.length)
+            throw new Error(`in-session model switching is not supported for wrapper ${view.config.binary}`);
+          if (!allowed.some(option => option.value === requestedModel))
+            throw new Error(`model ${requestedModel} is not available on wrapper ${view.config.binary}`);
+          command = `/model ${requestedModel}`;
+        } else {
+          requestedModel = request.model?.trim();
+          requestedEffort = request.effort?.trim();
+          if (!requestedModel && !requestedEffort) {
+            // Compatibility/manual fallback: preserve the established bare
+            // picker and make no pending or success claim for a human choice.
+            command = '/model';
+          } else {
+            if (!requestedModel || !requestedEffort)
+              throw new Error('Codex targeted switching requires both model and effort');
+            const catalog = await this.runtimeModels(id);
+            const advertised = catalog.choices.find(choice => choice.value === requestedModel);
+            if (!advertised) throw new Error(`model ${requestedModel} is not in this Codex account’s current catalog`);
+            if (!advertised.reasoningEfforts.some(choice => choice.value === requestedEffort))
+              throw new Error(`${requestedEffort} is not advertised for Codex model ${requestedModel}`);
+
+            // Codex's quick picker applies a preset default directly unless it
+            // can open advanced reasoning. The driver checks this only after it
+            // positively identifies the target as a visible quick-picker row,
+            // before sending that row's digit; an All-models row stays valid.
+            const opensReasoningMenu =
+              advertised.reasoningEfforts.some(choice => choice.value === 'max' || choice.value === 'ultra') ||
+              advertised.defaultReasoningEffort === 'max' ||
+              advertised.defaultReasoningEffort === 'ultra';
+            const quickPickerDefaultEffort =
+              !opensReasoningMenu && advertised.defaultReasoningEffort !== requestedEffort
+                ? advertised.defaultReasoningEffort
+                : undefined;
+
+            const transcriptFile = view.config.transcriptFile;
+            if (!transcriptFile)
+              throw new Error('Codex transcript discovery must finish before a switch can be verified');
+            const ready = await this.tmux.state(view.config.tmuxSession);
+            if (!ready.alive || ready.dead || !ready.promptReady)
+              throw new Error('Codex left its idle prompt while model choices were loading');
+            const transcriptBaseline = (await stat(transcriptFile)).size;
+            const target = {
+              model: requestedModel,
+              effort: requestedEffort,
+              ...(quickPickerDefaultEffort ? { quickPickerDefaultEffort } : {}),
+            };
+            pendingCodex = {
+              target,
+              transcriptFile,
+              transcriptBaseline,
+              observedAtBaseline: view.state.observedModelAt,
+            };
+            try {
+              const pickerTransport: CodexPickerTransport = {
+                openPicker: async () => await this.tmux.inject(view.config.tmuxSession, '/model'),
+                readPane: async () => await this.tmux.state(view.config.tmuxSession),
+                sendKey: async (key, expected) =>
+                  await this.codexRuntimeControl.sendPickerKey(view.config.tmuxSession, key, expected),
+              };
+              // Only a mismatched potentially-direct quick row needs the
+              // screen-aware preflight. It opens and reads the native picker
+              // without selecting anything; the selection driver gets the
+              // same verified screen only when the target remains expressible.
+              const preflightScreen =
+                target.quickPickerDefaultEffort === undefined
+                  ? undefined
+                  : await this.codexRuntimeControl.preflightModelPicker(pickerTransport, target);
+              await this.codexRuntimeControl.driveModelPicker(pickerTransport, target, {}, preflightScreen);
+            } catch (error) {
+              try {
+                await this.codexRuntimeControl.dismissPicker(view.config.tmuxSession);
+              } catch (cleanupError) {
+                await this.quarantineUnconfirmedCodexPicker(id, view, error, cleanupError);
+              }
+              throw error;
+            }
+            return undefined;
+          }
+        }
+
+        const outcome = await this.tmux.inject(view.config.tmuxSession, command);
+        if (outcome !== 'handled-local')
+          throw new Error(`the harness consumed ${command} as a model turn instead of a native runtime control`);
+        await this.emit(
+          id,
+          'control.runtime_model',
+          {
+            harness: view.config.harness,
+            ...(requestedModel ? { requestedModel } : {}),
+            ...(requestedEffort ? { requestedEffort } : {}),
+            ...(!requestedModel && !requestedEffort ? { picker: true } : {}),
+          },
+          'client',
+          view.config.turn,
+        );
+        return await this.get(id);
+      });
+
+      if (immediate) return immediate;
+      const pending = pendingCodex;
+      if (!pending) throw new Error('Codex runtime control ended without a result');
+
+      await this.codexRuntimeControl.waitForThreadSettingsApplied(async () => {
+        const currentSize = (await stat(pending.transcriptFile)).size;
+        if (currentSize < pending.transcriptBaseline)
+          throw new Error('Codex rollout changed while waiting for runtime confirmation');
+        return await Bun.file(pending.transcriptFile).slice(pending.transcriptBaseline).text();
+      }, pending.target);
+      await this.codexRuntimeControl.waitForRuntimeObservation(
+        async () => (await this.get(id)).state,
+        pending.observedAtBaseline,
+        pending.target,
+        { afterTranscriptOffset: pending.transcriptBaseline },
       );
-      return await this.get(id);
+
+      // This event is intentionally after verification. Besides auditability,
+      // it makes the browser refetch the now-fresh timestamp even when the user
+      // re-selected the already-observed model and effort.
+      return await this.serialized(id, async () => {
+        const confirmed = await this.get(id);
+        await this.emit(
+          id,
+          'control.runtime_model',
+          {
+            harness: 'codex',
+            requestedModel: pending.target.model,
+            requestedEffort: pending.target.effort,
+            verified: true,
+          },
+          'client',
+          confirmed.config.turn,
+        );
+        return await this.get(id);
+      });
     });
+  }
+
+  /** A failed picker drive must never leave ordinary controls able to type
+   * into an unverified modal. Persist the terminal quarantine before trying to
+   * stop the pane; if stopping itself fails, stopTmuxWithEvidence records
+   * kill_failed and the input gates above keep that live pane inert. */
+  private async quarantineUnconfirmedCodexPicker(
+    id: string,
+    view: SessionView,
+    driveFailure: unknown,
+    cleanupFailure: unknown,
+  ): Promise<never> {
+    const driveMessage = driveFailure instanceof Error ? driveFailure.message : String(driveFailure);
+    const cleanupMessage = cleanupFailure instanceof Error ? cleanupFailure.message : String(cleanupFailure);
+    const reason =
+      'Codex picker cleanup could not confirm the exact pane returned to an idle prompt; ' +
+      'the session was quarantined to prevent input into an unknown modal';
+
+    await this.transition(
+      id,
+      {
+        status: 'failed',
+        health: 'crashed',
+        reason,
+        finishedAt: now(),
+        promptReady: false,
+        needsHuman: `${reason}; run kteam resume or stop before sending more input`,
+        needsHumanKind: CODEX_PICKER_QUARANTINE_KIND,
+      },
+      'session.codex_picker_quarantined',
+      { driveError: driveMessage, cleanupError: cleanupMessage },
+    );
+    await this.tmux.snapshot(view.config, true).catch(() => undefined);
+    try {
+      await this.stopManagedSession(view.config, reason);
+    } catch (stopFailure) {
+      const stopMessage = stopFailure instanceof Error ? stopFailure.message : String(stopFailure);
+      throw new Error(
+        `Codex picker drive failed: ${driveMessage}; picker cleanup failed: ${cleanupMessage}; ` +
+          `session remains quarantined because its tmux pane could not be stopped: ${stopMessage}`,
+        { cause: cleanupFailure },
+      );
+    }
+    throw new Error(
+      `Codex picker drive failed: ${driveMessage}; picker cleanup failed: ${cleanupMessage}; ` +
+        'session was stopped for safety and must be resumed before retrying runtime control',
+      { cause: cleanupFailure },
+    );
   }
 
   /** `/clear` and `/compact` — harness-native context commands delivered
@@ -2844,15 +3168,16 @@ export class SessionManager implements KTeamService {
     responses?: string[],
   ): Promise<SessionView> {
     id = this.resolveRef(id);
-    await this.clearNeedsHuman(id);
     return await this.serialized(id, async () => {
       const view = await this.get(id);
+      if (view.state.needsHumanKind === CODEX_PICKER_QUARANTINE_KIND) rejectUnconfirmedCodexPickerInput();
       if (view.state.status !== 'awaiting_question' || !view.state.pendingQuestion)
         throw new Error('session is not waiting on a structured question');
       if (view.state.pendingQuestion.toolUseId !== toolUseId)
         throw new Error(
           `the displayed question changed before this answer arrived (expected ${toolUseId}, current ${view.state.pendingQuestion.toolUseId}); refresh and answer the current question`,
         );
+      await this.clearNeedsHuman(id);
       let outcome;
       try {
         outcome = await this.tmux.answerQuestion(view.config, view.state, labels, other, responses);
@@ -3101,6 +3426,9 @@ export class SessionManager implements KTeamService {
         lastSnapshot: 'last-snapshot.txt',
       });
       await this.stopManagedSession(view.config, reason);
+      // A verified stop is the first point at which this special quarantine
+      // can be released: the unknown native picker cannot receive more input.
+      await this.clearNeedsHuman(id, { clearCodexPickerQuarantine: true });
       await this.transition(
         id,
         { status: 'stopped', health: 'idle', reason, finishedAt: now(), promptReady: false },
@@ -3208,9 +3536,6 @@ export class SessionManager implements KTeamService {
     });
     this.launching.set(id, { at: Date.now(), bootstrap: resumeLaunch });
     try {
-      // Automatic retries are not a human action; explicit resumes and sends
-      // retain the established state-clearing behaviour.
-      if (!effectivePolicy?.automatic) await this.clearNeedsHuman(id);
       if (!effectivePolicy?.automatic) this.cancelRetry(id);
       let startMonitorAfterUnlock = false;
       const resumed = await this.serialized(id, async () => {
@@ -3218,6 +3543,11 @@ export class SessionManager implements KTeamService {
         let view = await this.get(id);
         if (view.state.status === 'kill_failed')
           throw new ReviveRefused('the previous tmux kill failed; use stop again before resume');
+        const pickerQuarantined = view.state.needsHumanKind === CODEX_PICKER_QUARANTINE_KIND;
+        // A kill_failed pane may still be sitting in an unknown native modal.
+        // Do not clear its durable picker quarantine until the refusal check
+        // above has passed and a real recovery can proceed.
+        if (!effectivePolicy?.automatic) await this.clearNeedsHuman(id);
         if (
           effectivePolicy?.expectedStatus !== undefined &&
           (view.state.status !== effectivePolicy.expectedStatus ||
@@ -3238,7 +3568,7 @@ export class SessionManager implements KTeamService {
           // reconciled completion) is unmonitored â injecting into it loses the
           // message. Kill it and fall through to a tracked relaunch; only a
           // genuinely NON-terminal session takes the plain-send shortcut.
-          if (!terminalStatuses.includes(view.state.status)) {
+          if (!terminalStatuses.includes(view.state.status) && !pickerQuarantined) {
             if (!message) throw new Error('session is already running');
             return await this.sendUnlocked(view, message);
           }
@@ -3367,6 +3697,9 @@ export class SessionManager implements KTeamService {
             // observation and must not be suppressed by terminal preservation.
             { force: true },
           );
+          // launchWithRetry has proven that a replacement pane now exists, so
+          // the old unconfirmed picker is no longer capable of receiving input.
+          if (!effectivePolicy?.automatic) await this.clearNeedsHuman(id, { clearCodexPickerQuarantine: true });
           // A watcher immediately replays persisted transcript bytes through the
           // same per-session queue. Starting it while this queue is held would
           // deadlock resume against its own transcript callback.
@@ -3403,6 +3736,7 @@ export class SessionManager implements KTeamService {
               { subprocessAlive: exit.subprocessAlive },
               { force: true },
             );
+            if (!effectivePolicy?.automatic) await this.clearNeedsHuman(id, { clearCodexPickerQuarantine: true });
             startMonitorAfterUnlock = true;
             return await this.get(id);
           }
@@ -6869,6 +7203,22 @@ export class SessionManager implements KTeamService {
     }
   }
 
+  private async serializedRuntimeControl<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    if (this.deleting.has(id)) throw new Error('session deletion is in progress');
+    const previous = this.runtimeControlQueues.get(id) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(operation);
+    const settled = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.runtimeControlQueues.set(id, settled);
+    try {
+      return await result;
+    } finally {
+      if (this.runtimeControlQueues.get(id) === settled) this.runtimeControlQueues.delete(id);
+    }
+  }
+
   // ââ Scratch garbage collection ââââââââââââââââââââââââââââââââââââââââââââ
 
   /** Running total of scratch reclaimed this daemon lifetime. */
@@ -7750,12 +8100,17 @@ export class SessionManager implements KTeamService {
   }
 
   /** A human acted on the session â clear the needs_human flag so the sweep
-   *  resumes watching it. Called from answer/resume/stop. */
-  private async clearNeedsHuman(id: string): Promise<void> {
+   *  resumes watching it. A Codex picker cleanup quarantine is different: a
+   *  generic acknowledgement must not remove it until a caller has positively
+   *  killed or replaced that pane. */
+  private async clearNeedsHuman(id: string, options: { clearCodexPickerQuarantine?: boolean } = {}): Promise<void> {
     await this.store
-      .updateState<SessionState>(id, current =>
-        current.needsHuman === undefined ? current : { ...current, needsHuman: undefined, needsHumanKind: undefined },
-      )
+      .updateState<SessionState>(id, current => {
+        if (current.needsHuman === undefined) return current;
+        if (current.needsHumanKind === CODEX_PICKER_QUARANTINE_KIND && !options.clearCodexPickerQuarantine)
+          return current;
+        return { ...current, needsHuman: undefined, needsHumanKind: undefined };
+      })
       .catch(() => undefined);
   }
 

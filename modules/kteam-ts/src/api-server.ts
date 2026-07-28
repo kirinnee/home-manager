@@ -33,6 +33,8 @@ import type { BrowserApi } from './browser-api';
 import { browserWardenDenial, isBrowserPath, matchBrowserRoute } from './browser-api';
 import type { BrowserStreamBridge, BrowserStreamChunk } from './browser-stream';
 import { isBrowserError } from './browser-types';
+import type { RuntimeModelsApi } from './runtime-models-api';
+import { isRuntimeModelsPath, runtimeModelsWardenDenial } from './runtime-models-api';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
 // single-file shell remains the fallback so the daemon never 404s its own UI.
@@ -116,6 +118,8 @@ export interface ApiServerOptions {
   terminals?: TerminalApi;
   /** Per-session remote browser actions and the human-admin screencast. */
   browser?: BrowserApi;
+  /** Human-admin session-scoped model catalogs for Claude and Codex. */
+  runtimeModels?: RuntimeModelsApi;
   /** Durable, daemon-owned per-session attention records. */
   attention?: AttentionApi;
   /** Admin-only Web Push enrollment and per-device management. */
@@ -169,6 +173,8 @@ async function wardenScopeDenial(
   if (terminalDenial) return forbidden(terminalDenial);
   const browserDenial = browserWardenDenial(method, pathname);
   if (browserDenial) return forbidden(browserDenial);
+  const runtimeModelsDenial = runtimeModelsWardenDenial(method, pathname);
+  if (runtimeModelsDenial) return forbidden(runtimeModelsDenial);
   const attentionDenial = attentionWardenDenial(method, pathname);
   if (attentionDenial) return forbidden(attentionDenial);
   const pushDenial = pushWardenDenial(method, pathname);
@@ -774,6 +780,19 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             });
             if (attentionResponse) return json(attentionResponse.body, attentionResponse.status);
             return json(unknownRoute(request.method, url.pathname), 404);
+          }
+
+          // MUST precede the generic session match: `runtime-models` is a
+          // read-only daemon catalog, not a session mutation action. Actor
+          // identity is the authenticated resolveApiActor() result above.
+          if (options.runtimeModels && isRuntimeModelsPath(pathname)) {
+            const runtimeModelsResponse = await options.runtimeModels.handle({
+              method: request.method,
+              url,
+              actor,
+            });
+            if (runtimeModelsResponse) return json(runtimeModelsResponse.body, runtimeModelsResponse.status);
+            return json(unknownRoute(request.method, pathname), 404);
           }
 
           const match = url.pathname.match(/^\/v1\/sessions\/([^/]+)(?:\/(.+))?$/);

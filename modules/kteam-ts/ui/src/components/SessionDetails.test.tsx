@@ -17,6 +17,7 @@ import {
   isRuntimeEndpointUnavailable,
   modelObservationChanged,
   observedModelPresentation,
+  runtimeControlUnavailableMessage,
 } from './SessionDetails';
 import { primeDetailsTab, resetDetailsTabMemory, type DetailsTab } from '../hooks/useDetailsTab';
 
@@ -113,12 +114,16 @@ describe('shared BottomSheet contract', () => {
 });
 
 describe('in-session runtime model controls', () => {
-  test('treats only an unknown runtime route as a daemon-restart requirement', () => {
+  test('treats only an unknown runtime action as daemon/UI skew and names the non-restart remedy', () => {
     expect(
       isRuntimeEndpointUnavailable(new ApiError(404, 'no route POST /v1/sessions/s1/runtime', 'unknown_route')),
     ).toBe(true);
     expect(isRuntimeEndpointUnavailable(new ApiError(404, 'unknown kteam session s1'))).toBe(false);
     expect(isRuntimeEndpointUnavailable(new ApiError(409, 'runtime controls require an idle prompt'))).toBe(false);
+    expect(runtimeControlUnavailableMessage('model')).toContain('running daemon is older than this web UI');
+    expect(runtimeControlUnavailableMessage('model')).toContain('Update the daemon build');
+    expect(runtimeControlUnavailableMessage('model')).toContain('restarting the same build will not help');
+    expect(runtimeControlUnavailableMessage('model')).not.toContain('restart required');
   });
 
   test('shows a catalog failure instead of leaving the choices loader visible', () => {
@@ -136,6 +141,24 @@ describe('in-session runtime model controls', () => {
 
     expect(html).toContain('Account-aware model choices are unavailable: model catalog failed');
     expect(html).not.toContain('Loading account-aware model choices');
+  });
+
+  test('an absent catalog route says the endpoint is missing and never asks for a daemon restart', () => {
+    const html = renderToStaticMarkup(
+      <RuntimeModelChoices
+        harness="claude"
+        choices={null}
+        error={new ApiError(404, 'no route GET /v1/sessions/s1/runtime-models', 'unknown_route')}
+        currentModel={undefined}
+        submittingModel={undefined}
+        disabled={false}
+        onChoose={() => undefined}
+      />,
+    );
+
+    expect(html).toContain('does not provide the runtime model catalog endpoint');
+    expect(html).toContain('Restarting an unchanged daemon build will not add the missing route');
+    expect(html).not.toContain('Daemon restart required');
   });
 
   test('renders one shared 44px model list with observed-current and requested-row-only pending semantics', () => {
@@ -422,7 +445,7 @@ describe('reasoning effort controls', () => {
     expect(disabled.match(/disabled=""/g)?.length).toBe(CLAUDE_EFFORT_LEVELS.length);
   });
 
-  test('an old daemon rejecting the effort verb reads as restart-required, not a red error', () => {
+  test('an old daemon rejecting the effort verb reads as version skew, not a red error', () => {
     expect(isEffortActionUnsupported(new ApiError(400, 'runtime action must be "model"'))).toBe(true);
     // A genuine 404 keeps the existing runtime-endpoint treatment; an unrelated
     // 400 stays an ordinary failure the reader should see verbatim.

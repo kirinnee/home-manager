@@ -31,6 +31,7 @@ import {
   type BrowserViewport,
 } from './browser-types';
 import { createPaths } from './paths';
+import { RuntimeModelsApi } from './runtime-models-api';
 
 const view: SessionView = {
   directory: '/tmp/kteam/s1',
@@ -1160,6 +1161,79 @@ describe('request-id idempotency for retried mutations', () => {
     expect(controls).toBe(2);
   });
 
+  test('mounts the session-scoped runtime model catalog with its real wire shape', async () => {
+    const requested: string[] = [];
+    const runtimeModels = new RuntimeModelsApi({
+      runtimeModels: async id => {
+        requested.push(id);
+        return {
+          harness: 'claude',
+          source: 'wrapper-inventory',
+          choices: [{ value: 'opus', label: 'Opus 5 · 1M', reasoningEfforts: [] }],
+        };
+      },
+    });
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      service: new FakeService(),
+      runtimeModels,
+    });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+
+    const response = await fetch(`${base}/v1/sessions/s1/runtime-models`, {
+      headers: { authorization: 'Bearer secret' },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      harness: 'claude',
+      source: 'wrapper-inventory',
+      choices: [{ value: 'opus', label: 'Opus 5 · 1M', reasoningEfforts: [] }],
+    });
+    expect(requested).toEqual(['s1']);
+
+    // resolveApiActor() turns an in-pane admin-token call into a peer actor;
+    // query/body fields cannot promote it back to a human admin.
+    const peer = await fetch(`${base}/v1/sessions/s1/runtime-models?actor=admin-ui`, {
+      headers: { authorization: 'Bearer secret', 'x-kteam-session-id': 'peer-session' },
+    });
+    expect(peer.status).toBe(403);
+    expect(requested).toEqual(['s1']);
+  });
+
+  test('runtime model route rejects traversal-shaped ids and unsupported methods before catalog access', async () => {
+    let calls = 0;
+    const runtimeModels = new RuntimeModelsApi({
+      runtimeModels: async () => {
+        calls++;
+        return { harness: 'codex', source: 'codex-app-server', choices: [] };
+      },
+    });
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      service: new FakeService(),
+      runtimeModels,
+    });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    const headers = { authorization: 'Bearer secret' };
+
+    for (const encoded of ['..%2Fsecret', 'session%2Fodd', '%2Ehidden', 'bad%ZZ']) {
+      const response = await fetch(`${base}/v1/sessions/${encoded}/runtime-models`, { headers });
+      expect(response.status).toBe(404);
+      expect(((await response.json()) as { code?: string }).code).toBe('unknown_route');
+    }
+    expect(calls).toBe(0);
+
+    const wrongMethod = await fetch(`${base}/v1/sessions/s1/runtime-models`, { method: 'POST', headers });
+    expect(wrongMethod.status).toBe(405);
+    expect(calls).toBe(0);
+  });
+
   test('distinct request ids and id-less requests both apply', async () => {
     const service = new FakeService();
     let sends = 0;
@@ -1419,36 +1493,84 @@ describe('remote browser API integration', () => {
     viewport: BrowserViewport = { width: 1280, height: 800 };
     inputs: BrowserInputEvent[] = [];
     listener?: (frame: BrowserScreencastFrame) => void;
+    private pages = [{ id: 'page-1', url: 'about:blank', title: '' }];
+    private activePageId = 'page-1';
+
+    private snapshot() {
+      const active = this.pages.find(page => page.id === this.activePageId)!;
+      return {
+        url: active.url,
+        title: active.title,
+        pages: this.pages.map(page => ({ ...page })),
+        activePageId: active.id,
+        pageState: 'ready' as const,
+        canGoBack: false,
+        canGoForward: false,
+      };
+    }
+
+    private actionSnapshot(actedPageId = this.activePageId) {
+      return { ...this.snapshot(), actedPageId };
+    }
 
     async resize(viewport: BrowserViewport) {
       this.viewport = viewport;
+      return this.actionSnapshot();
     }
     async navigate(url: string) {
-      return { url, title: 'Browser fixture' };
+      const active = this.pages.find(page => page.id === this.activePageId)!;
+      active.url = url;
+      active.title = 'Browser fixture';
+      return this.actionSnapshot();
     }
     async click() {
-      return { url: 'https://example.test/', title: 'Browser fixture' };
+      return this.actionSnapshot();
     }
     async type() {
-      return { url: 'https://example.test/', title: 'Browser fixture' };
+      return this.actionSnapshot();
     }
     async read() {
-      return { url: 'https://example.test/', title: 'Browser fixture', text: 'fixture page' };
+      return { ...this.actionSnapshot(), text: 'fixture page' };
     }
     async screenshot() {
-      return { url: 'https://example.test/', title: 'Browser fixture', screenshotBase64: 'cG5n' };
+      return { ...this.actionSnapshot(), screenshotBase64: 'cG5n' };
     }
     async back() {
-      return { url: 'https://example.test/back', title: 'Browser fixture' };
+      const active = this.pages.find(page => page.id === this.activePageId)!;
+      active.url = 'https://example.test/back';
+      active.title = 'Browser fixture';
+      return this.actionSnapshot();
     }
     async forward() {
-      return { url: 'https://example.test/forward', title: 'Browser fixture' };
+      const active = this.pages.find(page => page.id === this.activePageId)!;
+      active.url = 'https://example.test/forward';
+      active.title = 'Browser fixture';
+      return this.actionSnapshot();
     }
     async reload() {
-      return { url: 'https://example.test/', title: 'Browser fixture' };
+      return this.actionSnapshot();
     }
     async location() {
-      return { url: 'about:blank', title: '' };
+      return this.snapshot();
+    }
+    async newPage(url = 'about:blank') {
+      const id = `page-${this.pages.length + 1}`;
+      this.pages.push({ id, url, title: '' });
+      this.activePageId = id;
+      return this.actionSnapshot(id);
+    }
+    async activatePage(pageId: string) {
+      if (!this.pages.some(page => page.id === pageId)) throw new Error('page not found');
+      this.activePageId = pageId;
+      return this.actionSnapshot(pageId);
+    }
+    async closePage(pageId: string) {
+      const index = this.pages.findIndex(page => page.id === pageId);
+      if (index < 0) throw new Error('page not found');
+      this.pages.splice(index, 1);
+      if (this.pages.length === 0) this.pages.push({ id: 'page-replacement', url: 'about:blank', title: '' });
+      if (this.activePageId === pageId) this.activePageId = this.pages[Math.min(index, this.pages.length - 1)]!.id;
+      return this.actionSnapshot(pageId);
     }
     async startScreencast(listener: (frame: BrowserScreencastFrame) => void) {
       this.listener = listener;
@@ -1458,6 +1580,7 @@ describe('remote browser API integration', () => {
             dataBase64: Buffer.from('browser-frame').toString('base64'),
             width: this.viewport.width,
             height: this.viewport.height,
+            pageId: this.activePageId,
           });
         }
       }, 0);
@@ -1659,6 +1782,7 @@ describe('warden-scoped token authorization', () => {
     expect((await post('/v1/sessions/s1/stop')).status).toBe(403);
     expect((await post('/v1/sessions/s1/interrupt')).status).toBe(403);
     expect((await post('/v1/sessions/s1/runtime')).status).toBe(403);
+    expect((await fetch(`${base}/v1/sessions/s1/runtime-models`, { headers: scoped })).status).toBe(403);
     expect((await post('/v1/warden/run')).status).toBe(403);
     expect((await fetch(`${base}/v1/sessions/s1`, { method: 'DELETE', headers: scoped })).status).toBe(403);
     expect((await fetch(`${base}/v1/warden/status`, { headers: scoped })).status).toBe(403);

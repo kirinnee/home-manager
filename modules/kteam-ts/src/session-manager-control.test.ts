@@ -1,11 +1,22 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { actorContext } from './actor-context';
+import {
+  codexRuntimeModelCatalog,
+  driveCodexModelPicker,
+  preflightCodexModelPicker,
+  waitForCodexRuntimeObservation,
+  waitForCodexThreadSettingsApplied,
+  type CodexPickerKeyExpectation,
+  type CodexPickerTarget,
+  type CodexPickerTransport,
+} from './codex-runtime';
+import { runtimeModelsForWrapper } from './fleet-inventory';
 import { createPaths } from './paths';
 import { newAcceptedSend, type SendRecord } from './send-ledger';
-import { SessionManager } from './session-manager';
+import { dismissCodexPicker, SessionManager } from './session-manager';
 import type { ObservedHumanInput } from './observed-human-input';
 import type { SessionView } from './service';
 import type { RuntimeControlRequest, SessionConfig, SessionState } from './types';
@@ -15,8 +26,10 @@ import type { RuntimeControlRequest, SessionConfig, SessionState } from './types
 // (F4 auto-revive, F5 queued-send delivery) with the collaborators mocked.
 
 const temporaryDirectories: string[] = [];
+const originalCodexRuntimeCatalogGet = codexRuntimeModelCatalog.get;
 
 afterEach(async () => {
+  codexRuntimeModelCatalog.get = originalCodexRuntimeCatalogGet;
   await Promise.all(temporaryDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
 });
 
@@ -32,6 +45,7 @@ function bareManager(): Loose {
   manager.terminalSendFinalizers = new Map();
   manager.deleting = new Set();
   manager.queues = new Map();
+  manager.runtimeControlQueues = new Map();
   manager.monitors = new Map();
   manager.closed = false;
   manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
@@ -360,31 +374,18 @@ describe('manual resume vs automatic recovery dedupe', () => {
     expect((fixture.manager.launching as Map<string, unknown>).has('target')).toBe(false);
   });
 
-  test('terminal send is durably queued when a real revive refusal prevents delivery', async () => {
+  test('kill_failed panes reject input before delivery or revive side effects', async () => {
     const fixture = await recoveryManager('kill_failed');
-    const result = await (
-      fixture.manager as unknown as {
-        send: (id: string, request: { message: string }) => Promise<SessionView & { disposition: string }>;
-      }
-    ).send('target', { message: 'final handover' });
-
-    expect(result.disposition).toBe('queued-for-revive');
+    await expect(
+      (
+        fixture.manager as unknown as {
+          send: (id: string, request: { message: string }) => Promise<SessionView & { disposition: string }>;
+        }
+      ).send('target', { message: 'final handover' }),
+    ).rejects.toThrow('previous tmux shutdown was not confirmed');
     expect(fixture.launches).toBe(0);
-    const rows = (await readFile(path.join(fixture.home, 'target', 'channel', 'inbox.jsonl'), 'utf8'))
-      .trim()
-      .split('\n')
-      .map(line => JSON.parse(line) as Record<string, unknown>);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      type: 'message',
-      queuedForRevive: true,
-      message: 'final handover',
-      reviveRefusal: 'the previous tmux kill failed; use stop again before resume',
-    });
-    expect(typeof rows[0]?.queueId).toBe('string');
-    expect(
-      fixture.events.some(event => event.type === 'control.send_queued' && event.data['queuedForRevive'] === true),
-    ).toBe(true);
+    await expect(readFile(path.join(fixture.home, 'target', 'channel', 'inbox.jsonl'), 'utf8')).rejects.toThrow();
+    expect(fixture.events).toEqual([]);
     expect((fixture.manager.launching as Map<string, unknown>).has('target')).toBe(false);
   });
 
@@ -523,6 +524,8 @@ describe('in-session runtime model controls', () => {
   function runtimeManager(input: {
     harness: 'claude' | 'codex';
     binary: string;
+    cwd?: string;
+    transcriptFile?: string;
     promptReady?: boolean;
     outcome?: 'handled-local' | 'turn-started';
   }) {
@@ -534,8 +537,10 @@ describe('in-session runtime model controls', () => {
         id: 's1',
         harness: input.harness,
         binary: input.binary,
+        cwd: input.cwd ?? '/tmp',
         tmuxSession: 'kteam-s1-agent',
         turn: 7,
+        ...(input.transcriptFile ? { transcriptFile: input.transcriptFile } : {}),
       },
       state: { id: 's1', status: 'awaiting_user', turn: 7, observedModel: 'previous-model' },
     } as SessionView;
@@ -544,11 +549,17 @@ describe('in-session runtime model controls', () => {
     manager.serialized = async (_id: string, work: () => Promise<SessionView>) => await work();
     manager.get = async () => view;
     manager.tmux = {
-      state: async () => ({ alive: true, dead: false, promptReady: input.promptReady ?? true }),
+      state: async () => ({
+        alive: true,
+        dead: false,
+        promptReady: input.promptReady ?? true,
+        visiblePane: 'Select Model and Effort\n  1. gpt-5.5',
+      }),
       inject: async (_name: string, command: string) => {
         commands.push(command);
         return input.outcome ?? 'handled-local';
       },
+      snapshot: async () => '',
     };
     manager.emit = async (_id: string, type: string, data: Record<string, unknown>) => {
       events.push({ type, data });
@@ -556,6 +567,24 @@ describe('in-session runtime model controls', () => {
     };
     return { manager, view, commands, events };
   }
+
+  async function transcriptFixture() {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'kteam-codex-runtime-'));
+    temporaryDirectories.push(directory);
+    const file = path.join(directory, 'rollout.jsonl');
+    const prefix = '{"old":true}\n';
+    await writeFile(file, prefix);
+    return { directory, file, prefix };
+  }
+
+  const rawSettingsApplied = (target: CodexPickerTarget) =>
+    JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'thread_settings_applied',
+        thread_settings: { model: target.model, reasoning_effort: target.effort },
+      },
+    });
 
   test('Claude injects one allowlisted account model without advancing the turn or lying about observed state', async () => {
     const { manager, view, commands, events } = runtimeManager({
@@ -576,11 +605,654 @@ describe('in-session runtime model controls', () => {
     ]);
   });
 
-  test('Codex opens its native account-aware model and reasoning picker', async () => {
+  test('bare Codex model control still opens its native account-aware picker', async () => {
     const { manager, commands, events } = runtimeManager({ harness: 'codex', binary: 'codex-auto-loai' });
+    let catalogReads = 0;
+    codexRuntimeModelCatalog.get = async () => {
+      catalogReads++;
+      throw new Error('bare picker must not load a catalog');
+    };
     await callRuntime(manager, { action: 'model' });
     expect(commands).toEqual(['/model']);
     expect(events[0]).toEqual({ type: 'control.runtime_model', data: { harness: 'codex', picker: true } });
+    expect(catalogReads).toBe(0);
+  });
+
+  test('runtimeModels returns the authoritative wire shape for each harness', async () => {
+    const claude = runtimeManager({ harness: 'claude', binary: 'claude-auto-loge' });
+    const claudeCatalog = await (claude.manager as unknown as SessionManager).runtimeModels('s1');
+    expect(claudeCatalog).toEqual({
+      harness: 'claude',
+      source: 'wrapper-inventory',
+      choices: runtimeModelsForWrapper('claude-auto-loge').map(choice => ({ ...choice, reasoningEfforts: [] })),
+    });
+
+    const codexChoices = [
+      {
+        value: 'gpt-5.5',
+        label: 'GPT-5.5',
+        reasoningEfforts: [{ value: 'high' }],
+        defaultReasoningEffort: 'high',
+      },
+    ];
+    codexRuntimeModelCatalog.get = async (binary, cwd) => {
+      expect(binary).toBe('/bin/true');
+      expect(cwd).toBe('/tmp');
+      return codexChoices;
+    };
+    const codex = runtimeManager({ harness: 'codex', binary: '/bin/true' });
+    await expect((codex.manager as unknown as SessionManager).runtimeModels('s1')).resolves.toEqual({
+      harness: 'codex',
+      source: 'codex-app-server',
+      choices: codexChoices,
+    });
+  });
+
+  test('screen-aware Codex quick-picker preflight refuses a mismatched direct-default row before its digit', async () => {
+    const transcript = await transcriptFixture();
+    const target = { model: 'gpt-5.5', effort: 'high' };
+    codexRuntimeModelCatalog.get = async () => [
+      {
+        value: target.model,
+        label: 'GPT-5.5',
+        reasoningEfforts: [{ value: 'medium' }, { value: target.effort }],
+        defaultReasoningEffort: 'medium',
+      },
+    ];
+    const { manager, commands, events } = runtimeManager({
+      harness: 'codex',
+      binary: '/bin/true',
+      cwd: transcript.directory,
+      transcriptFile: transcript.file,
+    });
+    let stateReads = 0;
+    manager.tmux = {
+      state: async () => {
+        stateReads++;
+        return stateReads < 3
+          ? { alive: true, dead: false, promptReady: true, visiblePane: '› ' }
+          : {
+              alive: true,
+              dead: false,
+              promptReady: false,
+              visiblePane: 'Select Model\n› 1. gpt-5.5\n  2. All models',
+            };
+      },
+      inject: async (_name: string, command: string) => {
+        commands.push(command);
+        return 'handled-local' as const;
+      },
+    };
+    const pickerKeys: string[] = [];
+    let preflightCalls = 0;
+    let driverCalls = 0;
+    let cleanupCalls = 0;
+    manager.codexRuntimeControl = {
+      preflightModelPicker: async (transport: CodexPickerTransport, requested: CodexPickerTarget) => {
+        preflightCalls++;
+        return await preflightCodexModelPicker(transport, requested, { pollMs: 0 });
+      },
+      driveModelPicker: async () => {
+        driverCalls++;
+      },
+      sendPickerKey: async (_session: string, key: string) => {
+        pickerKeys.push(key);
+      },
+      dismissPicker: async () => {
+        cleanupCalls++;
+      },
+      waitForThreadSettingsApplied: waitForCodexThreadSettingsApplied,
+      waitForRuntimeObservation: waitForCodexRuntimeObservation,
+    };
+
+    await expect(callRuntime(manager, { action: 'model', model: target.model, effort: target.effort })).rejects.toThrow(
+      'can only select its default medium reasoning level',
+    );
+    expect(preflightCalls).toBe(1);
+    expect(driverCalls).toBe(0);
+    expect(commands).toEqual(['/model']);
+    expect(pickerKeys).toEqual([]);
+    expect(cleanupCalls).toBe(1);
+    expect(events).toEqual([]);
+  });
+
+  test('Codex picker drive failure closes the verified exact pane before rethrowing', async () => {
+    const transcript = await transcriptFixture();
+    const target = { model: 'gpt-5.5', effort: 'high' };
+    codexRuntimeModelCatalog.get = async () => [
+      {
+        value: target.model,
+        label: 'GPT-5.5',
+        reasoningEfforts: [{ value: target.effort }],
+        defaultReasoningEffort: target.effort,
+      },
+    ];
+    const { manager, commands, events } = runtimeManager({
+      harness: 'codex',
+      binary: '/bin/true',
+      cwd: transcript.directory,
+      transcriptFile: transcript.file,
+    });
+    const cleanupCalls: string[] = [];
+    let frame = 0;
+    let clock = 0;
+    manager.codexRuntimeControl = {
+      driveModelPicker: async (transport: CodexPickerTransport) => {
+        expect(await transport.openPicker()).toBe('handled-local');
+        throw new Error('picker stage failed');
+      },
+      sendPickerKey: async () => undefined,
+      dismissPicker: async (tmuxSession: string) => {
+        expect(tmuxSession).toBe('kteam-s1-agent');
+        await dismissCodexPicker(
+          {
+            resolvePane: async () => {
+              cleanupCalls.push('resolve');
+              return '%42';
+            },
+            capturePane: async paneId => {
+              cleanupCalls.push(`capture:${paneId}`);
+              frame++;
+              return frame === 1
+                ? { visiblePane: 'Select Model\n› 1. gpt-5.5', promptReady: false }
+                : { visiblePane: '› ', promptReady: true };
+            },
+            sendEscape: async paneId => {
+              cleanupCalls.push(`escape:${paneId}`);
+            },
+          },
+          {
+            timeoutMs: 4,
+            pollMs: 1,
+            clock: () => clock,
+            sleep: async milliseconds => {
+              clock += milliseconds;
+            },
+          },
+        );
+      },
+      waitForThreadSettingsApplied: waitForCodexThreadSettingsApplied,
+      waitForRuntimeObservation: waitForCodexRuntimeObservation,
+    };
+
+    await expect(callRuntime(manager, { action: 'model', model: target.model, effort: target.effort })).rejects.toThrow(
+      'picker stage failed',
+    );
+    expect(commands).toEqual(['/model']);
+    expect(cleanupCalls).toEqual(['resolve', 'capture:%42', 'escape:%42', 'capture:%42']);
+    expect(events).toEqual([]);
+  });
+
+  test('Codex final picker-close timeout reaches cleanup before runtime returns its failure', async () => {
+    const transcript = await transcriptFixture();
+    const target = { model: 'gpt-5.5', effort: 'high' };
+    codexRuntimeModelCatalog.get = async () => [
+      {
+        value: target.model,
+        label: 'GPT-5.5',
+        reasoningEfforts: [{ value: target.effort }],
+        defaultReasoningEffort: target.effort,
+      },
+    ];
+    const { manager, commands, events } = runtimeManager({
+      harness: 'codex',
+      binary: '/bin/true',
+      cwd: transcript.directory,
+      transcriptFile: transcript.file,
+    });
+    const frames = [
+      { alive: true, dead: false, promptReady: true, visiblePane: '› ' },
+      { alive: true, dead: false, promptReady: true, visiblePane: '› ' },
+      { alive: true, dead: false, promptReady: false, visiblePane: 'Select Model and Effort\n› 1. gpt-5.5' },
+      { alive: true, dead: false, promptReady: false, visiblePane: 'Select Reasoning Level for gpt-5.5\n› 1. High' },
+      {
+        alive: true,
+        dead: false,
+        promptReady: false,
+        visiblePane: 'Apply reasoning change\n› 1. Apply to global default and Plan mode override',
+      },
+      { alive: true, dead: false, promptReady: false, visiblePane: 'Applying settingâ¦' },
+    ];
+    let frame = 0;
+    manager.tmux = {
+      state: async () => frames[Math.min(frame++, frames.length - 1)]!,
+      inject: async (_session: string, command: string) => {
+        commands.push(command);
+        return 'handled-local' as const;
+      },
+      snapshot: async () => '',
+    };
+    const pickerKeys: string[] = [];
+    let cleanupCalls = 0;
+    manager.codexRuntimeControl = {
+      driveModelPicker: async (...args: Parameters<typeof driveCodexModelPicker>) => {
+        const [transport, pickerTarget, , preflightScreen] = args;
+        await driveCodexModelPicker(
+          transport,
+          pickerTarget,
+          { timeoutMs: 10, pollMs: 0, sleep: async () => await Bun.sleep(1) },
+          preflightScreen,
+        );
+      },
+      sendPickerKey: async (_session: string, key: string) => {
+        pickerKeys.push(key);
+      },
+      dismissPicker: async () => {
+        cleanupCalls++;
+      },
+      waitForThreadSettingsApplied: waitForCodexThreadSettingsApplied,
+      waitForRuntimeObservation: waitForCodexRuntimeObservation,
+    };
+
+    await expect(callRuntime(manager, { action: 'model', model: target.model, effort: target.effort })).rejects.toThrow(
+      'did not reach the applied setting to return to an idle prompt',
+    );
+    expect(commands).toEqual(['/model']);
+    expect(pickerKeys).toEqual(['1', '1', '1']);
+    expect(cleanupCalls).toBe(1);
+    expect(events).toEqual([]);
+  });
+
+  test('Codex picker cleanup bounds Escape, quarantines the session, and never lets a later send type into it', async () => {
+    const transcript = await transcriptFixture();
+    const target = { model: 'gpt-5.5', effort: 'high' };
+    codexRuntimeModelCatalog.get = async () => [
+      {
+        value: target.model,
+        label: 'GPT-5.5',
+        reasoningEfforts: [{ value: target.effort }],
+        defaultReasoningEffort: target.effort,
+      },
+    ];
+    const { manager, view, commands, events } = runtimeManager({
+      harness: 'codex',
+      binary: '/bin/true',
+      cwd: transcript.directory,
+      transcriptFile: transcript.file,
+    });
+    let clock = 0;
+    let captures = 0;
+    let escapes = 0;
+    const quarantines: Array<{ patch: Partial<SessionState>; type: string; data: Record<string, unknown> }> = [];
+    const stopped: string[] = [];
+    manager.transition = async (
+      _id: string,
+      patch: Partial<SessionState>,
+      type: string,
+      data: Record<string, unknown>,
+    ) => {
+      quarantines.push({ patch, type, data });
+      view.state = { ...view.state, ...patch };
+    };
+    manager.stopManagedSession = async (_config: SessionConfig, reason: string) => {
+      stopped.push(reason);
+    };
+    manager.codexRuntimeControl = {
+      driveModelPicker: async (transport: CodexPickerTransport) => {
+        expect(await transport.openPicker()).toBe('handled-local');
+        throw new Error('picker stage failed');
+      },
+      sendPickerKey: async () => undefined,
+      dismissPicker: async () =>
+        await dismissCodexPicker(
+          {
+            resolvePane: async () => '%42',
+            capturePane: async paneId => {
+              expect(paneId).toBe('%42');
+              captures++;
+              return { visiblePane: 'Select Model\n› 1. gpt-5.5', promptReady: false };
+            },
+            sendEscape: async paneId => {
+              expect(paneId).toBe('%42');
+              escapes++;
+            },
+          },
+          {
+            timeoutMs: 4,
+            pollMs: 2,
+            clock: () => clock,
+            sleep: async milliseconds => {
+              clock += milliseconds;
+            },
+          },
+        ),
+      waitForThreadSettingsApplied: waitForCodexThreadSettingsApplied,
+      waitForRuntimeObservation: waitForCodexRuntimeObservation,
+    };
+
+    await expect(callRuntime(manager, { action: 'model', model: target.model, effort: target.effort })).rejects.toThrow(
+      /picker stage failed; picker cleanup failed: Codex picker cleanup did not close Select Model within 1s; session was stopped for safety/,
+    );
+    expect(captures).toBe(3);
+    expect(escapes).toBe(2);
+    expect(commands).toEqual(['/model']);
+    expect(events).toEqual([]);
+    expect(view.state.status).toBe('failed');
+    expect(stopped).toEqual([
+      'Codex picker cleanup could not confirm the exact pane returned to an idle prompt; the session was quarantined to prevent input into an unknown modal',
+    ]);
+    expect(quarantines).toEqual([
+      {
+        patch: expect.objectContaining({
+          status: 'failed',
+          promptReady: false,
+          needsHumanKind: 'codex_picker_cleanup',
+        }),
+        type: 'session.codex_picker_quarantined',
+        data: expect.objectContaining({ driveError: 'picker stage failed' }),
+      },
+    ]);
+
+    manager.launchingRecently = () => false;
+    await expect(
+      (manager as unknown as SessionManager).send('s1', { message: '1 must not be typed into a picker' }),
+    ).rejects.toThrow('input is blocked because Codex picker cleanup was not confirmed');
+    expect(commands).toEqual(['/model']);
+    await expect(callRuntime(manager, { action: 'model', model: target.model, effort: target.effort })).rejects.toThrow(
+      'input is blocked because Codex picker cleanup was not confirmed',
+    );
+
+    let unknownEscapes = 0;
+    await expect(
+      dismissCodexPicker({
+        resolvePane: async () => '%42',
+        capturePane: async () => ({ visiblePane: 'unrecognized native modal', promptReady: false }),
+        sendEscape: async () => {
+          unknownEscapes++;
+        },
+      }),
+    ).rejects.toThrow('could not verify that the exact pane returned to an idle prompt');
+    expect(unknownEscapes).toBe(0);
+  });
+
+  test('Codex picker quarantine survives refused recovery paths and blocks all later pane input', async () => {
+    const transcript = await transcriptFixture();
+    const target = { model: 'gpt-5.5', effort: 'high' };
+    codexRuntimeModelCatalog.get = async () => [
+      {
+        value: target.model,
+        label: 'GPT-5.5',
+        reasoningEfforts: [{ value: target.effort }],
+        defaultReasoningEffort: target.effort,
+      },
+    ];
+    const { manager, view, commands, events } = runtimeManager({
+      harness: 'codex',
+      binary: '/bin/true',
+      cwd: transcript.directory,
+      transcriptFile: transcript.file,
+    });
+    view.directory = transcript.directory;
+    const pickerKeys: string[] = [];
+    const stopReasons: string[] = [];
+    const clearStates: SessionState[] = [];
+    manager.store = {
+      updateState: async (_id: string, mutate: (current: SessionState) => SessionState) => {
+        const next = mutate(view.state);
+        clearStates.push(next);
+        view.state = next;
+        return next;
+      },
+    };
+    manager.transition = async (_id: string, patch: Partial<SessionState>) => {
+      view.state = { ...view.state, ...patch };
+    };
+    manager.stopManagedSession = async (_config: SessionConfig, reason: string) => {
+      stopReasons.push(reason);
+      view.state = { ...view.state, status: 'kill_failed', promptReady: false };
+      throw new Error('tmux stop failed');
+    };
+    manager.codexRuntimeControl = {
+      driveModelPicker: async (transport: CodexPickerTransport) => {
+        expect(await transport.openPicker()).toBe('handled-local');
+        throw new Error('picker stage failed');
+      },
+      sendPickerKey: async (_session: string, key: string) => {
+        pickerKeys.push(key);
+      },
+      dismissPicker: async () => {
+        throw new Error('could not verify the picker closed');
+      },
+      waitForThreadSettingsApplied: waitForCodexThreadSettingsApplied,
+      waitForRuntimeObservation: waitForCodexRuntimeObservation,
+    };
+
+    await expect(callRuntime(manager, { action: 'model', model: target.model, effort: target.effort })).rejects.toThrow(
+      /session remains quarantined because its tmux pane could not be stopped: tmux stop failed/,
+    );
+    expect(view.state.status).toBe('kill_failed');
+    expect(view.state.needsHumanKind).toBe('codex_picker_cleanup');
+
+    manager.launching = new Map();
+    manager.launchingRecently = () => false;
+    manager.cancelRetry = () => undefined;
+    manager.cancelQuotaWaiter = async () => undefined;
+    await expect((manager as unknown as SessionManager).resume('s1')).rejects.toThrow(
+      'the previous tmux kill failed; use stop again before resume',
+    );
+    expect(view.state.needsHumanKind).toBe('codex_picker_cleanup');
+
+    await expect((manager as unknown as SessionManager).answer('s1', 'stale-question', ['1'])).rejects.toThrow(
+      'input is blocked because Codex picker cleanup was not confirmed',
+    );
+    expect(view.state.needsHumanKind).toBe('codex_picker_cleanup');
+
+    await expect((manager as unknown as SessionManager).stop('s1')).rejects.toThrow('tmux stop failed');
+    expect(view.state.needsHumanKind).toBe('codex_picker_cleanup');
+    expect(clearStates).toEqual([expect.objectContaining({ needsHumanKind: 'codex_picker_cleanup' })]);
+
+    await expect(
+      (manager as unknown as SessionManager).send('s1', { message: '7 must not become a picker shortcut' }),
+    ).rejects.toThrow('previous tmux shutdown was not confirmed');
+    await expect(callRuntime(manager, { action: 'model', model: target.model, effort: target.effort })).rejects.toThrow(
+      'previous tmux shutdown was not confirmed',
+    );
+    expect(commands).toEqual(['/model']);
+    expect(pickerKeys).toEqual([]);
+    expect(events).toEqual([]);
+    expect(stopReasons).toHaveLength(2);
+
+    manager.stopManagedSession = async (_config: SessionConfig, reason: string) => {
+      stopReasons.push(reason);
+    };
+    await expect((manager as unknown as SessionManager).stop('s1')).resolves.toBe(view);
+    expect(view.state.status).toBe('stopped');
+    expect(view.state.needsHumanKind).toBeUndefined();
+    expect(clearStates.at(-1)).toEqual(expect.objectContaining({ needsHuman: undefined, needsHumanKind: undefined }));
+  });
+
+  test('Codex does not emit runtime success after raw confirmation without a fresh persisted observation', async () => {
+    const transcript = await transcriptFixture();
+    const target = { model: 'gpt-5.5', effort: 'high' };
+    codexRuntimeModelCatalog.get = async () => [
+      {
+        value: target.model,
+        label: 'GPT-5.5',
+        reasoningEfforts: [{ value: target.effort }],
+        defaultReasoningEffort: target.effort,
+      },
+    ];
+    const { manager, view, commands, events } = runtimeManager({
+      harness: 'codex',
+      binary: '/bin/true',
+      cwd: transcript.directory,
+      transcriptFile: transcript.file,
+    });
+    view.state = {
+      ...view.state,
+      observedModel: target.model,
+      observedReasoningEffort: target.effort,
+      observedModelAt: 'before',
+      transcriptOffset: transcript.prefix.length,
+    };
+    const phases: string[] = [];
+    manager.codexRuntimeControl = {
+      driveModelPicker: async (transport: CodexPickerTransport) => {
+        expect(await transport.openPicker()).toBe('handled-local');
+        await writeFile(transcript.file, `${transcript.prefix}${rawSettingsApplied(target)}\n`);
+      },
+      sendPickerKey: async () => undefined,
+      dismissPicker: async () => undefined,
+      waitForThreadSettingsApplied: async (...args: Parameters<typeof waitForCodexThreadSettingsApplied>) => {
+        const applied = await waitForCodexThreadSettingsApplied(...args);
+        phases.push('raw-confirmed');
+        return applied;
+      },
+      waitForRuntimeObservation: async () => {
+        phases.push('persisted-observation-wait');
+        throw new Error('persisted runtime observation did not refresh');
+      },
+    };
+
+    await expect(callRuntime(manager, { action: 'model', model: target.model, effort: target.effort })).rejects.toThrow(
+      'persisted runtime observation did not refresh',
+    );
+    expect(phases).toEqual(['raw-confirmed', 'persisted-observation-wait']);
+    expect(commands).toEqual(['/model']);
+    expect(events).toEqual([]);
+  });
+
+  test('Codex drives an exact advertised target and emits only after fresh raw and persisted confirmation', async () => {
+    const transcript = await transcriptFixture();
+    const target = { model: 'gpt-5.5', effort: 'high' };
+    codexRuntimeModelCatalog.get = async () => [
+      {
+        value: target.model,
+        label: 'GPT-5.5',
+        reasoningEfforts: [{ value: target.effort }],
+        defaultReasoningEffort: target.effort,
+      },
+    ];
+    const { manager, view, commands, events } = runtimeManager({
+      harness: 'codex',
+      binary: '/bin/true',
+      cwd: transcript.directory,
+      transcriptFile: transcript.file,
+    });
+    view.state = {
+      ...view.state,
+      observedModel: target.model,
+      observedReasoningEffort: target.effort,
+      observedModelAt: 'before',
+      transcriptOffset: transcript.prefix.length,
+    };
+    const phases: string[] = [];
+    const pickerKeys: string[] = [];
+    manager.codexRuntimeControl = {
+      driveModelPicker: async (transport: CodexPickerTransport, requested: CodexPickerTarget) => {
+        phases.push('picker');
+        expect(requested).toEqual(target);
+        expect(await transport.openPicker()).toBe('handled-local');
+        expect((await transport.readPane()).alive).toBe(true);
+        await transport.sendKey('1', {
+          kind: 'all-models',
+          title: 'Select Model and Effort',
+          row: { number: 1, name: target.model },
+        });
+        const applied = rawSettingsApplied(requested);
+        await writeFile(transcript.file, `${transcript.prefix}${applied}\n`);
+        view.state = {
+          ...view.state,
+          observedModel: requested.model,
+          observedReasoningEffort: requested.effort,
+          observedModelAt: 'after',
+          transcriptOffset: (await stat(transcript.file)).size,
+        };
+      },
+      sendPickerKey: async (_session: string, key: string, expected: CodexPickerKeyExpectation) => {
+        pickerKeys.push(`${key}:${expected.row.name}`);
+        phases.push('key');
+      },
+      waitForThreadSettingsApplied: async (...args: Parameters<typeof waitForCodexThreadSettingsApplied>) => {
+        const applied = await waitForCodexThreadSettingsApplied(...args);
+        phases.push('raw-confirmed');
+        return applied;
+      },
+      waitForRuntimeObservation: async (...args: Parameters<typeof waitForCodexRuntimeObservation>) => {
+        const observed = await waitForCodexRuntimeObservation(...args);
+        phases.push('state-confirmed');
+        return observed;
+      },
+    };
+    manager.emit = async (_id: string, type: string, data: Record<string, unknown>) => {
+      phases.push('event');
+      events.push({ type, data });
+      return {};
+    };
+
+    const result = await callRuntime(manager, { action: 'model', model: target.model, effort: target.effort });
+
+    expect(result).toBe(view);
+    expect(commands).toEqual(['/model']);
+    expect(pickerKeys).toEqual(['1:gpt-5.5']);
+    expect(phases).toEqual(['picker', 'key', 'raw-confirmed', 'state-confirmed', 'event']);
+    expect(events).toEqual([
+      {
+        type: 'control.runtime_model',
+        data: { harness: 'codex', requestedModel: target.model, requestedEffort: target.effort, verified: true },
+      },
+    ]);
+  });
+
+  test('Codex rejects incomplete or unadvertised targeted choices before picker input', async () => {
+    const target = { model: 'gpt-5.5', effort: 'high' };
+    codexRuntimeModelCatalog.get = async () => [
+      {
+        value: target.model,
+        label: 'GPT-5.5',
+        reasoningEfforts: [{ value: target.effort }],
+        defaultReasoningEffort: target.effort,
+      },
+    ];
+    const { manager, commands } = runtimeManager({ harness: 'codex', binary: '/bin/true' });
+
+    await expect(callRuntime(manager, { action: 'model', model: target.model })).rejects.toThrow(
+      'requires both model and effort',
+    );
+    await expect(
+      callRuntime(manager, { action: 'model', model: 'gpt-5.6-sol', effort: target.effort }),
+    ).rejects.toThrow('not in this Codex account');
+    await expect(callRuntime(manager, { action: 'model', model: target.model, effort: 'low' })).rejects.toThrow(
+      'not advertised for Codex model',
+    );
+    expect(commands).toEqual([]);
+  });
+
+  test('Codex does not claim runtime success after a conflicting raw confirmation', async () => {
+    const transcript = await transcriptFixture();
+    const target = { model: 'gpt-5.5', effort: 'high' };
+    codexRuntimeModelCatalog.get = async () => [
+      {
+        value: target.model,
+        label: 'GPT-5.5',
+        reasoningEfforts: [{ value: target.effort }],
+        defaultReasoningEffort: target.effort,
+      },
+    ];
+    const { manager, commands, events } = runtimeManager({
+      harness: 'codex',
+      binary: '/bin/true',
+      cwd: transcript.directory,
+      transcriptFile: transcript.file,
+    });
+    manager.codexRuntimeControl = {
+      driveModelPicker: async (transport: CodexPickerTransport) => {
+        expect(await transport.openPicker()).toBe('handled-local');
+        await writeFile(
+          transcript.file,
+          `${transcript.prefix}${rawSettingsApplied({ model: 'gpt-5.2', effort: 'medium' })}\n`,
+        );
+      },
+      sendPickerKey: async () => undefined,
+      waitForThreadSettingsApplied: waitForCodexThreadSettingsApplied,
+      waitForRuntimeObservation: waitForCodexRuntimeObservation,
+    };
+
+    await expect(callRuntime(manager, { action: 'model', model: target.model, effort: target.effort })).rejects.toThrow(
+      'reported gpt-5.2 · medium instead of gpt-5.5 · high',
+    );
+    expect(commands).toEqual(['/model']);
+    expect(events).toEqual([]);
   });
 
   test('Claude injects one persistable effort level without advancing the turn', async () => {

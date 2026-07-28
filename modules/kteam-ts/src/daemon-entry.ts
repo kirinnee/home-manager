@@ -20,6 +20,7 @@ import { TerminalApi } from './terminal-api';
 import { TerminalService } from './terminal-service';
 import { BrowserApi } from './browser-api';
 import { BrowserService } from './browser-service';
+import { RuntimeModelsApi } from './runtime-models-api';
 
 const secretsStatus = loadDaemonSecretsEnvironment();
 if (secretsStatus === 'failed') {
@@ -88,6 +89,10 @@ const manager = await SessionManager.create(paths, {
     return true;
   },
 });
+// Make the session manager's account-aware catalog an explicit production API
+// dependency. Keeping this in the options bag means an implementation can
+// never be complete-but-unmounted without daemon-entry changing visibly.
+const runtimeModelsApi = new RuntimeModelsApi(manager);
 const learning = new LearningManager(paths, config.learning, manager);
 // One writable service and one idempotency controller for the daemon lifetime.
 // Initialization performs the in-daemon, copy-only legacy migration, so the
@@ -158,6 +163,7 @@ const apiOptions = {
   pins: pinApi,
   terminals: terminalApi,
   browser: browserApi,
+  runtimeModels: runtimeModelsApi,
   attention: attentionApi,
   push: pushService.api,
   analytics,

@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test';
+import { ApiError } from './api';
 import {
   fetchRuntimeModelCatalog,
   parseRuntimeModelCatalog,
   requireRuntimeModelCatalogHarness,
+  runtimeModelCatalogErrorMessage,
   type RuntimeModelCatalog,
 } from './runtime-models';
 
@@ -62,5 +64,14 @@ describe('runtime model catalog client', () => {
           }),
       ),
     ).rejects.toThrow('Codex model catalog probe timed out');
+  });
+
+  test('describes an absent catalog route without prescribing a useless restart', () => {
+    const message = runtimeModelCatalogErrorMessage(
+      new ApiError(404, 'no route GET /v1/sessions/s/runtime-models', 'unknown_route'),
+    );
+    expect(message).toContain('does not provide the runtime model catalog endpoint');
+    expect(message).toContain('Restarting an unchanged daemon build will not add the missing route');
+    expect(message).not.toContain('restart required');
   });
 });

@@ -86,6 +86,16 @@ export function requireRuntimeModelCatalogHarness(
   return catalog;
 }
 
+/** A missing catalog is a missing daemon capability, not a condition a process
+ * restart can repair. Keep this copy distinct from POST /runtime version skew
+ * so the UI never sends the human into a useless restart loop. */
+export function runtimeModelCatalogErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.status === 404 && error.code === 'unknown_route') {
+    return 'This daemon does not provide the runtime model catalog endpoint. Restarting an unchanged daemon build will not add the missing route.';
+  }
+  return error instanceof ApiError ? error.message : String(error);
+}
+
 /** Session-scoped because the wrapper account, provider and project config all
  * participate in Codex's model/list result. */
 export async function fetchRuntimeModelCatalog(
