@@ -195,11 +195,11 @@ describe('/ skills provider', () => {
 });
 
 describe('store-backed reference providers', () => {
-  test('# rows show canonical references, titles, and live statuses without fetching', async () => {
+  test('& rows keep canonical # references, titles, and live statuses without fetching', async () => {
     let tasks: ComposerTaskSummary[] = [{ id: 'F38', title: 'Composer autocomplete', status: 'in_progress' }];
     const provider = createTasksProvider(() => tasks);
 
-    const first = await provider.candidates(context('#', 'F'));
+    const first = await provider.candidates(context('&', 'F'));
     expect(first.candidates).toEqual([
       expect.objectContaining({
         kind: 'task',
@@ -212,7 +212,7 @@ describe('store-backed reference providers', () => {
     expect(requests).toHaveLength(0);
 
     tasks = [{ id: 'B7', title: 'New live snapshot', status: 'blocked' as const }];
-    const updated = await provider.candidates(context('#', 'B'));
+    const updated = await provider.candidates(context('&', 'B'));
     expect(updated.candidates[0]).toMatchObject({ label: '#B7', badge: 'Blocked' });
   });
 
@@ -248,7 +248,7 @@ describe('store-backed reference providers', () => {
     );
     const before = provider.snapshotKey;
 
-    const result = provider.candidates(context('#', 'F'));
+    const result = provider.candidates(context('&', 'F'));
     tasks = [{ id: 'F12', title: 'Loaded by the existing warmup', status: 'todo' }];
     release();
 
@@ -263,7 +263,7 @@ describe('store-backed reference providers', () => {
     expect(createComposerAutocompleteProviders({ sessionId: 'one' }).map(provider => provider.trigger)).toEqual([
       '/',
       '@',
-      '#',
+      '&',
       '?',
     ]);
   });
