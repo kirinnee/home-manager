@@ -9,6 +9,7 @@ import type { ScopedTaskSummary, SessionTaskListResponse } from './tasks-types';
 import type { AddAttentionInput, AttentionService } from './attention-service';
 import type { AttentionActor } from './attention-types';
 import type { WardenAnomaly } from './warden-detect';
+import { parseWardenAnomalyKind, wardenVerdictSourceRef } from './warden-verdicts';
 
 export interface AttentionSessionSource {
   list(): Promise<SessionView[]>;
@@ -255,14 +256,31 @@ export class AttentionSources {
         )
         .catch(error => this.report(id, 'question baseline', error));
     }
+    const wardenRequests = [...(view.state.needsHumanRequests ?? [])];
     if (view.state.needsHuman) {
+      const legacy = {
+        reason: view.state.needsHuman,
+        anomalyKind: view.state.needsHumanKind,
+        reportPath: view.state.needsHumanReportPath,
+        at: view.state.lastActivityAt ?? view.config.updatedAt,
+      };
+      const legacyRef = wardenVerdictSourceRef(legacy.reportPath, parseWardenAnomalyKind(legacy.anomalyKind));
+      if (
+        !wardenRequests.some(
+          request =>
+            wardenVerdictSourceRef(request.reportPath, parseWardenAnomalyKind(request.anomalyKind)) === legacyRef,
+        )
+      )
+        wardenRequests.push(legacy as NonNullable<typeof view.state.needsHumanRequests>[number]);
+    }
+    for (const request of wardenRequests) {
       await this.attention
         .addFromSource(id, {
           source: 'agent-raised',
-          sourceRef: view.state.needsHumanKind ? `warden:${view.state.needsHumanKind}` : null,
+          sourceRef: wardenVerdictSourceRef(request.reportPath, parseWardenAnomalyKind(request.anomalyKind)),
           subject: 'A warden requested human attention',
-          why: view.state.needsHuman,
-          waitingSince: view.state.lastActivityAt ?? view.config.updatedAt,
+          why: request.reason,
+          waitingSince: request.at ?? view.state.lastActivityAt ?? view.config.updatedAt,
           howToResolve: 'Inspect the session and explicitly resolve this attention item after acting.',
         })
         .catch(error => this.report(id, 'warden baseline', error));
@@ -349,9 +367,10 @@ export class AttentionSources {
     if (event.type === 'fleet.needs_human') {
       const why = textFrom(raw, ['reason']) ?? 'A warden requested human attention.';
       const reportPath = textFrom(raw, ['reportPath']);
+      const anomalyKind = parseWardenAnomalyKind(textFrom(raw, ['anomalyKind']));
       await this.attention.addFromSource(event.sessionId, {
         source: 'agent-raised',
-        sourceRef: reportPath ? `warden:${reportPath}` : null,
+        sourceRef: wardenVerdictSourceRef(reportPath, anomalyKind),
         subject: 'A warden requested human attention',
         why,
         waitingSince: event.time,

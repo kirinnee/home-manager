@@ -67,6 +67,8 @@ export type WardenSelection =
       /** Why this account: 'preferred' (fallback #0), 'failover' (fallback
        *  skipped earlier entries), 'rotation' (round_robin). */
       reason: 'preferred' | 'failover' | 'rotation';
+      /** Exact ineligibility reasons computed for every skipped wrapper. */
+      skipped: Record<string, string>;
     }
   | {
       exhausted: true;
@@ -203,7 +205,7 @@ export function selectWardenAccount(input: WardenSelectionInput): WardenSelectio
     },
   };
   delete nextState.exhaustedSince;
-  return { exhausted: false, account, state: nextState, reason };
+  return { exhausted: false, account, state: nextState, reason, skipped: reasons };
 }
 
 /** Evidence classes a spawn failure can carry. `quota`/`auth` are

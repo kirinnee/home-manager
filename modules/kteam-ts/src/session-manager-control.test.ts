@@ -466,7 +466,18 @@ describe('assigned-warden capacity (A6 fix round)', () => {
     manager.start = async () => {
       const id = `warden-${++counter}`;
       started.push(id);
-      return { config: { id, teammate: id }, state: { status: 'running' }, directory: `/x/${id}` };
+      return {
+        config: {
+          id,
+          teammate: id,
+          binary: 'claude-auto-x',
+          harness: 'claude',
+          model: 'claude-opus-4-8',
+          createdAt: '2026-07-28T12:00:00.000Z',
+        },
+        state: { status: 'running' },
+        directory: `/x/${id}`,
+      };
     };
     return { manager, started };
   }
@@ -2113,6 +2124,7 @@ describe('needs_human flag + sweep dedupe (turn-018)', () => {
       {
         at: 'now',
         targetSession: 's1',
+        anomalyKind: 'abandoned_wreckage',
         verdict: 'needs_human',
         reason: 'resume fails deterministically',
         reportPath: '/r.md',
@@ -2134,6 +2146,7 @@ describe('needs_human flag + sweep dedupe (turn-018)', () => {
     );
     expect(state.needsHuman).toBe('resume fails deterministically');
     expect(state.needsHumanKind).toBe('abandoned_wreckage');
+    expect(state.needsHumanReportPath).toBe('/r.md');
     expect(transient).toEqual(['fleet.needs_human']);
     // Second reconcile with the flag already set: no re-flag, no re-emit.
     await (manager as unknown as { reconcileNeedsHuman: (sessions: unknown[]) => Promise<void> }).reconcileNeedsHuman([
@@ -2142,9 +2155,22 @@ describe('needs_human flag + sweep dedupe (turn-018)', () => {
     expect(transient).toHaveLength(1);
   });
 
-  test('clearNeedsHuman resets the flag only when set', async () => {
+  test('clearNeedsHuman resets the flag and retained reports cannot recreate it', async () => {
     let writes = 0;
-    let state: Record<string, unknown> = { id: 's1', needsHuman: 'why', needsHumanKind: 'abandoned_wreckage' };
+    let state: Record<string, unknown> = {
+      id: 's1',
+      needsHuman: 'why',
+      needsHumanKind: 'abandoned_wreckage',
+      needsHumanReportPath: '/r.md',
+      needsHumanRequests: [
+        {
+          reason: 'why',
+          anomalyKind: 'abandoned_wreckage',
+          reportPath: '/r.md',
+          at: '2026-07-28T12:34:56.789Z',
+        },
+      ],
+    };
     const manager = bareManager();
     manager.store = {
       updateState: async (_id: string, mutate: (c: Record<string, unknown>) => Record<string, unknown>) => {
@@ -2156,7 +2182,47 @@ describe('needs_human flag + sweep dedupe (turn-018)', () => {
     await (manager as unknown as { clearNeedsHuman: (id: string) => Promise<void> }).clearNeedsHuman('s1');
     expect(state.needsHuman).toBeUndefined();
     expect(state.needsHumanKind).toBeUndefined();
+    expect(state.needsHumanReportPath).toBeUndefined();
+    expect(state.needsHumanRequests).toBeUndefined();
+    expect(state.needsHumanAcknowledgedRequests).toEqual([{ reportPath: '/r.md', anomalyKind: 'abandoned_wreckage' }]);
     expect(writes).toBe(1);
+
+    manager.wardenVerdicts = async () => [
+      {
+        at: '2026-07-28T12:34:56.789Z',
+        targetSession: 's1',
+        anomalyKind: 'abandoned_wreckage',
+        verdict: 'needs_human',
+        reason: 'old retained report',
+        reportPath: '/r.md',
+      },
+    ];
+    manager.listeners = new Set();
+    manager.transientSequence = 0;
+    const sessions = [{ config: { id: 's1', teammate: 'lacey' }, state, directory: '/x/s1' }];
+    await (manager as unknown as { reconcileNeedsHuman: (views: unknown[]) => Promise<void> }).reconcileNeedsHuman(
+      sessions,
+    );
+    expect(state.needsHuman).toBeUndefined();
+    expect(state.needsHumanRequests).toBeUndefined();
+    expect(writes).toBe(1);
+
+    manager.wardenVerdicts = async () => [
+      {
+        at: '2026-07-28T12:00:00.000Z',
+        targetSession: 's1',
+        anomalyKind: 'abandoned_wreckage',
+        verdict: 'needs_human',
+        reason: 'a later-written report with an older sweep title',
+        reportPath: '/new-report.md',
+      },
+    ];
+    await (manager as unknown as { reconcileNeedsHuman: (views: unknown[]) => Promise<void> }).reconcileNeedsHuman(
+      sessions,
+    );
+    expect(state.needsHuman).toBe('a later-written report with an older sweep title');
+    expect(state.needsHumanReportPath).toBe('/new-report.md');
+    expect(writes).toBe(2);
   });
 });
 

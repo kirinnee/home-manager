@@ -500,6 +500,32 @@ export interface SearchResponse {
 
 export type WardenVerdictKind = 'killed' | 'revived' | 'nudged' | 'cleared' | 'needs_human' | 'unknown';
 
+/** Who actually ran a warden check — resolved at spawn, not read from config.
+ *  Every field is optional: reports written before the daemon started emitting
+ *  provenance carry none of it, and that case must render as an explicit
+ *  "unknown", never as a missing line. */
+export interface WardenSpawnInfo {
+  wardenSessionId?: string;
+  /** Wrapper/account the check ran on, e.g. `claude-auto-glm52a`. */
+  wrapper?: string;
+  /** Display model the daemon resolved from the session it actually started. */
+  model?: string;
+  /** Where `model` came from: observed from the harness, the wrapper's default,
+   *  the configured `--model`, or nothing at all. */
+  modelSource?: 'harness' | 'wrapper' | 'configured' | 'unknown';
+  /** Wrapper default, for daemons that report a hint instead of a model. */
+  modelHint?: string;
+  harness?: string;
+  failedOver?: boolean;
+  /** Configured first choice at spawn time — what failover moved off. */
+  configuredFirst?: string;
+  /** wrapper → why it was skipped, exactly as the selector phrased it. */
+  skipped?: Record<string, string>;
+  /** Pre-computed failover explanation, if a daemon supplies one directly. */
+  failoverReason?: string;
+  [k: string]: unknown;
+}
+
 export interface WardenVerdict {
   at: string;
   targetSession?: string;
@@ -508,6 +534,98 @@ export interface WardenVerdict {
   verdict: WardenVerdictKind;
   reason?: string;
   reportPath: string;
+  /** Absent on older daemons/reports — render "unknown", do not hide the row. */
+  spawn?: WardenSpawnInfo;
+}
+
+// ============================================================================
+// Fleet warden attention (mirror of the daemon's WardenAttentionView, served
+// by admin-only GET /v1/warden/attention). Mirrored defensively: optional
+// everywhere the daemon may omit a field — EXCEPT `judgement`, which is
+// required by design. "The warden reached no judgement" must be a value the UI
+// can print, never an absence it can silently read as healthy.
+// ============================================================================
+
+export type WardenJudgementState = 'judged' | 'pending' | 'queued' | 'failed' | 'none';
+
+export interface WardenJudgedBy {
+  wardenSessionId?: string;
+  wrapper?: string;
+  model?: string;
+  harness?: string;
+  [k: string]: unknown;
+}
+
+export interface WardenJudgement {
+  state: WardenJudgementState;
+  /** Present when `state === 'judged'` and the report parsed. */
+  verdict?: WardenVerdictKind;
+  /** Verdict reason, or the explicit failure text when `state === 'failed'`. */
+  reason?: string;
+  judgedBy?: WardenJudgedBy;
+  at?: string;
+  reportPath?: string;
+  /** The judgement predates this attention item — it did not look at it. */
+  stale?: boolean;
+  [k: string]: unknown;
+}
+
+export interface FleetAttentionItem {
+  sessionId: string;
+  teammate?: string;
+  label?: string;
+  sessionStatus?: string;
+  /** Attention board id (`A3`), or `anomaly:<kind>:<sessionId>` for a row the
+   *  warden synthesized from a live anomaly with no board record. */
+  id?: string;
+  source?: string;
+  /** True when the row came from an anomaly rather than an attention board. */
+  fromAnomaly?: boolean;
+  /** Set for a provider-wide anomaly expanded across affected sessions. */
+  provider?: string;
+  subject?: string;
+  why?: string;
+  waitingSince?: string;
+  /** Deliberately NOT rendered by this surface: the per-session Attention
+   *  panel owns resolution. Mirrored so the type matches the wire. */
+  howToResolve?: string;
+  raisedBy?: string;
+  raisedByName?: string;
+  judgement: WardenJudgement;
+  [k: string]: unknown;
+}
+
+/** The daemon's own answer to "is this list empty because everything is fine,
+ *  or because nothing could look?" — these must never render alike.
+ *  - `items`       rows exist; someone needs the human.
+ *  - `clean-sweep` a sweep ran, every board read, nothing is waiting.
+ *  - `degraded`    a sweep ran but a board could not be read — a waiting agent
+ *                  may be HIDDEN, so this is never an all-clear.
+ *  - `no-sweep`    nothing has looked yet; we do not know. */
+export type WardenAttentionOutcome = 'items' | 'clean-sweep' | 'degraded' | 'no-sweep';
+
+export interface WardenAttentionView {
+  generatedAt?: string;
+  lastSweepAt?: string;
+  /** Absent on a daemon that predates it; the UI then infers from lastSweepAt. */
+  outcome?: WardenAttentionOutcome;
+  wardenDegraded?: { since?: string; reason?: string };
+  items?: FleetAttentionItem[];
+  boardsWithParseErrors?: { sessionId: string; parseErrors?: number }[];
+  /** The finite recent-verdict window every judgement on this view was matched
+   *  against. Optional: an older daemon does not report it, and the UI must not
+   *  claim a bound it was never told about. */
+  verdictCoverage?: WardenVerdictCoverage;
+  [k: string]: unknown;
+}
+
+/** How far back the judgement matching could actually see. `truncated` means
+ *  older verdicts exist BEYOND the window, so "no matching judgement" is a
+ *  statement about this window — never about the world. */
+export interface WardenVerdictCoverage {
+  limit?: number;
+  truncated?: boolean;
+  [k: string]: unknown;
 }
 
 // Warden account failover (mirrors src/service.ts WardenFailoverStatus /

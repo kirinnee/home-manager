@@ -390,12 +390,17 @@ describe('bounded start (exit-143 spawn timeouts)', () => {
     manager: Loose,
     id: string,
     bootstrap: Promise<void>,
-    waitMs: number,
+    waitMs: number | undefined,
     running: Promise<void> = new Promise<void>(() => {}),
   ) =>
     (
       manager as unknown as {
-        awaitBootstrap: (id: string, bootstrap: Promise<void>, running: Promise<void>, waitMs: number) => Promise<void>;
+        awaitBootstrap: (
+          id: string,
+          bootstrap: Promise<void>,
+          running: Promise<void>,
+          waitMs: number | undefined,
+        ) => Promise<void>;
       }
     ).awaitBootstrap(id, bootstrap, running, waitMs);
 
@@ -438,6 +443,20 @@ describe('bounded start (exit-143 spawn timeouts)', () => {
     expect(String(events[0]!.data.reason)).toContain('detached start');
     released();
     await bootstrap;
+  });
+
+  test('a mandatory internal launch gate cannot background before its failure reaches the caller', async () => {
+    const { manager, events } = startManager();
+    let rejectBootstrap = (_error: Error) => {};
+    const bootstrap = new Promise<void>((_resolve, reject) => {
+      rejectBootstrap = reject;
+    });
+    const waiting = awaitBootstrap(manager, 's1', bootstrap, undefined);
+    await Bun.sleep(20);
+    expect(events).toEqual([]);
+    rejectBootstrap(new Error('mandatory provenance write failed'));
+    await expect(waiting).rejects.toThrow('mandatory provenance write failed');
+    expect(events).toEqual([]);
   });
 
   test('reaching RUNNING returns immediately, without announcing a background launch', async () => {

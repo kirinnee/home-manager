@@ -166,6 +166,23 @@ describe('fallback policy', () => {
     if (selection.exhausted) throw new Error('unexpected exhaustion');
     expect(selection.account.wrapper).toBe('claude-auto-b');
     expect(selection.reason).toBe('failover');
+    expect(selection.skipped).toEqual({ 'claude-auto-a': 'at its usage limit (kfleet feed)' });
+  });
+
+  test('successful selection retains every exact skipped-account reason', () => {
+    const selection = selectWardenAccount({
+      config: config(),
+      installedAgents: INSTALLED,
+      usage: [usage({ binary: 'claude-auto-a', atLimit: true }), usage({ binary: 'claude-auto-c', authOk: false })],
+      state: {},
+      nowMs: NOW,
+    });
+    if (selection.exhausted) throw new Error('unexpected exhaustion');
+    expect(selection.account.wrapper).toBe('claude-auto-b');
+    expect(selection.skipped).toEqual({
+      'claude-auto-a': 'at its usage limit (kfleet feed)',
+      'claude-auto-c': 'credentials rejected (kfleet feed)',
+    });
   });
 
   test('fails BACK to the preferred account after its cooldown expires', () => {

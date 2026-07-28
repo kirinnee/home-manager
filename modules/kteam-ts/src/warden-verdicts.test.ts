@@ -1,11 +1,117 @@
 import { expect, test } from 'bun:test';
-import { classifyVerdict, parseWardenReports } from './warden-verdicts';
+import {
+  classifyVerdict,
+  parseWardenReports,
+  parseWardenVerdictSourceRef,
+  wardenVerdictSourceRef,
+} from './warden-verdicts';
 
 test('classifyVerdict prefers the structured marker', () => {
   expect(classifyVerdict('Verdict: KILL\n\nlong prose that also says resume and leave')).toBe('killed');
   expect(classifyVerdict('- **Verdict:** RESUME\nblah')).toBe('revived');
   expect(classifyVerdict('Verdict: NUDGE')).toBe('nudged');
   expect(classifyVerdict('Verdict: LEAVE')).toBe('cleared');
+  expect(classifyVerdict('Verdict: NEEDS_HUMAN')).toBe('needs_human');
+});
+
+test('Attention source refs round-trip exact report blocks and legacy identities', () => {
+  const exact = wardenVerdictSourceRef('/reports/two-blocks.md', 'sus_subprocess');
+  expect(exact).toBe('warden:/reports/two-blocks.md#sus_subprocess');
+  expect(parseWardenVerdictSourceRef(exact)).toEqual({
+    reportPath: '/reports/two-blocks.md',
+    anomalyKind: 'sus_subprocess',
+  });
+  expect(parseWardenVerdictSourceRef('warden:sus_thinking')).toEqual({ anomalyKind: 'sus_thinking' });
+  expect(parseWardenVerdictSourceRef('warden:/reports/legacy.md')).toEqual({ reportPath: '/reports/legacy.md' });
+});
+
+test('parseWardenReports keeps per-session verdicts distinct in one fleet report', () => {
+  const [cleared, human] = parseWardenReports([
+    {
+      path: '/r/2026-01-02T00-00-00-000Z.md',
+      mtimeMs: 2000,
+      content:
+        '# Fleet Warden Report — sweep 2026-01-02T00:00:00.000Z\n\n' +
+        '**Warden verdict:** One session is clear; one needs a human.\n\n' +
+        '## Anomaly: `session-a` — alpha / proj-a\n\n' +
+        '- **Anomaly kind:** sus_subprocess\n\nVerdict: LEAVE\n\n- **Outcome:** Build is still progressing.\n\n' +
+        '## Anomaly: `session-b` — beta / proj-b\n\n' +
+        '- **Anomaly kind:** unattended_question\n\nVerdict: NEEDS_HUMAN\n\n' +
+        '- **Outcome:** Only the human can choose the rollout path.\n',
+    },
+  ]);
+  expect(cleared).toMatchObject({
+    targetSession: 'session-a',
+    anomalyKind: 'sus_subprocess',
+    verdict: 'cleared',
+    reason: 'Build is still progressing.',
+  });
+  expect(human).toMatchObject({
+    targetSession: 'session-b',
+    anomalyKind: 'unattended_question',
+    verdict: 'needs_human',
+    reason: 'Only the human can choose the rollout path.',
+  });
+});
+
+test('fleet anomaly headers accept prompt-style plain ids and legacy backticks', () => {
+  const entries = parseWardenReports([
+    {
+      path: '/r/2026-01-02T00-00-00-000Z.md',
+      mtimeMs: 2000,
+      content:
+        '## Anomaly: session-a — alpha / proj-a\n\n' +
+        '- **Anomaly kind:** sus_subprocess\n\nVerdict: LEAVE\n\n' +
+        '## Anomaly: `session-b`\n\n' +
+        '- **Anomaly kind:** unattended_question\n\nVerdict: NEEDS_HUMAN\n',
+    },
+  ]);
+  expect(entries).toEqual([
+    expect.objectContaining({
+      targetSession: 'session-a',
+      teammate: 'alpha',
+      label: 'proj-a',
+      anomalyKind: 'sus_subprocess',
+      verdict: 'cleared',
+    }),
+    expect.objectContaining({
+      targetSession: 'session-b',
+      anomalyKind: 'unattended_question',
+      verdict: 'needs_human',
+    }),
+  ]);
+});
+
+test('same-session fleet blocks retain distinct exact kinds and reject unknown markers', () => {
+  const entries = parseWardenReports([
+    {
+      path: '/r/2026-01-02T00-00-00-000Z.md',
+      mtimeMs: 2000,
+      content:
+        '## Anomaly: `session-a` — alpha / proj\n\n' +
+        '- **Anomaly kind:** sus_subprocess\n\nVerdict: LEAVE\n\n' +
+        '## Anomaly: `session-a` — alpha / proj\n\n' +
+        '- **Anomaly kind:** provider_unavailable\n\nVerdict: NEEDS_HUMAN\n\n' +
+        '## Anomaly: `session-a` — alpha / proj\n\n' +
+        '- **Anomaly kind:** invented_kind\n\nVerdict: NUDGE\n',
+    },
+  ]);
+  expect(entries.map(entry => entry.anomalyKind)).toEqual(['sus_subprocess', 'provider_unavailable', undefined]);
+  expect(entries.map(entry => entry.verdict)).toEqual(['cleared', 'needs_human', 'nudged']);
+});
+
+test('a global fleet verdict is never copied onto unclassified blocks', () => {
+  const entries = parseWardenReports([
+    {
+      path: '/r/2026-01-02T00-00-00-000Z.md',
+      mtimeMs: 2000,
+      content:
+        '**Warden verdict:** Session B needs a human.\n\n' +
+        '## Anomaly: `session-a` — alpha / proj-a\n\n- **Evidence:** inconclusive\n\n' +
+        '## Anomaly: `session-b` — beta / proj-b\n\nVerdict: NEEDS_HUMAN\n',
+    },
+  ]);
+  expect(entries.map(entry => entry.verdict)).toEqual(['unknown', 'needs_human']);
 });
 
 test('classifyVerdict needs-human wins over rejected-option prose', () => {
@@ -74,6 +180,7 @@ test('parses the REAL assigned-warden report format (fixture from live daemon, t
     label: 'node:go-base',
     verdict: 'cleared', // Verdict: LEAVE
   });
+  expect(entry?.spawn).toBeUndefined();
   // The reason must be present and human-meaningful (## Summary sentence).
   expect(entry!.reason).toContain('legitimate');
 });
@@ -94,12 +201,15 @@ test('assigned header without teammate parenthetical still yields the session id
   const [entry] = parseWardenReports([
     {
       path: '/reports/2026-07-23T00-00-00-000Z-mrxaaaa-11112222.md',
-      content: 'Verdict: NUDGE\n\n# Warden report — mrxaaaa-11112222\n\n## Summary\nWedged but recoverable.\n',
+      content:
+        'Verdict: NUDGE\n\n# Warden report — mrxaaaa-11112222\n\n' +
+        '- **Anomaly kind:** sus_thinking\n\n## Summary\nWedged but recoverable.\n',
       mtimeMs: 1,
     },
   ]);
   expect(entry).toMatchObject({
     targetSession: 'mrxaaaa-11112222',
+    anomalyKind: 'sus_thinking',
     verdict: 'nudged',
     reason: 'Wedged but recoverable.',
   });

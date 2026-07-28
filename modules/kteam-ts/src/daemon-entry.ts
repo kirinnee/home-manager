@@ -21,6 +21,7 @@ import { TerminalService } from './terminal-service';
 import { BrowserApi } from './browser-api';
 import { BrowserService } from './browser-service';
 import { RuntimeModelsApi } from './runtime-models-api';
+import { WardenAttentionProvider } from './warden-attention';
 
 const secretsStatus = loadDaemonSecretsEnvironment();
 if (secretsStatus === 'failed') {
@@ -146,6 +147,19 @@ const attentionService = new AttentionService(paths, attentionSessions);
 const attentionApi = new AttentionApi(attentionService, manager);
 const attentionSources = new AttentionSources(attentionService, manager, taskService);
 const stt = createSttService({ paths });
+// Fleet-wide, read-only warden attention projection over the existing per-session
+// Attention boards + warden verdicts/anomalies/state. Never writes attention data.
+// Mounted under /v1/warden/ so the existing prefix rule keeps it admin-only.
+const wardenAttention = new WardenAttentionProvider({
+  paths,
+  list: () => manager.list(),
+  // Read deeper than the manager's default 20: a busy fleet rotates a waiting
+  // item's judge out of that window fast. Going through the manager keeps the
+  // daemon-owned spawn provenance attached, so judgedBy can name who judged.
+  verdicts: limit => manager.wardenVerdicts(limit),
+  anomalies: () => manager.wardenAnomalies(),
+  sweepIntervalMinutes: async () => (await manager.wardenConfigView()).config.intervalMinutes,
+});
 const pushService = await PushService.create(paths, manager);
 let analytics: AnalyticsIndex | undefined;
 // Keep the bind ahead of analytics cold materialization. On a missing index,
@@ -165,6 +179,7 @@ const apiOptions = {
   browser: browserApi,
   runtimeModels: runtimeModelsApi,
   attention: attentionApi,
+  wardenAttention,
   push: pushService.api,
   analytics,
 };

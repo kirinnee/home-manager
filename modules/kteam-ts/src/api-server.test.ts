@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { RecentRequestIds, startApiServer } from './api-server';
 import { currentActor } from './actor-context';
-import type { AttachmentView, KTeamService, SessionView } from './service';
+import type { AttachmentView, KTeamService, SessionView, WardenAttentionView } from './service';
 import type { KTeamEvent, RuntimeControlRequest, SendRecord, SendRequest, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
 import { FsError, type FsDiffView, type FsFileView, type FsListing } from './fs';
@@ -517,6 +517,55 @@ describe('kteam daemon API', () => {
     expect(rep.status).toBe(200);
     expect(await rep.text()).toContain('Verdict: KILL');
     expect((await fetch(`${base}/v1/warden/report`, { headers: auth })).status).toBe(400);
+  });
+
+  test('serves the fleet Warden Attention view to an admin', async () => {
+    const expected: WardenAttentionView = {
+      generatedAt: '2026-01-01T00:00:00Z',
+      outcome: 'items',
+      items: [
+        {
+          sessionId: 's1',
+          id: 'A1',
+          source: 'question',
+          subject: 'Choose a migration target',
+          why: 'A decision is waiting.',
+          waitingSince: '2026-01-01T00:00:00Z',
+          howToResolve: 'Reply with the target.',
+          judgement: { state: 'none', reason: 'No warden judgement yet.' },
+        },
+      ],
+      boardsWithParseErrors: [],
+      verdictCoverage: { limit: 100, truncated: false },
+    };
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      service: new FakeService(),
+      wardenAttention: { view: async () => expected },
+    });
+    servers.push(server);
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/warden/attention`, {
+      headers: { authorization: 'Bearer secret' },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(expected);
+  });
+
+  test('returns an honest 404 when the Warden Attention provider is absent', async () => {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service: new FakeService() });
+    servers.push(server);
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/warden/attention`, {
+      headers: { authorization: 'Bearer secret' },
+    });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({
+      error: 'no route GET /v1/warden/attention',
+      code: 'unknown_route',
+      method: 'GET',
+      path: '/v1/warden/attention',
+    });
   });
 
   test('replays history before live WebSocket events', async () => {
@@ -1796,6 +1845,29 @@ describe('warden-scoped token authorization', () => {
     expect((await post('/v1/warden/run')).status).toBe(403);
     expect((await fetch(`${base}/v1/sessions/s1`, { method: 'DELETE', headers: scoped })).status).toBe(403);
     expect((await fetch(`${base}/v1/warden/status`, { headers: scoped })).status).toBe(403);
+  });
+
+  test('rejects Warden Attention with the warden-scoped token', async () => {
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      wardenToken: 'warden',
+      service: new FakeService(),
+      wardenAttention: {
+        view: async () => ({
+          generatedAt: '2026-01-01T00:00:00Z',
+          outcome: 'no-sweep',
+          items: [],
+          boardsWithParseErrors: [],
+          verdictCoverage: { limit: 100, truncated: false },
+        }),
+      },
+    });
+    servers.push(server);
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/warden/attention`, { headers: scoped });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'the warden-scoped token may not use the warden oversight routes' });
   });
 
   test('rejects every session filesystem read with the warden-scoped token', async () => {

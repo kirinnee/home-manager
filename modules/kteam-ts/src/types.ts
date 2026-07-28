@@ -272,6 +272,23 @@ export interface SessionState {
   needsHuman?: string;
   /** Anomaly kind fingerprint the needs_human verdict was issued for. */
   needsHumanKind?: string;
+  /** Exact warden report that raised the durable request. Keeps the Attention
+   *  source identity stable when the daemon seeds boards after a restart. */
+  needsHumanReportPath?: string;
+  /** Every exact needs-human report block for this session. The legacy scalar
+   *  fields above remain as the short ps/UI summary and old-state fallback. */
+  needsHumanRequests?: Array<{
+    reason: string;
+    anomalyKind?: string;
+    reportPath: string;
+    at: string;
+  }>;
+  /** Exact report blocks the human already acted on. Retained report files
+   *  cannot recreate these requests on the next sweep. */
+  needsHumanAcknowledgedRequests?: Array<{
+    reportPath: string;
+    anomalyKind?: string;
+  }>;
   /** Context-window usage (percent used) parsed from the TUI statusline. */
   contextPercent?: number;
   /** Exact live context usage from the harness transcript when available. */
