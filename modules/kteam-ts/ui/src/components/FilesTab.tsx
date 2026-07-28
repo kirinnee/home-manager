@@ -19,7 +19,7 @@
 // Bundle: no new dependencies. The highlighter, react-markdown and the icons are
 // already in the lazy session chunk this tab rides in.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import {
   ArrowLeft,
   Code2,
@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { highlightToHtml } from '../lib/highlight';
+import { formatCodeReference, type CodeReference, type CodeReferenceOpenRequest } from '../lib/code-references';
 import { langFromPath } from '../lib/tool-extract';
 import { useInputModality } from '../hooks/useInputModality';
 import {
@@ -53,11 +54,13 @@ import {
   crumbs,
   formatBytes,
   isMarkdownPath,
+  isOpenablePath,
   isOpenableName,
   joinRel,
   parentRel,
   parseUnifiedDiff,
   renderableDiffLines,
+  splitHighlightedLines,
   statusChip,
   type ParsedDiff,
 } from './files-model';
@@ -67,11 +70,20 @@ import './files.css';
  *  Highlighting itself still owns and enforces the real limit. */
 const HIGHLIGHT_LIMIT = 60_000;
 
-type FileView = 'normal' | 'raw' | 'diff';
+export type FileView = 'normal' | 'raw' | 'diff';
 
-interface OpenFileTab {
+export interface FileLineSelection {
+  line: number;
+  endLine?: number;
+  column?: number;
+}
+
+export interface OpenFileTab {
   path: string;
   view: FileView;
+  /** A reference temporarily shows exact source lines even when this tab's
+   * remembered view is rendered Markdown or diff. Clearing it restores `view`. */
+  selection?: FileLineSelection;
 }
 
 interface Props {
@@ -79,6 +91,34 @@ interface Props {
   /** The session's working directory — the viewer's root, shown as the `root`
    *  breadcrumb's title so it is obvious WHICH tree is being read. */
   cwd?: string;
+  /** Programmatic open request from the session SidePane host. */
+  requestedReference?: CodeReferenceOpenRequest | null;
+  onRequestedReferenceHandled?: (sequence: number) => void;
+}
+
+export interface FilesTabSnapshot {
+  dir: string;
+  tabs: OpenFileTab[];
+  activePath: string | null;
+}
+
+const EMPTY_FILES_TAB_SNAPSHOT: FilesTabSnapshot = { dir: '', tabs: [], activePath: null };
+const sessionFileTabs = new Map<string, FilesTabSnapshot>();
+
+/** The Files surface is mount-per-open (and a mobile sheet must unmount), so its
+ * tabs live in bounded page memory keyed by session. Clicking a reference from
+ * another surface cannot erase the files the reader already had open. */
+export function readFilesTabState(sessionId: string): FilesTabSnapshot {
+  const state = sessionFileTabs.get(sessionId);
+  return state ? { ...state, tabs: [...state.tabs] } : EMPTY_FILES_TAB_SNAPSHOT;
+}
+
+function writeFilesTabState(sessionId: string, state: FilesTabSnapshot): void {
+  sessionFileTabs.set(sessionId, { ...state, tabs: [...state.tabs] });
+}
+
+export function resetFilesTabStates(): void {
+  sessionFileTabs.clear();
 }
 
 /* ---- async resource ------------------------------------------------------
@@ -417,14 +457,99 @@ export function fileRefusal(file: FsFile): string | null {
   return null;
 }
 
-export function FileBody({ file, path, raw = false }: { file: FsFile; path: string; raw?: boolean }) {
+export function SourceLines({
+  content,
+  html,
+  lang,
+  selection,
+  targetLineRef,
+}: {
+  content: string;
+  html: string | null;
+  lang?: string;
+  selection: FileLineSelection;
+  targetLineRef?: RefObject<HTMLSpanElement | null>;
+}) {
+  const sourceLines = useMemo(() => content.split(/\r?\n/u), [content]);
+  const highlightedLines = useMemo(() => (html === null ? null : splitHighlightedLines(html)), [html]);
+  const lineCount = sourceLines.length;
+  const requestedEnd = selection.endLine ?? selection.line;
+  const valid = selection.line <= lineCount;
+  const visibleEnd = valid ? Math.min(requestedEnd, lineCount) : selection.line;
+  const location =
+    selection.endLine === undefined
+      ? `Line ${selection.line}${selection.column === undefined ? '' : `, column ${selection.column}`}`
+      : `Lines ${selection.line}–${selection.endLine}`;
+
+  return (
+    <>
+      <div className="kt-fs-location" data-tone={valid ? undefined : 'warn'} role="status">
+        {valid
+          ? requestedEnd > lineCount
+            ? `${location} requested; this file ends at line ${lineCount}. Highlighting through the final line.`
+            : `${location} highlighted.`
+          : `${location} does not exist; this file has ${lineCount.toLocaleString()} ${lineCount === 1 ? 'line' : 'lines'}.`}
+      </div>
+      <div className="kt-fs-code scroll-thin">
+        <pre className="kt-fs-pre kt-fs-pre--lines">
+          {sourceLines.map((line, index) => {
+            const lineNumber = index + 1;
+            const selected = valid && lineNumber >= selection.line && lineNumber <= visibleEnd;
+            const first = selected && lineNumber === selection.line;
+            const lineHtml = highlightedLines?.[index];
+            return (
+              <span
+                key={lineNumber}
+                ref={first ? targetLineRef : undefined}
+                className="kt-fs-source-line"
+                data-line={lineNumber}
+                data-highlighted={selected || undefined}
+                data-column={first && selection.column !== undefined ? selection.column : undefined}
+                aria-current={first ? 'location' : undefined}
+              >
+                <span className="kt-fs-source-gutter" aria-hidden="true">
+                  {lineNumber}
+                </span>
+                {lineHtml === undefined ? (
+                  <code className="kt-fs-source-text">{line || ' '}</code>
+                ) : (
+                  <code
+                    className={`kt-fs-source-text hljs${lang ? ` language-${lang}` : ''}`}
+                    // Safe: Highlight.js escaped the source. splitHighlightedLines
+                    // only balances the span tags that highlighter emitted.
+                    dangerouslySetInnerHTML={{ __html: lineHtml || ' ' }}
+                  />
+                )}
+              </span>
+            );
+          })}
+        </pre>
+      </div>
+    </>
+  );
+}
+
+export function FileBody({
+  file,
+  path,
+  raw = false,
+  selection,
+  targetLineRef,
+}: {
+  file: FsFile;
+  path: string;
+  raw?: boolean;
+  selection?: FileLineSelection;
+  targetLineRef?: RefObject<HTMLSpanElement | null>;
+}) {
   const refusal = fileRefusal(file);
   const content = file.content ?? '';
   const lang = file.lang ?? langFromPath(path);
   const markdown = isMarkdownPath(path);
+  const renderedMarkdown = markdown && selection === undefined;
   const html = useMemo(
-    () => (refusal || raw || markdown ? null : highlightToHtml(content, lang)),
-    [refusal, raw, markdown, content, lang],
+    () => (refusal || raw || renderedMarkdown ? null : highlightToHtml(content, lang)),
+    [refusal, raw, renderedMarkdown, content, lang],
   );
 
   if (refusal) {
@@ -437,11 +562,23 @@ export function FileBody({ file, path, raw = false }: { file: FsFile; path: stri
   if (!content) {
     return <Note role="status">This file is empty.</Note>;
   }
-  if (!raw && markdown) {
+  if (!raw && renderedMarkdown) {
     return (
       <div className="kt-fs-md">
         <Markdown text={content} />
       </div>
+    );
+  }
+  if (selection) {
+    return (
+      <>
+        {!raw && html === null && lang && content.length > HIGHLIGHT_LIMIT && (
+          <div className="kt-fs-note" role="status">
+            Syntax highlighting is off above {HIGHLIGHT_LIMIT.toLocaleString()} characters.
+          </div>
+        )}
+        <SourceLines content={content} html={html} lang={lang} selection={selection} targetLineRef={targetLineRef} />
+      </>
     );
   }
   return (
@@ -512,33 +649,88 @@ export function OpenFileTabs({
   );
 }
 
-export function FilesTab({ sessionId, cwd }: Props) {
+function selectionFromReference(reference: CodeReference): FileLineSelection | undefined {
+  const line = reference.line;
+  if (line === undefined || !Number.isSafeInteger(line) || line < 1) return undefined;
+  const endLine =
+    reference.endLine !== undefined && Number.isSafeInteger(reference.endLine) && reference.endLine >= line
+      ? reference.endLine
+      : undefined;
+  const column =
+    endLine === undefined &&
+    reference.column !== undefined &&
+    Number.isSafeInteger(reference.column) &&
+    reference.column >= 1
+      ? reference.column
+      : undefined;
+  return { line, ...(endLine === undefined ? {} : { endLine }), ...(column === undefined ? {} : { column }) };
+}
+
+export function scrollFileLineIntoView(
+  pane: Pick<HTMLDivElement, 'clientHeight' | 'scrollTop' | 'getBoundingClientRect'>,
+  target: Pick<HTMLSpanElement, 'getBoundingClientRect'>,
+): void {
+  const paneTop = pane.getBoundingClientRect().top;
+  const targetTop = target.getBoundingClientRect().top;
+  const targetOffset = pane.scrollTop + targetTop - paneTop;
+  pane.scrollTop = Math.max(0, targetOffset - Math.floor(pane.clientHeight / 3));
+}
+
+export function FilesTab({ sessionId, cwd, requestedReference, onRequestedReferenceHandled }: Props) {
   const probe = useFsProbe(sessionId);
-  const [dir, setDir] = useState('');
-  const [tabs, setTabs] = useState<OpenFileTab[]>([]);
-  const [activePath, setActivePath] = useState<string | null>(null);
+  const restored = readFilesTabState(sessionId);
+  const [stateSessionId, setStateSessionId] = useState(sessionId);
+  const [dir, setDir] = useState(restored.dir);
+  const [tabs, setTabs] = useState<OpenFileTab[]>(restored.tabs);
+  const [activePath, setActivePath] = useState<string | null>(restored.activePath);
   const [focusRequest, setFocusRequest] = useState(0);
   const { touchAffected } = useInputModality();
   const paneRef = useRef<HTMLDivElement>(null);
+  const targetLineRef = useRef<HTMLSpanElement>(null);
+  const handledReference = useRef<number | null>(null);
   const touchAffectedRef = useRef(touchAffected);
   touchAffectedRef.current = touchAffected;
+  const stateMatchesSession = stateSessionId === sessionId;
+
+  useEffect(() => {
+    if (stateMatchesSession) return;
+    const next = readFilesTabState(sessionId);
+    setDir(next.dir);
+    setTabs(next.tabs);
+    setActivePath(next.activePath);
+    setFocusRequest(0);
+    handledReference.current = null;
+    setStateSessionId(sessionId);
+  }, [sessionId, stateMatchesSession]);
 
   const repo = probe.changes?.repo ?? false;
   const changes = probe.changes?.changes ?? [];
   const changesTruncated = probe.changes?.truncated ?? false;
   const changeMap = useMemo(() => new Map(changes.map(change => [change.path, change])), [changes]);
-  const active = activePath ? (tabs.find(tab => tab.path === activePath) ?? null) : null;
+  const active = stateMatchesSession && activePath ? (tabs.find(tab => tab.path === activePath) ?? null) : null;
 
   const openFile = useCallback((path: string) => {
     setTabs(current =>
       current.some(tab => tab.path === path)
-        ? current.map(tab => (tab.path === path ? { ...tab, view: 'normal' } : tab))
+        ? current.map(tab => (tab.path === path ? { ...tab, view: 'normal', selection: undefined } : tab))
         : [...current, { path, view: 'normal' }],
     );
     setActivePath(path);
     // Opening from the directory replaces the control that held focus. Ask for
     // the content once; clicking an EXISTING file tab never increments this,
     // so tab switching leaves focus exactly where the reader put it.
+    setFocusRequest(request => request + 1);
+  }, []);
+
+  const openReference = useCallback((reference: CodeReference) => {
+    if (!isOpenablePath(reference.path)) return;
+    const selection = selectionFromReference(reference);
+    setTabs(current =>
+      current.some(tab => tab.path === reference.path)
+        ? current.map(tab => (tab.path === reference.path ? { ...tab, selection } : tab))
+        : [...current, { path: reference.path, view: 'normal', selection }],
+    );
+    setActivePath(reference.path);
     setFocusRequest(request => request + 1);
   }, []);
 
@@ -558,10 +750,27 @@ export function FilesTab({ sessionId, cwd }: Props) {
   const setActiveView = useCallback(
     (view: FileView) => {
       if (!activePath) return;
-      setTabs(current => current.map(tab => (tab.path === activePath ? { ...tab, view } : tab)));
+      setTabs(current => current.map(tab => (tab.path === activePath ? { ...tab, view, selection: undefined } : tab)));
     },
     [activePath],
   );
+
+  const clearActiveSelection = useCallback(() => {
+    if (!activePath) return;
+    setTabs(current => current.map(tab => (tab.path === activePath ? { ...tab, selection: undefined } : tab)));
+  }, [activePath]);
+
+  useEffect(() => {
+    if (!stateMatchesSession) return;
+    writeFilesTabState(sessionId, { dir, tabs, activePath });
+  }, [activePath, dir, sessionId, stateMatchesSession, tabs]);
+
+  useEffect(() => {
+    if (!stateMatchesSession || !requestedReference || handledReference.current === requestedReference.sequence) return;
+    handledReference.current = requestedReference.sequence;
+    openReference(requestedReference.reference);
+    onRequestedReferenceHandled?.(requestedReference.sequence);
+  }, [onRequestedReferenceHandled, openReference, requestedReference, stateMatchesSession]);
 
   // Never on touch: an unrequested focus there summons the keyboard and jumps
   // the viewport (input capability, not viewport width, owns that policy).
@@ -573,30 +782,50 @@ export function FilesTab({ sessionId, cwd }: Props) {
   }, [focusRequest]);
 
   const listing = useFsResource<FsListing>(
-    !active ? `list:${sessionId}:${dir}` : null,
+    stateMatchesSession && !active ? `list:${sessionId}:${dir}` : null,
     useCallback(signal => fsApi.list(sessionId, dir, signal), [sessionId, dir]),
   );
 
-  const diffPath = active?.view === 'diff' ? active.path : null;
+  const diffPath = active?.view === 'diff' && active.selection === undefined ? active.path : null;
   const diff = useFsResource<string>(
     diffPath ? `diff:${sessionId}:${diffPath}` : null,
     useCallback(signal => fsApi.diff(sessionId, diffPath ?? '', signal), [sessionId, diffPath]),
   );
 
-  const filePath = active && active.view !== 'diff' ? active.path : null;
+  const filePath = active && (active.view !== 'diff' || active.selection !== undefined) ? active.path : null;
   const file = useFsResource<FsFile>(
     filePath ? `file:${sessionId}:${filePath}` : null,
     useCallback(signal => fsApi.file(sessionId, filePath ?? '', undefined, signal), [sessionId, filePath]),
   );
+
+  useEffect(() => {
+    if (!active?.selection || !file.data) return;
+    const pane = paneRef.current;
+    const target = targetLineRef.current;
+    if (!pane || !target) return;
+    // Scope the jump to the Files pane. `scrollIntoView` can walk every
+    // scrollable ancestor and drag the transcript/page behind the side pane.
+    scrollFileLineIntoView(pane, target);
+  }, [active?.path, active?.selection, file.data]);
 
   const parsedDiff = useMemo(() => (diff.data != null ? parseUnifiedDiff(diff.data) : null), [diff.data]);
   // A diff that is nothing but plumbing headers has nothing to show — the
   // emptiness test has to agree with what DiffBody actually renders.
   const diffHasBody = useMemo(() => (parsedDiff ? renderableDiffLines(parsedDiff).length > 0 : false), [parsedDiff]);
 
-  const title = active?.path ?? (dir || cwd || 'Session files');
+  if (!stateMatchesSession) {
+    return (
+      <div className="kt-fs rounded-md border border-border bg-surface">
+        <Loading what="session files" />
+      </div>
+    );
+  }
+
+  const title = active
+    ? formatCodeReference({ path: active.path, ...active.selection })
+    : dir || cwd || 'Session files';
   const rawActive = active?.view === 'raw';
-  const diffActive = active?.view === 'diff';
+  const diffActive = active?.view === 'diff' && active.selection === undefined;
 
   return (
     // `.kt-fs` owns flex:1 + min-height:0 (files.css) — the pane fills what the
@@ -618,6 +847,17 @@ export function FilesTab({ sessionId, cwd }: Props) {
           <span className="kt-fs-title-path">{title}</span>
         </span>
         <span className="kt-fs-actions">
+          {active?.selection && (
+            <button
+              type="button"
+              className="kt-fs-icon-button"
+              onClick={clearActiveSelection}
+              aria-label={`Clear line selection for ${active.path}`}
+              title={active.view === 'diff' ? 'Clear highlight and return to diff' : 'Clear line highlight'}
+            >
+              <X size={16} aria-hidden="true" />
+            </button>
+          )}
           {active && (
             <button
               type="button"
@@ -717,7 +957,13 @@ export function FilesTab({ sessionId, cwd }: Props) {
           ) : file.error ? (
             <Failed what={baseName(active.path)} error={file.error} onRetry={file.reload} />
           ) : file.data ? (
-            <FileBody file={file.data} path={active.path} raw={rawActive} />
+            <FileBody
+              file={file.data}
+              path={active.path}
+              raw={rawActive}
+              selection={active.selection}
+              targetLineRef={targetLineRef}
+            />
           ) : (
             <Note role="status">Nothing to show.</Note>
           )

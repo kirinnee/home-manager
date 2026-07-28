@@ -8,9 +8,13 @@ import {
   FileBody,
   FilesTab,
   OpenFileTabs,
+  SourceLines,
   changeDescription,
   entryRefusal,
   fileRefusal,
+  readFilesTabState,
+  resetFilesTabStates,
+  scrollFileLineIntoView,
 } from './FilesTab';
 import { loadFsChanges, resetFsProbes } from './files-api';
 import type { FsChanges, FsEntry, FsFile } from './files-api';
@@ -32,6 +36,7 @@ async function seedProbe(sessionId: string, body: FsChanges): Promise<void> {
 afterEach(() => {
   globalThis.fetch = realFetch;
   resetFsProbes();
+  resetFilesTabStates();
 });
 
 const entry = (over: Partial<FsEntry> & { name: string }): FsEntry => ({ type: 'file', ...over });
@@ -465,6 +470,77 @@ describe('file view', () => {
     expect(html).not.toContain('hljs-keyword');
     expect(html).toContain('kt-fs-pre');
   });
+
+  test('a source reference renders persistent addressable line and range highlights', () => {
+    const html = renderToStaticMarkup(
+      <FileBody
+        file={file({ content: 'const one = 1;\nconst two = 2;\nconst three = 3;\n', lang: 'typescript' })}
+        path="src/app.ts"
+        selection={{ line: 2, endLine: 3 }}
+      />,
+    );
+    expect(html).toContain('Lines 2–3 highlighted.');
+    expect(html).toContain('data-line="2" data-highlighted="true" aria-current="location"');
+    expect(html).toContain('data-line="3" data-highlighted="true"');
+    expect(html).not.toContain('data-line="1" data-highlighted="true"');
+    expect(html.match(/data-highlighted="true"/g)).toHaveLength(2);
+  });
+
+  test('a Markdown line jump shows exact source instead of an unmappable prose rendering', () => {
+    const html = renderToStaticMarkup(
+      <FileBody
+        file={file({ content: '# Heading\n\nBody', path: 'README.md' })}
+        path="README.md"
+        selection={{ line: 1 }}
+      />,
+    );
+    expect(html).toContain('Line 1 highlighted.');
+    expect(html).toContain('data-line="1"');
+    expect(html).not.toContain('<h1>');
+  });
+
+  test('an out-of-bounds reference is honest and does not tint a different line', () => {
+    const html = renderToStaticMarkup(
+      <FileBody file={file({ content: 'one\ntwo' })} path="notes.txt" selection={{ line: 9 }} />,
+    );
+    expect(html).toContain('Line 9 does not exist; this file has 2 lines.');
+    expect(html).not.toContain('data-highlighted="true"');
+  });
+
+  test('balanced highlighted fragments remain independently renderable per row', () => {
+    const html = renderToStaticMarkup(
+      <SourceLines
+        content={'/* first\nsecond */'}
+        html={'<span class="hljs-comment">/* first\nsecond */</span>'}
+        lang="typescript"
+        selection={{ line: 2 }}
+      />,
+    );
+    expect(html).toContain('<span class="hljs-comment">/* first</span>');
+    expect(html).toContain('<span class="hljs-comment">second */</span>');
+  });
+
+  test('scoped line scrolling places the target one-third into the Files pane', () => {
+    const pane = {
+      clientHeight: 300,
+      scrollTop: 200,
+      getBoundingClientRect: () => ({ top: 120 }),
+    };
+    scrollFileLineIntoView(
+      pane as HTMLDivElement,
+      {
+        getBoundingClientRect: () => ({ top: 460 }),
+      } as HTMLSpanElement,
+    );
+    expect(pane.scrollTop).toBe(440);
+    scrollFileLineIntoView(
+      pane as HTMLDivElement,
+      {
+        getBoundingClientRect: () => ({ top: -340 }),
+      } as HTMLSpanElement,
+    );
+    expect(pane.scrollTop).toBe(0);
+  });
 });
 
 describe('the tab shell', () => {
@@ -673,6 +749,127 @@ describe('the tab shell', () => {
       expect(visit(harness.output, element => element.type === OpenFileTabs)).toBeUndefined();
     } finally {
       harness.unmount();
+    }
+  });
+
+  test('a programmatic jump survives remount and preserves the file the reader had open', async () => {
+    const sessionId = 'ms2files-66666666';
+    await seedProbe(sessionId, { repo: true, changes: [] });
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+    globalThis.fetch = (async input => {
+      const url = new URL(String(input), 'https://kteam.test');
+      if (url.pathname.endsWith('/fs/file')) {
+        const path = url.searchParams.get('path') ?? '';
+        return json({ path, content: 'one\ntwo\nthree\nfour', lang: 'typescript' });
+      }
+      if (url.pathname.endsWith('/fs')) {
+        return json({
+          entries: [
+            { name: 'old.ts', type: 'file' },
+            { name: 'jump.ts', type: 'file' },
+          ],
+        });
+      }
+      throw new Error(`unexpected fetch ${url.pathname}`);
+    }) as typeof fetch;
+
+    const first = new HookHarness(() => undefined);
+    const firstRender = () => FilesTab({ sessionId, cwd: '/repo' });
+    first.render(firstRender);
+    await flush();
+    const browse = visit(first.output, candidate => candidate.type === BrowseList);
+    expect(browse).toBeDefined();
+    (browse!.props!.onOpenFile as (path: string) => void)('old.ts');
+    await flush();
+    expect(readFilesTabState(sessionId)).toMatchObject({ activePath: 'old.ts', tabs: [{ path: 'old.ts' }] });
+    first.unmount();
+
+    const handled: number[] = [];
+    const second = new HookHarness(() => undefined);
+    const request = { sequence: 7, reference: { path: 'jump.ts', line: 2, endLine: 4 } };
+    const secondRender = () =>
+      FilesTab({
+        sessionId,
+        cwd: '/repo',
+        requestedReference: request,
+        onRequestedReferenceHandled: sequence => handled.push(sequence),
+      });
+    try {
+      second.render(secondRender);
+      await flush();
+      const tabs = visit(second.output, candidate => candidate.type === OpenFileTabs);
+      expect(tabs?.props).toMatchObject({
+        activePath: 'jump.ts',
+        tabs: [
+          { path: 'old.ts', view: 'normal' },
+          { path: 'jump.ts', view: 'normal', selection: { line: 2, endLine: 4 } },
+        ],
+      });
+      const body = visit(second.output, candidate => candidate.type === FileBody);
+      expect(body?.props).toMatchObject({ path: 'jump.ts', selection: { line: 2, endLine: 4 } });
+      expect(handled).toEqual([7]);
+    } finally {
+      second.unmount();
+    }
+  });
+
+  test('an in-place session switch restores only the target session tabs', async () => {
+    const sessionA = 'ms2files-77777777';
+    const sessionB = 'ms2files-88888888';
+    const fileRequests: Array<{ sessionId: string; path: string }> = [];
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+    globalThis.fetch = (async input => {
+      const url = new URL(String(input), 'https://kteam.test');
+      const match = /\/v1\/sessions\/([^/]+)\/fs(?:\/|$)/u.exec(url.pathname);
+      const requestedSession = decodeURIComponent(match?.[1] ?? '');
+      if (url.pathname.endsWith('/fs/changes')) return json({ repo: false, changes: [] });
+      if (url.pathname.endsWith('/fs/file')) {
+        const path = url.searchParams.get('path') ?? '';
+        fileRequests.push({ sessionId: requestedSession, path });
+        return json({ path, content: `${requestedSession}:${path}` });
+      }
+      if (url.pathname.endsWith('/fs')) {
+        return json({
+          entries: [{ name: requestedSession === sessionA ? 'a.ts' : 'b.ts', type: 'file' }],
+        });
+      }
+      throw new Error(`unexpected fetch ${url.pathname}`);
+    }) as typeof fetch;
+
+    const seedB = new HookHarness(() => undefined);
+    seedB.render(() => FilesTab({ sessionId: sessionB, cwd: '/repo-b' }));
+    await flush();
+    const browseB = visit(seedB.output, candidate => candidate.type === BrowseList);
+    expect(browseB).toBeDefined();
+    (browseB!.props!.onOpenFile as (path: string) => void)('b.ts');
+    await flush();
+    seedB.unmount();
+
+    let activeSession = sessionA;
+    const switching = new HookHarness(() => undefined);
+    const render = () =>
+      FilesTab({ sessionId: activeSession, cwd: activeSession === sessionA ? '/repo-a' : '/repo-b' });
+    try {
+      switching.render(render);
+      await flush();
+      const browseA = visit(switching.output, candidate => candidate.type === BrowseList);
+      expect(browseA).toBeDefined();
+      (browseA!.props!.onOpenFile as (path: string) => void)('a.ts');
+      await flush();
+      expect(readFilesTabState(sessionA)).toMatchObject({ activePath: 'a.ts', tabs: [{ path: 'a.ts' }] });
+
+      activeSession = sessionB;
+      switching.render(render);
+      await flush();
+      const tabs = visit(switching.output, candidate => candidate.type === OpenFileTabs);
+      expect(tabs?.props).toMatchObject({ activePath: 'b.ts', tabs: [{ path: 'b.ts' }] });
+      expect(readFilesTabState(sessionA)).toMatchObject({ activePath: 'a.ts', tabs: [{ path: 'a.ts' }] });
+      expect(readFilesTabState(sessionB)).toMatchObject({ activePath: 'b.ts', tabs: [{ path: 'b.ts' }] });
+      expect(fileRequests).not.toContainEqual({ sessionId: sessionB, path: 'a.ts' });
+    } finally {
+      switching.unmount();
     }
   });
 });

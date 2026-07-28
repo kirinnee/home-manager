@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { ApiError, HAS_TOKEN, TOKEN } from '../lib/api';
+import { baseName, isOpenableName, isOpenablePath, parentRel } from './files-model';
 
 export type FsEntryType = 'file' | 'dir' | 'symlink';
 
@@ -133,6 +134,121 @@ export const fsApi = {
   diff: (sessionId: string, path: string, signal?: AbortSignal) => fsRequest<string>(diffUrl(sessionId, path), signal),
 };
 
+/* ---- code-reference resolution ------------------------------------------
+   Link styling is a promise that a destination is real. These helpers turn
+   lexical candidates from `lib/code-references.ts` into exact, openable paths
+   by consulting the same directory endpoint as the Files picker. A lookup
+   failure resolves to "not live"; it never produces a broken-looking link. */
+
+/** Convert repo-relative, `./`-relative, or cwd-absolute authored paths to the
+ * exact relative grammar served by the daemon. Nothing is normalized through
+ * `..`: a reference that asks to escape remains unresolved. */
+export function codeReferenceRelativePath(candidate: string, cwd?: string): string | null {
+  let value = candidate;
+  if (value.startsWith('/')) {
+    const root = cwd?.replace(/\/+$/u, '');
+    if (!root || !root.startsWith('/') || value === root || !value.startsWith(`${root}/`)) return null;
+    value = value.slice(root.length + 1);
+  } else if (value.startsWith('./')) {
+    value = value.slice(2);
+  }
+  if (!isOpenablePath(value)) return null;
+  return value;
+}
+
+// A transcript can mount hundreds of Markdown rows in one commit. Coalesce
+// their identical parent-directory checks while they are in flight, but do not
+// retain a stale filesystem listing after the request settles.
+const codeReferenceListingRequests = new Map<string, Promise<FsListing>>();
+
+function codeReferenceListing(sessionId: string, directory: string): Promise<FsListing> {
+  const key = JSON.stringify([sessionId, directory]);
+  const pending = codeReferenceListingRequests.get(key);
+  if (pending) return pending;
+  const request = fsApi.list(sessionId, directory).finally(() => {
+    if (codeReferenceListingRequests.get(key) === request) codeReferenceListingRequests.delete(key);
+  });
+  codeReferenceListingRequests.set(key, request);
+  return request;
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
+}
+
+/** Share the transport without sharing cancellation: unmounting one Markdown
+ * row stops that caller immediately, but cannot abort a listing other rows are
+ * still using. */
+function waitForCodeReferenceListing(sessionId: string, directory: string, signal?: AbortSignal): Promise<FsListing> {
+  if (signal?.aborted) return Promise.reject(abortReason(signal));
+  const request = codeReferenceListing(sessionId, directory);
+  if (!signal) return request;
+  return new Promise((resolve, reject) => {
+    const aborted = () => reject(abortReason(signal));
+    signal.addEventListener('abort', aborted, { once: true });
+    void request.then(
+      listing => {
+        signal.removeEventListener('abort', aborted);
+        resolve(listing);
+      },
+      error => {
+        signal.removeEventListener('abort', aborted);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** Resolve a batch while listing each parent directory only once. Keys are the
+ * original authored paths; values are canonical session-root-relative paths.
+ * Denied, ignored, escaping, symlink, directory, missing, and failed lookups
+ * are deliberately absent from the returned map. */
+export async function resolveFsFilePaths(
+  sessionId: string,
+  candidates: readonly string[],
+  cwd?: string,
+  signal?: AbortSignal,
+): Promise<Map<string, string>> {
+  const byDirectory = new Map<string, Array<{ authored: string; relative: string }>>();
+  for (const authored of new Set(candidates)) {
+    const relative = codeReferenceRelativePath(authored, cwd);
+    if (!relative) continue;
+    const directory = parentRel(relative);
+    const rows = byDirectory.get(directory);
+    const item = { authored, relative };
+    if (rows) rows.push(item);
+    else byDirectory.set(directory, [item]);
+  }
+
+  const resolved = new Map<string, string>();
+  await Promise.all(
+    [...byDirectory].map(async ([directory, rows]) => {
+      let listing: FsListing;
+      try {
+        listing = await waitForCodeReferenceListing(sessionId, directory, signal);
+      } catch (error) {
+        if (signal?.aborted || isAbort(error)) throw error;
+        return;
+      }
+      const entries = new Map(listing.entries.map(entry => [entry.name, entry]));
+      for (const row of rows) {
+        const entry = entries.get(baseName(row.relative));
+        if (
+          !entry ||
+          entry.type !== 'file' ||
+          !isOpenableName(entry.name) ||
+          entry.denied ||
+          entry.ignored ||
+          entry.escapes
+        )
+          continue;
+        resolved.set(row.authored, row.relative);
+      }
+    }),
+  );
+  return resolved;
+}
+
 /** The version-skew signal: a daemon that predates the fs routes answers 404
  *  with `{code:'unknown_route'}` (api-server.ts). That — and ONLY that — hides
  *  the Files tab. A 404 for a missing session, a 403, a 500 or an offline
@@ -238,6 +354,7 @@ export function readFsProbe(sessionId: string): FsProbeSnapshot {
  *  behaviour has to be able to start from nothing. */
 export function resetFsProbes(): void {
   probes.clear();
+  codeReferenceListingRequests.clear();
 }
 
 /** Does a probe in this state justify showing the Files tab? Everything except
