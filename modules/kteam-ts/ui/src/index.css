@@ -527,16 +527,14 @@ pre,
      body. overflow-x is the last-resort catch for content that genuinely cannot
      wrap (e.g. a wide inline image or an unbreakable token).
 
-     ACTUAL FULL-BLEED PAST THE READING MEASURE. The cap used to be `100%` — 100%
-     of the 880px reading column — so a wide table could only ever be as wide as
-     prose. `--kt-table-bleed` lets it escape that column and use the pane: it is
-     the pane-usable width measured on the transcript scroller (Transcript.tsx →
-     paneUsableTableWidth), left-anchored to the column so the table grows
-     rightward across the column's centring gutter to the pane edge. It already
-     honours chat-width: in 'readable' the scroller is the narrow surface, so the
-     value is that measure and the table bleeds no further. Falls back to `100%`
-     — today's contained layout — anywhere the variable is not published (a
-     pre-measure frame, or `.md` rendered outside the transcript). */
+     PANE-BOUNDED WIDTH. `--kt-table-bleed` began as an escape from a permanent
+     880px column. Chat width now governs that column directly: full makes it
+     pane-wide and readable narrows the pane itself, so neither live mode leaves
+     a centring gutter to escape. Keep the measured value as the exact safe
+     ceiling for intrinsically wide tables and for any future centred embedding:
+     it is left-anchored, stops one content-padding short of the pane edge, and
+     never creates page-level horizontal scroll. It falls back to `100%` during
+     the pre-measure frame or when `.md` renders outside a transcript. */
   width: max-content;
   max-width: var(--kt-table-bleed, 100%);
   margin: 0.75em 0;
@@ -1368,18 +1366,22 @@ body {
 
 /* ---- chat width surface (item 5) ---------------------------------------
    The chat pane's horizontal measure, toggled by `data-chat-width` on the
-   surface that wraps the transcript card + composer (SessionChatPage). 'full'
-   (the DEFAULT, and today's behaviour) is full-bleed — no cap, so no rule is
-   needed for it. 'readable' centers the whole column at a comfortable reading
-   measure so long assistant lines don't run the full width of a desktop
-   monitor. It caps the WHOLE column, not just the transcript, so the composer
-   stays aligned under the conversation. Below the cap the rule is inert, which
-   is why the setting is "mostly for desktop": a phone viewport is already
-   narrower than the measure. Tunable per theme via `--chat-measure-readable`. */
+   surface that wraps the transcript card + composer (SessionChatPage).
+   'readable' centers and caps the whole surface at a comfortable measure.
+   'full' removes both that outer cap and Transcript's legacy 880px inner cap,
+   so prose and code—not only overflowing tables—can use the pane. Below either
+   cap the rules are inert, which is why the setting is mostly for desktop.
+   The readable measure remains tunable per theme. */
+.kt-content {
+  max-width: var(--chat-measure-content, 880px);
+}
 .kt-chat-surface[data-chat-width='readable'] {
   max-width: var(--chat-measure-readable, 768px);
   margin-left: auto;
   margin-right: auto;
+}
+.kt-chat-surface[data-chat-width='full'] .kt-content {
+  max-width: none;
 }
 
 /* ---- table / list rows -------------------------------------------------- */
