@@ -20,6 +20,8 @@ import type {
   TaskListResponse,
   TaskView as TaskBoardView,
 } from './tasks';
+import { TerminalApi } from './terminal-api';
+import type { TerminalService } from './terminal-service';
 
 const view: SessionView = {
   directory: '/tmp/kteam/s1',
@@ -1200,6 +1202,160 @@ describe('request-id idempotency for retried mutations', () => {
     expect(lru.seen('s1', 'a')).toBe(true);
     expect(lru.seen('s1', 'b')).toBe(false);
     expect(lru.seen('s1', 'c')).toBe(true);
+  });
+});
+
+describe('web terminal API integration', () => {
+  const terminalId = '012345abcdef';
+
+  class FakeTerminalService {
+    readonly terminal = {
+      id: terminalId,
+      sessionId: 's1',
+      title: 'Terminal 1',
+      state: 'running' as const,
+      cols: 80,
+      rows: 24,
+      viewers: 0,
+      createdAt: '2026-01-01T00:00:00Z',
+      lastActivityAt: '2026-01-01T00:00:00Z',
+    };
+    readonly resolveCalls: string[] = [];
+    readonly writes: string[] = [];
+    lastCreate?: { sessionRef: string; options: { title?: unknown; cols?: number; rows?: number } };
+    private viewer?: (bytes: Uint8Array) => void;
+
+    resolveSession = async (ref: string) => {
+      this.resolveCalls.push(ref);
+      if (ref !== 's1') throw new Error(`unknown kteam session: ${ref}`);
+      return { id: 's1', cwd: '/tmp/session-one' };
+    };
+
+    list = async (sessionRef: string) => ({
+      sessionId: sessionRef,
+      terminals: [this.terminal],
+      limits: { perSession: 6, global: 24, runningGlobal: 1, idleTimeoutSeconds: 3600, scrollbackLines: 5000 },
+    });
+
+    create = async (sessionRef: string, options: { title?: unknown; cols?: number; rows?: number } = {}) => {
+      this.lastCreate = { sessionRef, options };
+      return this.terminal;
+    };
+
+    get = async (_sessionRef: string, _terminalId: string) => this.terminal;
+    rename = async (_sessionRef: string, _terminalId: string, title: unknown) => ({
+      ...this.terminal,
+      title: String(title),
+    });
+    closeTerminal = async () => undefined;
+
+    attachViewer = async (sessionRef: string, attachedTerminalId: string, onData: (bytes: Uint8Array) => void) => {
+      await this.get(sessionRef, attachedTerminalId);
+      this.viewer = onData;
+      onData(new TextEncoder().encode('stream-ready\n'));
+      return {
+        id: 'viewer-1',
+        detach: () => {
+          this.viewer = undefined;
+        },
+      };
+    };
+
+    write = async (_sessionRef: string, _terminalId: string, bytes: Uint8Array) => {
+      const value = Buffer.from(bytes).toString('utf8');
+      this.writes.push(value);
+      this.viewer?.(new TextEncoder().encode(`terminal-output:${value}`));
+    };
+
+    resize = async () => ({ cols: 80, rows: 24 });
+    snapshot = async () => new TextEncoder().encode('snapshot\n');
+  }
+
+  function terminalServer(terminalService: FakeTerminalService, wardenToken?: string) {
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      ...(wardenToken ? { wardenToken } : {}),
+      service: new FakeService(),
+      terminals: new TerminalApi(terminalService as unknown as TerminalService),
+    });
+    servers.push(server);
+    return { server, base: `http://127.0.0.1:${server.port}` };
+  }
+
+  test('mounts HTTP routes before generic session actions and enforces resolved admin actors', async () => {
+    const terminals = new FakeTerminalService();
+    const { base } = terminalServer(terminals, 'warden');
+    const admin = { authorization: 'Bearer secret' };
+
+    const listed = await fetch(`${base}/v1/sessions/s1/terminals`, { headers: admin });
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toMatchObject({ sessionId: 's1', terminals: [{ id: terminalId }] });
+
+    const created = await fetch(`${base}/v1/sessions/s1/terminals`, {
+      method: 'POST',
+      headers: { ...admin, 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Build', cols: 100, rows: 35 }),
+    });
+    expect(created.status).toBe(201);
+    expect(terminals.lastCreate).toEqual({
+      sessionRef: 's1',
+      options: { title: 'Build', cols: 100, rows: 35 },
+    });
+
+    const peer = await fetch(`${base}/v1/sessions/s1/terminals`, {
+      headers: { ...admin, 'x-kteam-session-id': 'peer-session' },
+    });
+    expect(peer.status).toBe(403);
+    expect(await peer.json()).toMatchObject({ code: 'forbidden' });
+
+    for (const path of ['/v1/sessions/s1/terminals', `/v1/sessions/s1/terminals/${terminalId}/stream`]) {
+      const denied = await fetch(`${base}${path}`, { headers: { authorization: 'Bearer warden' } });
+      expect(denied.status).toBe(403);
+    }
+
+    const callsBeforeTraversal = terminals.resolveCalls.length;
+    const traversal = await fetch(`${base}/v1/sessions/..%2Fsecret/terminals`, { headers: admin });
+    expect(traversal.status).toBe(404);
+    expect(terminals.resolveCalls).toHaveLength(callsBeforeTraversal);
+  });
+
+  test('upgrades the terminal stream with query-token auth and carries binary shell bytes both ways', async () => {
+    const terminals = new FakeTerminalService();
+    const { server } = terminalServer(terminals);
+    const socket = new WebSocket(
+      `ws://127.0.0.1:${server.port}/v1/sessions/s1/terminals/${terminalId}/stream?token=secret`,
+    );
+    socket.binaryType = 'arraybuffer';
+
+    const received: string[] = [];
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('terminal websocket timeout')), 3000);
+      let sent = false;
+      socket.onmessage = message => {
+        const chunk =
+          typeof message.data === 'string' ? message.data : Buffer.from(message.data as ArrayBuffer).toString('utf8');
+        received.push(chunk);
+        if (!sent && received.join('').includes('stream-ready')) {
+          sent = true;
+          socket.send(new TextEncoder().encode('probe\r'));
+        }
+        if (received.join('').includes('terminal-output:probe')) {
+          clearTimeout(timeout);
+          socket.close();
+          resolve();
+        }
+      };
+      socket.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error('terminal websocket error'));
+      };
+    });
+
+    expect(received.join('')).toContain('stream-ready');
+    expect(received.join('')).toContain('terminal-output:probe');
+    expect(terminals.writes).toEqual(['probe\r']);
   });
 });
 

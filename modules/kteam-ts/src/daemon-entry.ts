@@ -16,6 +16,8 @@ import { TaskApi } from './tasks-api';
 import { AnalyticsIndex } from './analytics-index';
 import { loadDaemonSecretsEnvironment } from './daemon-secrets';
 import { PushService } from './push-service';
+import { TerminalApi } from './terminal-api';
+import { TerminalService } from './terminal-service';
 
 const secretsStatus = loadDaemonSecretsEnvironment();
 if (secretsStatus === 'failed') {
@@ -101,6 +103,16 @@ const sessionExists = {
     ),
 };
 const pinApi = new PinApi(new PinService(paths, sessionExists));
+// Independent human terminals resolve aliases through the same daemon session
+// registry, then root each shell in that session's canonical cwd.
+const terminalService = new TerminalService(paths, {
+  resolve: async ref =>
+    manager.get(ref).then(
+      view => ({ id: view.config.id, cwd: view.config.cwd }),
+      () => undefined,
+    ),
+});
+const terminalApi = new TerminalApi(terminalService);
 // Attention is a separate durable primitive; its source adapter listens to the
 // existing task/session streams but never presents notifications itself.
 const attentionSessions = {
@@ -132,6 +144,7 @@ const apiOptions = {
   stt,
   tasks: taskApi,
   pins: pinApi,
+  terminals: terminalApi,
   attention: attentionApi,
   push: pushService.api,
   analytics,
@@ -141,7 +154,7 @@ const apiOptions = {
 const server = await bindWithRetry(() => startApiServer(apiOptions)).catch(async error => {
   attentionSources.close();
   await pushService.close();
-  await Promise.allSettled([manager.close(), stt.close()]);
+  await Promise.allSettled([manager.close(), stt.close(), terminalService.close()]);
   throw error;
 });
 // Write the pid file only AFTER the bind succeeded — a loser of the bind race
@@ -173,7 +186,12 @@ const stop = async (reason: string) => {
       // already-encrypted outbound attempts within the shared grace period.
       attentionSources.close();
       await pushService.close();
-      await Promise.all([manager.close(), stt.close(), ...(analytics ? [analytics.close()] : [])]);
+      await Promise.all([
+        manager.close(),
+        stt.close(),
+        terminalService.close(),
+        ...(analytics ? [analytics.close()] : []),
+      ]);
       return true;
     })(),
     Bun.sleep(SHUTDOWN_GRACE_MS).then(() => false),
