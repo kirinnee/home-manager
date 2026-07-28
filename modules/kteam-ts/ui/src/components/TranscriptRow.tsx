@@ -44,7 +44,6 @@ import { cn, fmtClock } from '../lib/utils';
 import { isMessagePinned, pinsStore, type PinBlockKind } from '../lib/pins';
 import { getForegroundSession } from '../lib/pin-bridge';
 import { TOUCH_SELECTION_DWELL_MS } from '../hooks/useLiveTick';
-import { useSidePane } from './SidePane';
 
 const PROTOCOL_HEADER = /#\s*(AGENTS\.md instructions|SYSTEM\s*PROMPT|INSTRUCTIONS)/i;
 const LONG_USER_LINES = 16;
@@ -635,12 +634,13 @@ export const ASSISTANT_LAYOUT = {
 } as const;
 
 function AssistantMessage({ text, ts }: { text: string; ts?: string; source: string }) {
-  const sidePane = useSidePane();
   if (!text.trim()) return null;
   return (
     <div className={cn(ASSISTANT_LAYOUT.wrap, ts && ASSISTANT_LAYOUT.gutter)}>
       {ts && <span className={ASSISTANT_LAYOUT.stamp}>{clockLabel(ts)}</span>}
-      <Markdown text={text} onTaskOpen={sidePane?.openTask} />
+      {/* Task-reference opening arrives with #F64; keeping it out here lets the
+          unconfirmed-placement fix ship without that feature's unlanded types. */}
+      <Markdown text={text} />
     </div>
   );
 }

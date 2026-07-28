@@ -200,7 +200,8 @@ describe('durable ledger row placement', () => {
     expect(placed.map(block => block.kind)).toEqual(['ledger', 'user', 'assistant', 'ledger']);
     expect(placed[0]?.kind === 'ledger' ? placed[0].record.sendId : undefined).toBe('older');
     expect(placed[0]?.kind === 'ledger' ? placed[0].placement : undefined).toBe('before-loaded');
-    expect(placed.at(-1)?.kind === 'ledger' ? placed.at(-1)!.placement : undefined).toBe('after-loaded');
+    const last = placed.at(-1);
+    expect(last?.kind === 'ledger' ? last.placement : undefined).toBe('after-loaded');
   });
 
   test('an unusable clock is shown at the top boundary and labelled unknown', () => {
