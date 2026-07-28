@@ -245,10 +245,11 @@ function referenceTrigger(
  * - either adjacent `&` rejects shell `&&`;
  * - a complete HTML entity (`&amp;`, `&nbsp;`, `&#39;`, or hex numeric form) is
  *   rejected even when the caret sits inside it; and
- * - a bare sigil after an earlier token on the same line is prose/shell text
- *   (`Tom &` or `cmd &`), while a bare `&` at the start of a line (or directly
- *   after opening punctuation) opens the browse list. Once B/F/I/C is typed,
- *   the task picker may open at any valid token boundary. */
+ * - a bare sigil opens at ANY token boundary, including mid-line. This is a
+ *   deliberate browsing affordance: `Tom &` briefly opens until the following
+ *   space closes it, and a trailing shell `cmd &` remains open. That small,
+ *   uncommon false-positive cost is preferable to making readers know B/F/I/C
+ *   before they can browse from a message already in progress. */
 const TASK_QUERY = /^(?:[BFIC][0-9]*)?$/u;
 const HTML_ENTITY = /^&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]+);/u;
 
@@ -259,10 +260,7 @@ function taskTrigger(value: string, caret: number): ComposerTriggerMatch | null 
   if (value[start + 1] === '&' || HTML_ENTITY.test(value.slice(start))) return null;
   const query = value.slice(start + 1, caret);
   if (!TASK_QUERY.test(query)) return null;
-  if (!query && start > 0 && TOKEN_SPACE.test(value[start - 1]!)) {
-    const lineStart = Math.max(value.lastIndexOf('\n', start - 1), value.lastIndexOf('\r', start - 1)) + 1;
-    if (/\S/u.test(value.slice(lineStart, start))) return null;
-  }
+  if (!query && value[start + 1] && TOKEN_SPACE.test(value[start + 1]!)) return null;
   return { trigger: '&', query, start, end: referenceTokenEnd(value, caret), caret };
 }
 

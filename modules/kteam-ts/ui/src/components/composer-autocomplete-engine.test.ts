@@ -57,6 +57,7 @@ describe('composer autocomplete trigger detection', () => {
     { value: 'see &F12', trigger: '&' as const, query: 'F12', start: 4 },
     { value: '(&B2', trigger: '&' as const, query: 'B2', start: 1 },
     { value: 'line\n&', trigger: '&' as const, query: '', start: 5 },
+    { value: 'can you look at &', trigger: '&' as const, query: '', start: 16 },
     { value: '?A', trigger: '?' as const, query: 'A', start: 0 },
     { value: 'resolve ?A3', trigger: '?' as const, query: 'A3', start: 8 },
     { value: 'line\n?A12', trigger: '?' as const, query: 'A12', start: 5 },
@@ -103,12 +104,23 @@ describe('composer autocomplete trigger detection', () => {
     { value: '&#39;', caretAt: 1 },
     { value: '&#x27;', caretAt: 1 },
     { value: '&#X27;', caretAt: 1 },
-    { value: 'cmd &', caretAt: 'cmd &'.length },
     { value: 'a && b', caretAt: 'a && b'.length },
     { value: '&&', caretAt: 1 },
     { value: '&&', caretAt: 2 },
   ])('$value at caret $caretAt is not a task trigger', ({ value, caretAt }) => {
     expect(detectComposerTrigger(value, caret(caretAt))).toBeNull();
+  });
+
+  test.each(['Tom &', 'cmd &'])('%s pays the deliberate one-sigil cost of browse-anywhere', value => {
+    expect(detectComposerTrigger(value, caret(value.length))).toMatchObject({
+      trigger: '&',
+      query: '',
+      start: value.lastIndexOf('&'),
+    });
+  });
+
+  test('the next whitespace keystroke closes a mid-line browse immediately', () => {
+    expect(detectComposerTrigger('Tom & ', caret('Tom & '.length))).toBeNull();
   });
 
   test('changing the task sigil does not tighten the existing attention boundary', () => {
