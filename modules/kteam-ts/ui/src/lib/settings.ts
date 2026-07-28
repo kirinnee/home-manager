@@ -67,6 +67,10 @@ export const SETTINGS_DEFINITIONS: readonly SettingDefinition[] = [
       'transcribe',
       'transcription',
       'talk',
+      'push to talk',
+      'shortcut',
+      'hotkey',
+      'alt',
       'audio',
       'parakeet',
       // The enhancement feature lives inside this section; without its own
@@ -159,13 +163,19 @@ export interface SettingsPaletteEntry {
   href?: string;
 }
 
+export interface SettingsPaletteContext {
+  /** Current browser-local binding, supplied by the palette without making
+   * this general settings catalog own dictation storage. */
+  dictationShortcutLabel?: string;
+}
+
 /**
  * The open command is present in the unfiltered palette. Individual controls
  * join it only when their catalog text matches the query, so "text size" and
  * "density" go straight to the relevant section without turning every Cmd+K
  * open into a second Settings page.
  */
-export function settingsPaletteEntries(query: string): SettingsPaletteEntry[] {
+export function settingsPaletteEntries(query: string, context: SettingsPaletteContext = {}): SettingsPaletteEntry[] {
   const needle = query.trim().toLocaleLowerCase();
   if (!needle) {
     return [
@@ -190,12 +200,16 @@ export function settingsPaletteEntries(query: string): SettingsPaletteEntry[] {
   }
 
   for (const definition of SETTINGS_DEFINITIONS) {
-    const haystack = [definition.label, definition.description, ...definition.keywords].join(' ').toLocaleLowerCase();
+    const description =
+      definition.id === 'dictation' && context.dictationShortcutLabel
+        ? `${definition.description} Push-to-talk shortcut: ${context.dictationShortcutLabel}.`
+        : definition.description;
+    const haystack = [definition.label, description, ...definition.keywords].join(' ').toLocaleLowerCase();
     if (!haystack.includes(needle)) continue;
     entries.push({
       id: `setting-${definition.id}`,
       label: definition.label,
-      description: definition.description,
+      description,
       settingId: definition.id,
     });
   }

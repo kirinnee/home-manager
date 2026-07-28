@@ -119,6 +119,8 @@ describe('live capture orchestration', () => {
               decodeCount: 1,
               discardedPasses: 0,
               forcedAudioDropMs: 0,
+              forcedFinalizationCount: 0,
+              forcedFinalizedWords: 0,
               maxDecodedAudioMs: 1_500,
               maxModelInputAudioMs: 1_740,
               firstVisibleAudioMs: 1_500,

@@ -173,6 +173,10 @@ export interface LiveTranscriptionStats {
   decodeCount: number;
   discardedPasses: number;
   forcedAudioDropMs: number;
+  /** Number of bounded-window rollovers that sealed an otherwise provisional
+   * prefix before its supporting audio was evicted. */
+  forcedFinalizationCount: number;
+  forcedFinalizedWords: number;
   /** Retained real microphone audio, before decoder-only silence padding. */
   maxDecodedAudioMs: number;
   /** Exact largest PCM duration handed to the model, including padding. */
@@ -257,6 +261,8 @@ export class LocalAgreementTranscriber {
     decodeCount: 0,
     discardedPasses: 0,
     forcedAudioDropMs: 0,
+    forcedFinalizationCount: 0,
+    forcedFinalizedWords: 0,
     maxDecodedAudioMs: 0,
     maxModelInputAudioMs: 0,
     firstVisibleAudioMs: null,
@@ -536,11 +542,39 @@ export class LocalAgreementTranscriber {
   private enforceBufferBound(): void {
     if (this.buffer.length <= this.maxBufferSamples) return;
     const excess = this.buffer.length - this.maxBufferSamples;
-    this.trimBufferTo(this.bufferStartSample + excess, true);
+    const trimThroughSample = this.bufferStartSample + excess;
+    this.finalizeEvictedProvisional(trimThroughSample);
+    this.trimBufferTo(trimThroughSample, true);
     // A rolling-window jump breaks the "same prefix" premise. The next pass is
     // visible immediately but must earn a fresh second agreeing pass.
     this.previousWords = null;
     this.previousSnapshotEndSample = 0;
+  }
+
+  /** Begin a new agreement epoch without making already-visible speech vanish.
+   *
+   * A word whose onset precedes `trimThroughSample` cannot be reconstructed
+   * reliably after that audio is dropped. The entire candidate already passed
+   * the pass-level readability and timestamp checks, so seal that endangered
+   * contiguous prefix exactly once. Words whose onsets remain in the buffer
+   * stay provisional and are still free to back-edit in the next epoch. The
+   * product's clean full-recording pass remains authoritative at Stop. */
+  private finalizeEvictedProvisional(trimThroughSample: number): void {
+    let count = 0;
+    while (count < this.provisionalWords.length && this.provisionalWords[count]!.startSample < trimThroughSample) {
+      count += 1;
+    }
+    if (count === 0) return;
+
+    const finalized = this.provisionalWords.slice(0, count);
+    this.committedWords.push(...finalized);
+    this.committedThroughSample = finalized.reduce(
+      (latest, word) => Math.max(latest, word.endSample),
+      this.committedThroughSample,
+    );
+    this.provisionalWords = this.provisionalWords.slice(count);
+    this.stats.forcedFinalizationCount += 1;
+    this.stats.forcedFinalizedWords += finalized.length;
   }
 
   private trimBufferTo(absoluteSample: number, forced: boolean): void {
