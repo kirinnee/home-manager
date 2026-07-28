@@ -13,6 +13,15 @@ import { PinApi, PinService } from './pins';
 import { TaskService } from './tasks';
 import { TaskApi } from './tasks-api';
 import { AnalyticsIndex } from './analytics-index';
+import { loadDaemonSecretsEnvironment } from './daemon-secrets';
+
+const secretsStatus = loadDaemonSecretsEnvironment();
+if (secretsStatus === 'failed') {
+  // Keep session control available, but never echo the shell/source error: it
+  // can contain a provider credential. Warden health will surface the missing
+  // authentication state without exposing values.
+  console.error('kteamd: could not load ~/.secrets; provider credentials are unavailable');
+}
 
 const paths = createPaths();
 await mkdir(paths.daemon, { recursive: true, mode: 0o700 });

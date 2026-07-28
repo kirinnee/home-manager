@@ -12,6 +12,16 @@ import { fmtRelative } from '../lib/utils';
 
 const POLL_MS = 30_000;
 
+export function wardenExhaustionLabel(failover: WardenStatusView['failover']): string | undefined {
+  if (!failover?.exhaustedSince) return undefined;
+  const noCredentials =
+    failover.accounts.length > 0 &&
+    failover.accounts.every(
+      account => account.quota?.authOk === false || /credentials rejected|no credentials/i.test(account.reason ?? ''),
+    );
+  return noCredentials ? 'no warden credentials!' : 'no usable warden account!';
+}
+
 /**
  * `SessionsListPage` still contains the old call site but is owned by a later
  * wave. Its default is intentionally quiet; only WardenPage opts into polling
@@ -55,6 +65,7 @@ function WardenStripPanel() {
   const count = anomalies.length;
   const clean = count === 0;
   const interval = status.config?.intervalMinutes;
+  const exhaustionLabel = wardenExhaustionLabel(status.failover);
 
   return (
     <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-border-soft bg-surface-2 px-3 py-2 text-[12px]">
@@ -101,7 +112,7 @@ function WardenStripPanel() {
           </span>
         </>
       )}
-      {status.failover?.exhaustedSince && <span className="mono font-medium text-warn">no usable warden account!</span>}
+      {exhaustionLabel && <span className="mono font-medium text-warn">{exhaustionLabel}</span>}
       {!clean && (
         <span
           className="mono ml-auto min-w-0 truncate text-faint"
