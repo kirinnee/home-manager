@@ -187,6 +187,22 @@ describe('durable ledger row placement', () => {
     expect(row?.kind === 'ledger' ? row.placement : undefined).toBe('chronological');
   });
 
+  test('places every durable fate by acceptedAt, including a still-ACCEPTED row', () => {
+    const blocks = buildTranscript([
+      user('before', '2026-07-25T12:00:00.000Z'),
+      assistant('after', '2026-07-25T12:04:00.000Z'),
+    ]);
+    const accepted = { ...ledger('accepted', '2026-07-25T12:01:00.000Z'), fate: 'accepted' as const };
+    const unaccounted = ledger('unaccounted', '2026-07-25T12:02:00.000Z');
+    const delivered = { ...ledger('delivered', '2026-07-25T12:03:00.000Z'), fate: 'delivered' as const };
+    const placed = placeLedgerBlocks(blocks, [delivered, accepted, unaccounted], Date.parse(BASE));
+    expect(placed.flatMap(block => (block.kind === 'ledger' ? [block.record.sendId] : []))).toEqual([
+      'accepted',
+      'unaccounted',
+      'delivered',
+    ]);
+  });
+
   test('uses honest loaded-page boundaries instead of teleporting an old row to the tail', () => {
     const blocks = buildTranscript([
       user('loaded first', '2026-07-25T12:00:00.000Z'),

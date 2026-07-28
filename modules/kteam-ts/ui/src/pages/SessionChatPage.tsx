@@ -33,7 +33,6 @@ import { TerminalView } from '../components/TerminalView';
 import { ViewTabs } from '../components/ViewTabs';
 import { SessionHeader } from '../components/SessionHeader';
 import { Transcript } from '../components/Transcript';
-import { LedgerMessage } from '../components/LedgerMessage';
 import { SidePaneWorkspace } from '../components/SidePane';
 import { appendSkillInvocation } from '../components/SkillsSurface';
 import { ThinkingIndicator } from '../components/Harness';
@@ -52,7 +51,6 @@ import {
   isSendLedgerEvent,
   nextLedgerViewDeadline,
   parseSendsResponse,
-  partitionLedgerChips,
   reconcileLocalSends,
   selectLedgerChips,
   visibleUserRows,
@@ -857,13 +855,13 @@ export function SessionChatPage({
     () => selectLedgerChips(ledger, visibleUserRows(blocks), ledgerNow),
     [ledger, blocks, ledgerNow],
   );
-  const ledgerPartition = useMemo(() => partitionLedgerChips(ledgerChips, ledgerNow), [ledgerChips, ledgerNow]);
-  // Only current accepts stay at the tail. Oldest-first preserves send order
-  // among several in-flight rows.
-  const ledgerRows = useMemo(() => [...ledgerPartition.inFlight].reverse(), [ledgerPartition.inFlight]);
+  // acceptedAt, not fate, owns durable placement. ACCEPTED, unconfirmed and
+  // exceptional delivered rows all have a known conversational time; keeping
+  // even a fresh durable acceptance in the footer makes the conversation jump
+  // later and lets a minutes-old peer message bury the tail for up to an hour.
   const displayedBlocks = useMemo(
-    () => placeLedgerBlocks(visibleBlocks, ledgerPartition.chronological, ledgerNow),
-    [visibleBlocks, ledgerPartition.chronological, ledgerNow],
+    () => placeLedgerBlocks(visibleBlocks, ledgerChips, ledgerNow),
+    [visibleBlocks, ledgerChips, ledgerNow],
   );
 
   // ---- what a screen reader is told -----------------------------------------
@@ -1222,20 +1220,11 @@ export function SessionChatPage({
     </>
   );
   const transcriptFooter =
-    ledgerRows.length || reconciled.unclaimedLocal.length || busy ? (
+    reconciled.unclaimedLocal.length || busy ? (
       <div className="space-y-1 px-1 py-1">
-        {/* Only genuinely current durable accepts remain here. Unconfirmed and
-            exceptional delivered rows are interleaved into displayedBlocks by
-            acceptedAt, so old uncertainty can never bury the conversation. */}
-        {ledgerRows.map(record => (
-          <LedgerMessage
-            key={record.sendId}
-            record={record}
-            sessionId={sessionId}
-            asOf={ledgerNow}
-            onResend={HAS_TOKEN ? resendLedger : undefined}
-          />
-        ))}
+        {/* The footer is browser-local only: optimistic rows whose durable
+            acknowledgement has not joined yet, plus current thinking state.
+            Every durable row renders in acceptedAt order inside the transcript. */}
         {reconciled.unclaimedLocal.map(p => (
           <PendingMessage
             key={p.key}

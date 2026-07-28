@@ -8,7 +8,6 @@ import {
   nextLedgerViewDeadline,
   parseSendRecord,
   parseSendsResponse,
-  partitionLedgerChips,
   reconcileLocalSends,
   selectLedgerChips,
   sendBadge,
@@ -569,7 +568,7 @@ describe('which durable rows get a chip — RETIREMENT REQUIRES EXACT PROOF IDEN
   });
 });
 
-describe('live-view aging and footer classification', () => {
+describe('live-view aging and badge transitions', () => {
   test('hardDeadline retires only the live row, not the durable record', () => {
     const record = row({
       fate: 'unaccounted',
@@ -592,19 +591,12 @@ describe('live-view aging and footer classification', () => {
     expect(hasLedgerHardExpired(row({ fate: 'delivered', hardDeadline: ACCEPTED_AT }), AT + 99_000)).toBe(false);
   });
 
-  test('only a current ACCEPTED row stays in the footer partition', () => {
+  test('a twenty-minute-old ACCEPTED row stays in the durable projection with its honest badge', () => {
     const deadline = new Date(AT + 10_000).toISOString();
     const accepted = row({ sendId: 'accepted', fate: 'accepted', unaccountedDeadline: deadline });
-    const unaccounted = row({ sendId: 'unaccounted', fate: 'unaccounted' });
-    const delivered = row({ sendId: 'delivered', fate: 'delivered' });
-    expect(partitionLedgerChips([accepted, unaccounted, delivered], AT)).toEqual({
-      inFlight: [accepted],
-      chronological: [unaccounted, delivered],
-    });
-
-    const afterDeadline = partitionLedgerChips([accepted], AT + 10_000);
-    expect(afterDeadline.inFlight).toEqual([]);
-    expect(afterDeadline.chronological).toEqual([accepted]);
+    expect(selectLedgerChips([accepted], [], AT + 9_999)).toEqual([accepted]);
+    expect(isLedgerUnconfirmed(accepted, AT + 9_999)).toBe(false);
+    expect(sendBadge(accepted, AT + 9_999).label).toBe('accepted — awaiting confirmation');
     expect(isLedgerUnconfirmed(accepted, AT + 10_000)).toBe(true);
     expect(sendBadge(accepted, AT + 10_000).label).toBe('unconfirmed');
   });
