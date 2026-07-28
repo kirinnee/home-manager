@@ -18,6 +18,8 @@ import type { TaskApi } from './tasks-api';
 import { resolveTaskActor, taskApiRequestFrom } from './tasks-api';
 import type { PinApi } from './pins-api';
 import { isPinPath, pinWardenDenial } from './pins-api';
+import type { PushApi } from './push-api';
+import { isPushPath, pushWardenDenial } from './push-api';
 import { isTaskPath, taskWardenDenial } from './tasks-contract';
 import type { AnalyticsQueryService } from './analytics-types';
 import { AnalyticsQueryError } from './analytics-query';
@@ -69,6 +71,8 @@ export interface ApiServerOptions {
   tasks?: TaskApi;
   /** Daemon-owned per-session pins. Omitted in tests that don't exercise pins. */
   pins?: PinApi;
+  /** Admin-only Web Push enrollment and per-device management. */
+  push?: PushApi;
   /** Fleet-wide historical analytics over the daemon-owned SQLite index. */
   analytics?: AnalyticsQueryService;
 }
@@ -114,6 +118,8 @@ async function wardenScopeDenial(
   if (taskDenial) return forbidden(taskDenial);
   const pinDenial = pinWardenDenial(method, pathname);
   if (pinDenial) return forbidden(pinDenial);
+  const pushDenial = pushWardenDenial(method, pathname);
+  if (pushDenial) return forbidden(pushDenial);
   if (method === 'GET') return undefined; // every other read is fine
   if (pathname === '/v1/sessions' && method === 'POST') return forbidden('start sessions');
   if (method === 'DELETE') return forbidden('remove sessions');
@@ -504,6 +510,18 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           if (url.pathname === '/v1/names' && request.method === 'GET') {
             const raw = Number(url.searchParams.get('count') ?? '1');
             return json(await options.service.suggestNames(Number.isFinite(raw) ? raw : 1));
+          }
+          // Push mutations and even the public VAPID half stay behind the
+          // daemon's admin bearer token. wardenScopeDenial rejects this whole
+          // surface before dispatch, including GETs.
+          if (options.push && isPushPath(url.pathname)) {
+            const pushResponse = await options.push.handle({
+              method: request.method,
+              url,
+              body: request.method === 'POST' ? await body<unknown>(request) : undefined,
+            });
+            if (pushResponse) return json(pushResponse.body, pushResponse.status);
+            return json(unknownRoute(request.method, url.pathname), 404);
           }
           if (url.pathname === '/v1/sessions' && request.method === 'GET')
             return json((await options.service.list()).map(compactFleetSession));
