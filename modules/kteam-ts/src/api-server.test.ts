@@ -1088,10 +1088,16 @@ describe('task API integration', () => {
     kind: 'feature',
     title: 'Task API',
     description: 'Wire the daemon route.',
+    ask: { text: 'Wire the daemon route.', source: 'session:user#1' },
+    clarifications: [],
+    workflow: 'quick',
+    phase: 'todo',
+    dependsOn: [],
     status: 'todo',
     statusReason: null,
     assignee: null,
     repo: '/tmp',
+    files: [],
     links: { prs: [], branch: null, commits: [], docs: [] },
     order: null,
     createdAt: '2026-07-27T00:00:00.000Z',
@@ -1104,6 +1110,10 @@ describe('task API integration', () => {
       assigneeLastActivityAt: null,
       staleness: null,
     },
+    blocked: false,
+    blockedReason: null,
+    blockedSince: null,
+    blockedBy: [],
   };
 
   class CountingTaskService implements TaskApiService {
@@ -1146,6 +1156,11 @@ describe('task API integration', () => {
   test('one daemon-lifetime TaskApi applies duplicate create and note request ids once', async () => {
     const tasks = new CountingTaskService();
     const base = taskServer(tasks);
+    const createBody = {
+      kind: 'feature',
+      title: 'Task API',
+      ask: { text: 'Wire the daemon route.', source: 'session:user#1' },
+    };
     const post = (path: string, requestId: string, value: unknown) =>
       fetch(`${base}${path}`, {
         method: 'POST',
@@ -1157,8 +1172,8 @@ describe('task API integration', () => {
         body: JSON.stringify(value),
       });
 
-    expect((await post('/v1/tasks', 'create-1', { kind: 'feature', title: 'Task API' })).status).toBe(201);
-    expect((await post('/v1/tasks', 'create-1', { kind: 'feature', title: 'Task API' })).status).toBe(201);
+    expect((await post('/v1/tasks', 'create-1', createBody)).status).toBe(201);
+    expect((await post('/v1/tasks', 'create-1', createBody)).status).toBe(201);
     expect(tasks.creates).toBe(1);
 
     expect((await post('/v1/tasks/F1', 'note-1', { action: 'note', text: 'wired' })).status).toBe(200);
@@ -1215,6 +1230,7 @@ describe('task API integration', () => {
       body: JSON.stringify({
         kind: 'feature',
         title: 'Attributed',
+        ask: { text: 'Create an attributed task.', source: 'session:user#2' },
         actor: 'forged-session',
         actorName: 'forged-name',
       }),

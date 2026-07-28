@@ -1,44 +1,32 @@
-// SESSION TASKS — the task surface for ONE session, hosted in the unified side
-// pane (SidePane.tsx).
-//
-// The daemon keeps task records per session (GET /v1/sessions/:id/tasks;
-// /v1/tasks remains the CLI/analytics aggregate), and this surface answers one
-// question: "what has THIS session declared it is doing". There are no filters
-// or collapsed sections: every returned task is grouped by its declared status,
-// including built, live, blocked, and dropped work, then opens into its brief.
-//
-// The pane is 320–680px wide, so list and detail are a two-level stack (list →
-// detail with a Back button), the same navigation shape FilesTab settled on,
-// not a side-by-side grid.
-//
-// VERSION SKEW IS A FIRST-CLASS STATE. The session routes ship in the same
-// change-set as this UI but deploy separately; a daemon that predates them
-// answers 404 `unknown_route` (the same signal the fs probe keys on) and the
-// surface says so honestly instead of showing an empty board as "no tasks".
-//
-// LIVE, NOT POLLED. Task writes broadcast a sequence-0 `tasks.updated` event
-// for the session carrying the complete list snapshot; this surface applies it
-// directly. The fetch happens once per mount (the host mounts the surface only
-// while it is open), with a manual refresh for reassurance.
-
-import { useCallback, useEffect, useRef, useState } from 'react';
+// One fleet task array, three accessible readings: a session-scoped list and
+// phase-kanban, plus a depends-on DAG whose closure crosses sessions. The List
+// and Kanban never show another session's work; the DAG renders every
+// dependency as a real node (cross-session ones linked to their owning session,
+// truly-absent ones marked missing) so the graph is never silently incomplete.
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ListTodo, Loader2, RefreshCw } from 'lucide-react';
 import { api, ApiError } from '../lib/api';
-import { useSessionEvents } from '../lib/store';
+import { navigate } from '../lib/router';
+import { useFleetEvents } from '../lib/store';
 import { isUnknownRoute } from './files-api';
-import { TaskDetail, TaskRow } from './TaskPresentation';
+import { SessionLink, TaskDetail, TaskRow, sessionHref } from './TaskPresentation';
 import {
-  groupTasks,
+  buildTaskDag,
+  computeFileConflicts,
+  groupTasksByPhase,
   parseTaskActivity,
   parseTaskListResponse,
   parseTaskRecord,
-  TASK_STATUS_META,
+  sortTasksForList,
+  tasksForSession,
+  taskReference,
+  TASK_PHASE_META,
   type TaskActivity,
+  type TaskFileConflict,
   type TaskRecord,
   type TaskSummary,
 } from '../lib/tasks';
 
-/** The honest copy per empty-ish state, exported for unit tests. */
 export function sessionTasksEmptyCopy(state: 'absent' | 'error' | 'empty', error?: string | null): string {
   switch (state) {
     case 'absent':
@@ -49,33 +37,177 @@ export function sessionTasksEmptyCopy(state: 'absent' | 'error' | 'empty', error
       return 'No tasks recorded for this session yet. Agents record them with `kteam task create`.';
   }
 }
-
 type LoadState = 'loading' | 'ready' | 'absent' | 'error';
+export type TaskProjection = 'list' | 'kanban' | 'dag';
+type ConflictMap = Map<string, TaskFileConflict[]>;
+const EMPTY_CONFLICTS: ConflictMap = new Map();
 
-/** Every task appears exactly once. Status groups follow the daemon's canonical
- * board order; explicit rank and id order the rows inside each group. */
-export function SessionTaskList({ tasks, onOpen }: { tasks: TaskSummary[]; onOpen: (id: string) => void }) {
+export function SessionTaskList({
+  tasks,
+  conflicts = EMPTY_CONFLICTS,
+  onOpen,
+}: {
+  tasks: TaskSummary[];
+  conflicts?: ConflictMap;
+  onOpen: (id: string) => void;
+}) {
   return (
-    <div className="space-y-3">
-      {groupTasks(tasks).map(group => (
+    <div data-task-view="list" className="divide-y divide-border-soft rounded-md border border-border-soft bg-surface">
+      {sortTasksForList(tasks).map(task => (
+        <TaskRow key={task.id} task={task} conflicts={conflicts.get(task.id)} onOpen={onOpen} />
+      ))}
+    </div>
+  );
+}
+export function SessionTaskKanban({
+  tasks,
+  conflicts = EMPTY_CONFLICTS,
+  onOpen,
+}: {
+  tasks: TaskSummary[];
+  conflicts?: ConflictMap;
+  onOpen: (id: string) => void;
+}) {
+  return (
+    <div data-task-view="kanban" className="flex min-w-max gap-3 pb-2">
+      {groupTasksByPhase(tasks).map(column => (
         <section
-          key={group.status}
-          data-task-status={group.status}
-          aria-label={`${TASK_STATUS_META[group.status].label} tasks`}
+          key={column.phase}
+          data-task-phase={column.phase}
+          aria-label={`${TASK_PHASE_META[column.phase].label} column`}
+          className="w-64 shrink-0 rounded-md border border-border-soft bg-surface-2 p-2"
         >
-          <div className="mb-1 flex items-center gap-2">
-            <h3 className="kt-label m-0">{TASK_STATUS_META[group.status].label}</h3>
-            <span className="text-xs text-muted">{group.tasks.length}</span>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h3 className="kt-label m-0">{TASK_PHASE_META[column.phase].label}</h3>
+            <span className="text-xs text-muted">{column.tasks.length}</span>
           </div>
           <div className="divide-y divide-border-soft rounded-md border border-border-soft bg-surface">
-            {group.tasks.map(task => (
-              <TaskRow key={task.id} task={task} onOpen={onOpen} />
+            {column.tasks.map(task => (
+              <TaskRow key={task.id} task={task} conflicts={conflicts.get(task.id)} onOpen={onOpen} />
             ))}
+            {column.tasks.length === 0 && <p className="px-3 py-2 text-xs text-muted">No tasks.</p>}
           </div>
         </section>
       ))}
     </div>
   );
+}
+/** The DAG derives from the FLEET array so a dependency owned by another session
+ *  is a real, openable node — not an `(external)` dead end. Cross-session nodes
+ *  navigate to their owning session; same-session nodes open detail in place. */
+export function SessionTaskDag({
+  fleet,
+  sessionId,
+  conflicts = EMPTY_CONFLICTS,
+  onOpen,
+}: {
+  fleet: TaskSummary[];
+  sessionId: string;
+  conflicts?: ConflictMap;
+  onOpen: (id: string) => void;
+}) {
+  const dag = buildTaskDag(fleet, sessionId);
+  const nodeById = new Map(dag.nodes.map(node => [node.id, node]));
+  const dependenciesOf = (id: string) => dag.edges.filter(edge => edge.from === id).map(edge => edge.to);
+  return (
+    <ol data-task-view="dag" className="space-y-3">
+      {dag.nodes.map(node => (
+        <li
+          key={node.id}
+          data-task-node={node.id}
+          data-task-cross-session={node.crossSession ? 'true' : undefined}
+          className="rounded-md border border-border-soft bg-surface"
+        >
+          {node.crossSession && node.sessionId && (
+            <div className="flex items-center gap-1.5 border-b border-border-soft px-3 py-1 text-xs text-muted">
+              <span className="shrink-0">Owned by session</span>
+              <SessionLink sessionId={node.sessionId} />
+            </div>
+          )}
+          {node.task ? (
+            <TaskRow
+              task={node.task}
+              conflicts={conflicts.get(node.id)}
+              onOpen={node.crossSession && node.sessionId ? () => navigate(sessionHref(node.sessionId!)) : onOpen}
+            />
+          ) : (
+            <div data-task-missing={node.id} className="px-3 py-2">
+              <span className="mono text-xs font-semibold text-warn">{taskReference(node.id)}</span>
+              <span className="ml-2 text-xs text-muted">Referenced dependency is missing — deleted or unreadable.</span>
+            </div>
+          )}
+          {dependenciesOf(node.id).length > 0 && (
+            <ul className="border-t border-border-soft px-3 py-2 text-xs text-muted">
+              {dependenciesOf(node.id).map(dependency => {
+                const target = nodeById.get(dependency);
+                return (
+                  <li key={dependency} data-task-edge={`${node.id}->${dependency}`} className="ml-3 list-disc">
+                    depends on{' '}
+                    {!target || target.missing ? (
+                      <span className="mono text-warn">{taskReference(dependency)} (missing)</span>
+                    ) : target.crossSession && target.sessionId ? (
+                      <SessionLink sessionId={target.sessionId} label={taskReference(dependency)} />
+                    ) : (
+                      <button
+                        type="button"
+                        className="mono text-accent hover:underline"
+                        onClick={() => onOpen(dependency)}
+                      >
+                        {taskReference(dependency)}
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </li>
+      ))}
+    </ol>
+  );
+}
+function ProjectionTabs({ value, onChange }: { value: TaskProjection; onChange: (view: TaskProjection) => void }) {
+  const views: Array<{ id: TaskProjection; label: string }> = [
+    { id: 'list', label: 'List' },
+    { id: 'kanban', label: 'Kanban' },
+    { id: 'dag', label: 'DAG' },
+  ];
+  return (
+    <div role="tablist" aria-label="Task views" className="flex items-center gap-1">
+      {views.map(view => (
+        <button
+          key={view.id}
+          role="tab"
+          type="button"
+          aria-selected={value === view.id}
+          className="kt-btn kt-btn--sm"
+          onClick={() => onChange(view.id)}
+        >
+          {view.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+function TaskProjectionView({
+  view,
+  tasks,
+  fleet,
+  sessionId,
+  conflicts,
+  onOpen,
+}: {
+  view: TaskProjection;
+  tasks: TaskSummary[];
+  fleet: TaskSummary[];
+  sessionId: string;
+  conflicts: ConflictMap;
+  onOpen: (id: string) => void;
+}) {
+  if (view === 'kanban') return <SessionTaskKanban tasks={tasks} conflicts={conflicts} onOpen={onOpen} />;
+  if (view === 'dag')
+    return <SessionTaskDag fleet={fleet} sessionId={sessionId} conflicts={conflicts} onOpen={onOpen} />;
+  return <SessionTaskList tasks={tasks} conflicts={conflicts} onOpen={onOpen} />;
 }
 
 export function SessionTasksSurface({ sessionId }: { sessionId: string }) {
@@ -87,15 +219,15 @@ export function SessionTasksSurface({ sessionId }: { sessionId: string }) {
   const [detail, setDetail] = useState<TaskRecord | null>(null);
   const [activity, setActivity] = useState<TaskActivity[]>([]);
   const [refreshing, setRefreshing] = useState(false);
-  /** Monotonic guard: a superseded response must never paint (same discipline
-   *  as the chat page's loadId). */
+  const [projection, setProjection] = useState<TaskProjection>('list');
   const seq = useRef(0);
-
+  // ONE fleet fetch. List/Kanban are derived by session below; the DAG reads the
+  // whole array so its dependency closure can cross sessions.
   const load = useCallback(async () => {
     const generation = ++seq.current;
     setRefreshing(true);
     try {
-      const parsed = parseTaskListResponse(await api.listSessionTasks(sessionId));
+      const parsed = parseTaskListResponse(await api.listTasks());
       if (seq.current !== generation) return;
       setTasks(parsed.tasks);
       setParseErrors(parsed.parseErrors);
@@ -107,48 +239,36 @@ export function SessionTasksSurface({ sessionId }: { sessionId: string }) {
         setState('absent');
         return;
       }
-      // A failed refresh over an already-loaded list keeps the list: the last
-      // known-good answer beats a blank pane. Only a first load lands on the
-      // error state.
       setError(e instanceof ApiError ? e.message : String(e));
       setState(current => (current === 'ready' ? 'ready' : 'error'));
     } finally {
       if (seq.current === generation) setRefreshing(false);
     }
-  }, [sessionId]);
-
+  }, []);
+  // The store's one fleet socket supplies live-only aggregate events. Subscribe
+  // before the initial fetch effect so a first task created in any previously
+  // taskless session cannot fall into a load→subscribe gap.
+  useFleetEvents(event => {
+    if (event.type === 'tasks.updated') void load();
+  });
   useEffect(() => {
     setState('loading');
     setTasks([]);
     setSelectedId(null);
     setDetail(null);
     setActivity([]);
+    setProjection('list');
     void load();
-  }, [load]);
-
-  // Live convergence: every successful task write broadcasts the whole session
-  // snapshot. Applying it replaces the list — the server owns ordering.
-  useSessionEvents(sessionId, event => {
-    if (event.type !== 'tasks.updated' || event.sessionId !== sessionId) return;
-    const parsed = parseTaskListResponse(event.data);
-    setTasks(parsed.tasks);
-    setParseErrors(parsed.parseErrors);
-    setState('ready');
-    setError(null);
-  });
-
+  }, [load, sessionId]);
+  const sessionTasks = useMemo(() => tasksForSession(tasks, sessionId), [tasks, sessionId]);
+  const conflicts = useMemo(() => computeFileConflicts(tasks), [tasks]);
   const openDetail = useCallback(
     async (taskId: string) => {
-      // Never render task B with task A's activity while B's request is in
-      // flight (same rule as the Tasks page).
       setDetail(null);
       setActivity([]);
       setSelectedId(taskId);
       try {
-        const response = (await api.getSessionTask(sessionId, taskId)) as {
-          task?: unknown;
-          activity?: unknown;
-        };
+        const response = (await api.getSessionTask(sessionId, taskId)) as { task?: unknown; activity?: unknown };
         const record = parseTaskRecord(response?.task ?? response);
         const entries = Array.isArray(response?.activity) ? response.activity : [];
         setDetail(record);
@@ -161,17 +281,14 @@ export function SessionTasksSurface({ sessionId }: { sessionId: string }) {
             .sort((a, b) => a.seq - b.seq),
         );
       } catch {
-        // The summary row is still authoritative; the detail view below renders
-        // it with whatever it has rather than erasing the selection.
+        /* The summary remains an honest selected row while detail fails. */
       }
     },
     [sessionId],
   );
-
-  const selectedSummary = tasks.find(task => task.id === selectedId) ?? null;
+  const selectedSummary = sessionTasks.find(task => task.id === selectedId) ?? null;
   const selected = detail?.id === selectedId ? detail : selectedSummary;
-
-  if (selectedId && selected) {
+  if (selectedId && selected)
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="flex shrink-0 items-center gap-sm px-panel py-2">
@@ -186,34 +303,36 @@ export function SessionTasksSurface({ sessionId }: { sessionId: string }) {
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto scroll-thin px-panel pb-3">
-          <TaskDetail task={selected} activity={activity} />
+          <TaskDetail task={selected} activity={activity} conflicts={conflicts.get(selected.id)} />
         </div>
       </div>
     );
-  }
-
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center justify-between gap-sm px-panel py-2">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-sm px-panel py-2">
         <span className="kt-label">
-          {state === 'ready' ? `${tasks.length} ${tasks.length === 1 ? 'task' : 'tasks'}` : 'Session tasks'}
+          {state === 'ready'
+            ? `${sessionTasks.length} ${sessionTasks.length === 1 ? 'task' : 'tasks'}`
+            : 'Session tasks'}
         </span>
-        <button
-          type="button"
-          className="kt-btn kt-btn--sm"
-          onClick={() => void load()}
-          disabled={refreshing}
-          aria-label="Refresh tasks"
-        >
-          {refreshing ? (
-            <Loader2 size={13} aria-hidden="true" className="animate-spin motion-reduce:animate-none" />
-          ) : (
-            <RefreshCw size={13} aria-hidden="true" />
-          )}
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <ProjectionTabs value={projection} onChange={setProjection} />
+          <button
+            type="button"
+            className="kt-btn kt-btn--sm"
+            onClick={() => void load()}
+            disabled={refreshing}
+            aria-label="Refresh tasks"
+          >
+            {refreshing ? (
+              <Loader2 size={13} aria-hidden="true" className="animate-spin motion-reduce:animate-none" />
+            ) : (
+              <RefreshCw size={13} aria-hidden="true" />
+            )}
+            Refresh
+          </button>
+        </div>
       </div>
-
       {error && state === 'ready' && (
         <p
           role="status"
@@ -230,14 +349,13 @@ export function SessionTasksSurface({ sessionId }: { sessionId: string }) {
           {parseErrors} malformed task {parseErrors === 1 ? 'record was' : 'records were'} skipped.
         </p>
       )}
-
-      <div className="min-h-0 flex-1 overflow-y-auto scroll-thin px-panel pb-3">
+      <div className="min-h-0 flex-1 overflow-auto scroll-thin px-panel pb-3">
         {state === 'loading' && (
           <p role="status" className="py-6 text-center text-cell text-muted">
             Loading tasks…
           </p>
         )}
-        {(state === 'absent' || state === 'error' || (state === 'ready' && tasks.length === 0)) && (
+        {(state === 'absent' || state === 'error' || (state === 'ready' && sessionTasks.length === 0)) && (
           <div className="flex flex-col items-center gap-2 py-8 text-center">
             <ListTodo size={22} aria-hidden="true" className="text-faint" />
             <p
@@ -248,7 +366,16 @@ export function SessionTasksSurface({ sessionId }: { sessionId: string }) {
             </p>
           </div>
         )}
-        {state === 'ready' && tasks.length > 0 && <SessionTaskList tasks={tasks} onOpen={id => void openDetail(id)} />}
+        {state === 'ready' && sessionTasks.length > 0 && (
+          <TaskProjectionView
+            view={projection}
+            tasks={sessionTasks}
+            fleet={tasks}
+            sessionId={sessionId}
+            conflicts={conflicts}
+            onOpen={id => void openDetail(id)}
+          />
+        )}
       </div>
     </div>
   );

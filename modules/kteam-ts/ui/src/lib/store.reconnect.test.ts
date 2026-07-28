@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { api } from './api';
 import { FleetStore } from './store';
+import type { KTeamEvent } from '../types';
 
 // Deterministic proof for Fix 1 (dale, Rank 1): a structured question raised
 // while the client was disconnected is not in the socket's 200-event global
@@ -82,5 +83,29 @@ describe('reconnect recovery — forced reconcile (Fix 1)', () => {
     driver.onVisibility(); // returning to a backgrounded tab, still inside 5s
     await flush();
     expect(calls()).toBe(2);
+  });
+});
+
+describe('live fleet event subscriptions', () => {
+  test('hears a task update from any session without pinning a per-session replay subscription', () => {
+    const store = new FleetStore();
+    const seen: string[] = [];
+    const unsubscribe = store.subscribeEvents(event => seen.push(`${event.sessionId}:${event.type}`));
+    const driver = store as unknown as { handleEvent(event: KTeamEvent): void };
+    const event: KTeamEvent = {
+      sequence: 0,
+      time: '2026-07-28T00:00:00.000Z',
+      sessionId: 'ms-previously-taskless',
+      turn: 0,
+      type: 'tasks.updated',
+      source: 'client',
+      data: { tasks: [] },
+    };
+
+    driver.handleEvent(event);
+    expect(seen).toEqual(['ms-previously-taskless:tasks.updated']);
+    unsubscribe();
+    driver.handleEvent(event);
+    expect(seen).toHaveLength(1);
   });
 });

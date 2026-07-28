@@ -30,6 +30,7 @@ import {
   TaskError,
   type Task,
 } from './tasks-types';
+import { taskPhaseFromStatus } from './tasks-workflow';
 
 let home: string;
 let paths: KTeamPaths;
@@ -43,23 +44,39 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-const record = (over: Partial<Task> = {}): Task => ({
-  v: TASK_SCHEMA_VERSION,
-  id: 'F1',
-  kind: 'feature',
-  title: 'File browser',
-  description: '## Brief',
-  status: 'in_progress',
-  statusReason: null,
-  assignee: 'ines',
-  repo: '/repo',
-  links: { prs: [], branch: null, commits: [], docs: [] },
-  order: null,
-  createdAt: '2026-07-26T12:00:00.000Z',
-  createdBy: 'ms1lhymf-c4051f31',
-  updatedAt: '2026-07-26T12:00:00.000Z',
-  ...over,
-});
+const record = (over: Partial<Task> = {}): Task => {
+  const base: Task = {
+    v: TASK_SCHEMA_VERSION,
+    id: 'F1',
+    kind: 'feature',
+    title: 'File browser',
+    description: '## Brief',
+    ask: { text: 'Build a file browser', source: 'ms1lhymf-c4051f31:msg-1' },
+    clarifications: [],
+    workflow: 'quick',
+    phase: 'build',
+    dependsOn: [],
+    files: [],
+    status: 'in_progress',
+    statusReason: null,
+    assignee: 'ines',
+    repo: '/repo',
+    links: { prs: [], branch: null, commits: [], docs: [] },
+    order: null,
+    createdAt: '2026-07-26T12:00:00.000Z',
+    createdBy: 'ms1lhymf-c4051f31',
+    updatedAt: '2026-07-26T12:00:00.000Z',
+    ...over,
+  };
+  // A status override without an explicit phase would otherwise leave the default
+  // phase ('build') contradicting the new status — which the v2 parser now rightly
+  // rejects. Keep fixtures internally consistent by deriving the phase from the
+  // status (blocked is exempt: it retains its prior phase, so leave it alone).
+  if (over.phase === undefined && over.status !== undefined && over.status !== 'blocked') {
+    base.phase = taskPhaseFromStatus(over.status);
+  }
+  return base;
+};
 
 async function seed(store: TaskStore, task: Task): Promise<void> {
   await mkdir(path.dirname(store.recordFile(task.id)), { recursive: true });
@@ -130,6 +147,129 @@ describe('record parsing degrades, never throws', () => {
       docs: null,
     });
     expect(links).toEqual({ prs: ['https://x/1'], branch: null, commits: ['abc'], docs: [] });
+  });
+});
+
+describe('v2 fields parse additively and round-trip exactly', () => {
+  // A pre-v2 file on disk carried none of ask/clarifications/workflow/phase/
+  // dependsOn. Reading it must fill honest defaults, never fail the record.
+  test('a v1 record with none of the v2 fields fills defaults instead of failing', () => {
+    const v1 = {
+      v: TASK_SCHEMA_VERSION,
+      id: 'F1',
+      kind: 'feature',
+      title: 'Legacy row',
+      description: 'the old brief',
+      status: 'in_progress',
+      statusReason: null,
+      assignee: null,
+      repo: null,
+      links: { prs: [], branch: null, commits: [], docs: [] },
+      order: null,
+      createdAt: '2026-07-01T00:00:00.000Z',
+      createdBy: null,
+      updatedAt: '2026-07-01T00:00:00.000Z',
+    };
+    const parsed = parseTaskRecord(v1);
+    expect(parsed).not.toBeNull();
+    // phase is derived from the declared status; workflow is inferred from phase.
+    expect(parsed?.phase).toBe('build');
+    expect(parsed?.workflow).toBe('quick');
+    expect(parsed?.clarifications).toEqual([]);
+    expect(parsed?.dependsOn).toEqual([]);
+    // ask is synthesised from the brief with a legacy source when none existed.
+    expect(parsed?.ask).toEqual({ text: 'the old brief', source: 'legacy:F1' });
+  });
+
+  test('v1 inference walks status → phase → workflow for the other lanes', () => {
+    expect(parseTaskRecord({ ...record(), phase: undefined, workflow: undefined, status: 'designed' })?.phase).toBe(
+      'design',
+    );
+    expect(parseTaskRecord({ ...record(), phase: undefined, workflow: undefined, status: 'designed' })?.workflow).toBe(
+      'design-first',
+    );
+    expect(
+      parseTaskRecord({ ...record(), phase: undefined, workflow: undefined, status: 'researched' })?.workflow,
+    ).toBe('investigate');
+  });
+
+  test('a non-blocked record whose stored phase contradicts its status is rejected', () => {
+    // status 'built' must derive phase 'built'; a record that stored phase 'todo'
+    // alongside it is internally incoherent and the parser refuses it (P1).
+    expect(parseTaskRecord({ ...record(), status: 'built', phase: 'todo' })).toBeNull();
+    expect(parseTaskRecord({ ...record(), status: 'in_progress', phase: 'live' })).toBeNull();
+    // The coherent form of the same record is accepted.
+    expect(parseTaskRecord({ ...record(), status: 'built', phase: 'built' })?.phase).toBe('built');
+  });
+
+  test('blocked is the sole exception — it retains a prior phase without contradiction', () => {
+    // A task blocked mid-build keeps phase 'build' even though blocked derives 'todo';
+    // this is legal, not a contradiction, so the record parses.
+    const parsed = parseTaskRecord({
+      ...record(),
+      status: 'blocked',
+      statusReason: 'waiting on an API key',
+      phase: 'build',
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.status).toBe('blocked');
+    expect(parsed?.phase).toBe('build');
+  });
+
+  test('a v1 ask falls back to the title and first doc link when there is no brief', () => {
+    const parsed = parseTaskRecord({
+      ...record(),
+      ask: undefined,
+      description: '',
+      links: { prs: [], branch: null, commits: [], docs: ['~/.kteam/x/brief-1.md'] },
+    });
+    expect(parsed?.ask).toEqual({ text: 'File browser', source: '~/.kteam/x/brief-1.md' });
+  });
+
+  test('a full v2 record survives serialize → parse byte-for-byte', () => {
+    const full = record({
+      ask: { text: 'Original ask, verbatim', source: 'https://msg/1' },
+      clarifications: [
+        {
+          text: 'actually scope it down',
+          source: 'https://msg/2',
+          at: '2026-07-27T00:00:00.000Z',
+          by: 'ms-abc',
+          byName: 'ines',
+        },
+      ],
+      workflow: 'research-first',
+      phase: 'design',
+      dependsOn: ['F2', 'F3'],
+      status: 'designed',
+    });
+    const parsed = parseTaskRecord(JSON.parse(JSON.stringify(serializeTask(full))));
+    expect(parsed).toEqual(full);
+  });
+
+  test('a clarification missing its provenance is dropped, not half-stored', () => {
+    const parsed = parseTaskRecord({
+      ...record(),
+      clarifications: [
+        { text: 'keeps', source: 'https://msg/9', at: '2026-07-27T00:00:00.000Z', by: 'ms-abc', byName: null },
+        { text: 'no when/who', source: 'https://msg/10' },
+      ],
+    });
+    expect(parsed?.clarifications).toEqual([
+      { text: 'keeps', source: 'https://msg/9', at: '2026-07-27T00:00:00.000Z', by: 'ms-abc', byName: null },
+    ]);
+  });
+
+  test('#F12 references normalise to F12 while storage stays sigil-free', () => {
+    expect(normalizeTaskId('#F12')).toBe('F12');
+    expect(normalizeTaskId(' #f12 ')).toBe('F12');
+    // The stored form never carries the sigil, so the raw guard rejects it.
+    expect(isTaskId('#F12')).toBe(false);
+    expect(isTaskId('F12')).toBe(true);
+    // Dependencies supplied with a sigil or lower-cased are normalised and de-duped.
+    const parsed = parseTaskRecord({ ...record(), dependsOn: ['#f12', 'F12', '#F13', 'F1'] });
+    // F1 is self and is dropped; the rest normalise to canonical sigil-free ids.
+    expect(parsed?.dependsOn).toEqual(['F12', 'F13']);
   });
 });
 
@@ -434,7 +574,7 @@ describe('write serialisation', () => {
       store.transact('F1', async mutation => {
         seen.push(mutation.current?.status);
         await new Promise(resolve => setTimeout(resolve, 10));
-        await mutation.write({ ...record(), status: 'built' });
+        await mutation.write(record({ status: 'built' }));
         await mutation.append({ type: 'status', data: { to: 'built' } });
       }),
       store.transact('F1', async mutation => {

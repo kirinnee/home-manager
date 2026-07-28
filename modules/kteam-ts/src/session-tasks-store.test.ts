@@ -37,6 +37,12 @@ function record(id: string, over: Partial<Task> = {}): Task {
     kind,
     title: `Task ${id}`,
     description: '',
+    ask: { text: `Task ${id}`, source: `session:ms-a#${id}` },
+    clarifications: [],
+    workflow: 'quick',
+    phase: 'todo',
+    dependsOn: [],
+    files: [],
     status: 'todo',
     statusReason: null,
     assignee: 'ms-a',
@@ -176,7 +182,10 @@ describe('per-session allocation and serialization', () => {
 
   test('atomic rewrites leave no temp files behind', async () => {
     await create('ms-a');
-    await store.transact('ms-a', 'F1', current => ({ ...current, task: { ...current.task, status: 'built' } }));
+    await store.transact('ms-a', 'F1', current => ({
+      ...current,
+      task: { ...current.task, status: 'built', phase: 'built' },
+    }));
     expect((await readdir(path.join(home, 'ms-a'))).filter(name => name.includes('.tmp.'))).toEqual([]);
   });
 });

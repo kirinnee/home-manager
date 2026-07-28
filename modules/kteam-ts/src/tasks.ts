@@ -10,18 +10,25 @@ import type { KTeamPaths } from './paths';
 import { now } from './io';
 import {
   TaskStore,
+  SerialQueue,
   compareTasks,
   normalizeTaskId as normalizeTaskIdLocal,
   parseTaskLinks,
   resolveStatusReason,
   toTaskSummary,
   validateTaskDescription,
+  validateTaskDependencies,
+  validateTaskFile,
+  validateTaskFiles,
   validateTaskKind,
   validateTaskLinkValue,
+  validateTaskMessage,
   validateTaskNote,
   validateTaskOrder,
+  validateTaskPhase,
   validateTaskStatus,
   validateTaskTitle,
+  validateTaskWorkflow,
   type TaskFilter,
 } from './tasks-store';
 import {
@@ -40,7 +47,22 @@ import {
   type TaskLiveOptions,
 } from './tasks-live';
 import {
+  assertTaskCanDrop,
+  assertTaskDag,
+  assertTaskPhaseInWorkflow,
+  assertTaskPhaseTransition,
+  compareTaskViews,
+  completionTarget,
+  dependencySatisfied,
+  inferTaskWorkflow,
+  taskPhaseFromStatus,
+  taskStatusFromPhase,
+  withTaskBlocking,
+} from './tasks-workflow';
+import {
   MAX_TASK_LINKS_PER_FIELD,
+  MAX_TASK_CLARIFICATIONS,
+  MAX_TASK_FILES,
   TASK_SCHEMA_VERSION,
   TaskError,
   emptyTaskLinks,
@@ -54,6 +76,7 @@ import {
   type TaskActor,
   type TaskCreateInput,
   type TaskLinks,
+  type TaskPhase,
   type TaskView,
 } from './tasks-types';
 
@@ -105,6 +128,7 @@ export * from './tasks-contract';
 /** Narrow session-world dependency. `SessionManager.list()` satisfies it. */
 export interface TaskDeps {
   list(): Promise<TaskAssigneeView[]>;
+  subscribe?(listener: (event: KTeamEvent) => void): () => void;
 }
 
 export interface TaskServiceOptions extends SessionTaskStoreOptions {
@@ -120,8 +144,10 @@ interface Provenance {
 export class TaskService {
   private readonly store: SessionTaskStore;
   private readonly legacy: TaskStore;
+  private readonly graphQueue = new SerialQueue();
   private readonly listeners = new Set<(event: KTeamEvent) => void>();
   private initialization: Promise<TaskMigrationReport> | undefined;
+  private lifecycleUnsubscribe: (() => void) | undefined;
 
   constructor(
     private readonly paths: KTeamPaths,
@@ -148,7 +174,9 @@ export class TaskService {
     if (this.initialization === undefined) {
       const attempt = (async () => {
         const views = await this.deps.list().catch(() => [] as TaskAssigneeView[]);
-        return migrateLegacyTasks(this.paths, this.legacy, this.store, views);
+        const report = await migrateLegacyTasks(this.paths, this.legacy, this.store, views);
+        this.attachLifecycle();
+        return report;
       })();
       this.initialization = attempt.catch(error => {
         this.initialization = undefined;
@@ -169,7 +197,7 @@ export class TaskService {
     await this.initialize();
     this.assertSessionId(sessionId);
     const read = await this.store.list(sessionId, filter);
-    const views = await this.annotate(read.tasks.map(entry => entry.task));
+    const views = await this.annotateEntries(read.tasks, await this.graphTasks());
     return {
       v: SESSION_TASK_FILE_VERSION,
       sessionId,
@@ -185,7 +213,7 @@ export class TaskService {
     this.assertSessionId(sessionId);
     const { entry, read } = await this.store.detail(sessionId, id);
     if (entry === undefined) return undefined;
-    const [view] = await this.annotate([entry.task]);
+    const [view] = await this.annotateEntries([entry], await this.graphTasks());
     if (view === undefined) return undefined;
     const activity = afterSeq > 0 ? entry.activity.filter(item => item.seq > afterSeq) : entry.activity;
     const activityParseErrors = read.activityParseErrors.get(entry.task.id) ?? 0;
@@ -204,14 +232,14 @@ export class TaskService {
   async taskList(filter: TaskFilter = {}): Promise<FleetTaskListResponse> {
     await this.initialize();
     const sessionIds = await this.store.listSessionIds();
-    const scoped: Array<{ sessionId: string | null; task: Task }> = [];
+    const scoped: Array<{ sessionId: string | null; entry: StoredSessionTask }> = [];
     const migrated = new Set<string>();
     const parseErrorIds: string[] = [];
     let parseErrors = 0;
 
     for (const sessionId of sessionIds) {
       const read = await this.store.list(sessionId, filter);
-      scoped.push(...read.tasks.map(entry => ({ sessionId, task: entry.task })));
+      scoped.push(...read.tasks.map(entry => ({ sessionId, entry })));
       parseErrors += read.parseErrors;
       parseErrorIds.push(...read.parseErrorIds.map(id => `${sessionId}:${id}`));
       // A marker proves representation only while the corresponding record is
@@ -223,17 +251,26 @@ export class TaskService {
 
     const legacy = await this.legacy.listTasks(filter);
     for (const task of legacy.tasks) {
-      if (!migrated.has(task.id)) scoped.push({ sessionId: null, task });
+      if (!migrated.has(task.id)) {
+        const history = await this.legacy.readActivity(task.id);
+        scoped.push({ sessionId: null, entry: { task, activity: history.activity } });
+      }
     }
     parseErrors += legacy.parseErrors;
     parseErrorIds.push(...legacy.parseErrorIds.map(id => `legacy:${id}`));
 
-    scoped.sort((a, b) => compareTasks(a.task, b.task) || String(a.sessionId).localeCompare(String(b.sessionId)));
-    const annotated = await this.annotate(scoped.map(item => item.task));
+    scoped.sort(
+      (a, b) => compareTasks(a.entry.task, b.entry.task) || String(a.sessionId).localeCompare(String(b.sessionId)),
+    );
+    const annotated = await this.annotateEntries(
+      scoped.map(item => item.entry),
+      await this.graphTasks(),
+    );
+    const scopeById = new Map(scoped.map(item => [item.entry.task.id, item.sessionId] as const));
     return {
       v: SESSION_TASK_FILE_VERSION,
       sessionId: null,
-      tasks: annotated.map((view, index) => ({ ...toTaskSummary(view), sessionId: scoped[index]!.sessionId })),
+      tasks: annotated.map(view => ({ ...toTaskSummary(view), sessionId: scopeById.get(view.id) ?? null })),
       parseErrors,
       ...(parseErrorIds.length > 0 ? { parseErrorIds } : {}),
       updatedAt: now(),
@@ -282,7 +319,7 @@ export class TaskService {
       );
     }
     const hit = hits[0]!;
-    const [view] = await this.annotate([hit.entry.task]);
+    const [view] = await this.annotateEntries([hit.entry], await this.graphTasks());
     if (view === undefined) return undefined;
     return {
       sessionId: hit.sessionId,
@@ -300,49 +337,86 @@ export class TaskService {
     const kind = validateTaskKind(input.kind);
     const title = validateTaskTitle(input.title);
     const description = validateTaskDescription(input.description);
-    const status = input.status === undefined ? 'todo' : validateTaskStatus(input.status);
+    const suppliedStatus = input.status === undefined ? undefined : validateTaskStatus(input.status);
+    const phase =
+      input.phase !== undefined
+        ? validateTaskPhase(input.phase)
+        : suppliedStatus !== undefined
+          ? taskPhaseFromStatus(suppliedStatus)
+          : ('todo' as const);
+    const workflow = input.workflow === undefined ? inferTaskWorkflow(phase) : validateTaskWorkflow(input.workflow);
+    assertTaskPhaseInWorkflow(workflow, phase);
+    if (suppliedStatus !== undefined && suppliedStatus !== 'blocked' && taskPhaseFromStatus(suppliedStatus) !== phase) {
+      throw new TaskError('invalid', `status ${suppliedStatus} does not match phase ${phase}`);
+    }
+    const status = suppliedStatus === 'blocked' ? 'blocked' : taskStatusFromPhase(phase);
     const statusReason = resolveStatusReason(status, input.statusReason);
+    const ask =
+      input.ask === undefined
+        ? { text: description.length > 0 ? description : title, source: `session:${sessionId}` }
+        : validateTaskMessage(input.ask);
+    const dependsOn = validateTaskDependencies(input.dependsOn);
+    const files = validateTaskFiles(input.files);
     const order = validateTaskOrder(input.order);
     const links = createLinks(input.links);
     const at = now();
 
-    const result = await this.store.create(sessionId, kind, id => {
-      const task: Task = {
-        v: TASK_SCHEMA_VERSION,
-        id,
-        kind,
-        title,
-        description,
-        status,
-        statusReason,
-        // The board owner is the useful default. An explicit assignee remains
-        // declared metadata (sessionId is the immutable storage scope).
-        assignee: input.assignee === undefined ? sessionId : trimOrNull(input.assignee),
-        repo: trimOrNull(input.repo),
-        links,
-        order,
-        createdAt: at,
-        createdBy: provenance.session,
-        updatedAt: at,
-      };
-      const created: TaskActivity = {
-        v: TASK_SCHEMA_VERSION,
-        seq: 1,
-        time: at,
-        actor: provenance.actor,
-        actorName: provenance.actorName,
-        type: 'created',
-        data: {
-          status,
+    const outcome = await this.graphQueue.run('__task_graph__', async () => {
+      const allTasks = await this.graphTasks();
+      const write = await this.store.create(sessionId, kind, id => {
+        const task: Task = {
+          v: TASK_SCHEMA_VERSION,
+          id,
           kind,
           title,
-          ...(statusReason !== null ? { reason: statusReason } : {}),
-          ...(task.assignee !== null ? { assignee: task.assignee } : {}),
-        },
-      };
-      return { task, activity: [created] };
+          description,
+          ask,
+          clarifications: [],
+          workflow,
+          phase,
+          dependsOn,
+          status,
+          statusReason,
+          // The board owner is the useful default. An explicit assignee remains
+          // declared metadata (sessionId is the immutable storage scope).
+          assignee: input.assignee === undefined ? sessionId : trimOrNull(input.assignee),
+          repo: trimOrNull(input.repo),
+          files,
+          links,
+          order,
+          createdAt: at,
+          createdBy: provenance.session,
+          updatedAt: at,
+        };
+        assertTaskDag([...allTasks, task]);
+        const created: TaskActivity = {
+          v: TASK_SCHEMA_VERSION,
+          seq: 1,
+          time: at,
+          actor: provenance.actor,
+          actorName: provenance.actorName,
+          type: 'created',
+          data: {
+            status,
+            phase,
+            workflow,
+            kind,
+            title,
+            askSource: ask.source,
+            dependsOn: [...dependsOn],
+            // Advisory file claims supplied at create time belong in authoritative
+            // history, not just the snapshot — so a later reader sees what was
+            // claimed from the start. Omitted when none were supplied.
+            ...(files.length > 0 ? { files: [...files] } : {}),
+            reason: statusReason ?? 'Task created.',
+            ...(task.assignee !== null ? { assignee: task.assignee } : {}),
+          },
+        };
+        return { task, activity: [created] };
+      });
+      return { write, graph: [...allTasks, write.value.task] };
     });
-    const view = await this.view(result.value.task, sessionId);
+    const view = await this.view(outcome.write.value, sessionId, outcome.graph);
     await this.emit(sessionId, provenance);
     return view;
   }
@@ -355,74 +429,208 @@ export class TaskService {
   ): Promise<ScopedTaskView> {
     await this.initialize();
     const provenance = await this.authorize(sessionId, actor);
-    const result = await this.store.transact(sessionId, id, current => {
-      const at = now();
-      let next: Task = { ...current.task, links: parseTaskLinks(current.task.links) };
-      let activityType: TaskActivity['type'] = 'note';
-      let data: Record<string, unknown> = {};
+    const outcome = await this.graphQueue.run('__task_graph__', async () => {
+      const allTasks = await this.graphTasks();
+      let satisfactionChanged = false;
+      const write = await this.store.transact(sessionId, id, current => {
+        const at = now();
+        let next: Task = {
+          ...current.task,
+          links: parseTaskLinks(current.task.links),
+          dependsOn: [...current.task.dependsOn],
+          files: [...current.task.files],
+          clarifications: current.task.clarifications.map(item => ({ ...item })),
+        };
+        let activityType: TaskActivity['type'] = 'note';
+        let data: Record<string, unknown> = {};
 
-      switch (input.action) {
-        case 'status': {
-          const status = validateTaskStatus(input.status);
-          const reason = resolveStatusReason(status, input.reason);
-          const note = input.note === undefined ? null : validateTaskNote(input.note, 'note');
-          next = { ...next, status, statusReason: reason };
+        const movePhase = (to: TaskPhase, rawReason: unknown, note?: string): void => {
+          const reasonText = trimOrNull(rawReason);
+          if (reasonText === null) {
+            throw new TaskError('reason-required', 'phase changes require a reason');
+          }
+          const reason = validateTaskNote(reasonText, 'phase change reason');
+          const transitionNote = note === undefined ? null : validateTaskNote(note, 'note');
+          const clearingManualBlock = current.task.status === 'blocked' && to === current.task.phase;
+          if (!clearingManualBlock) {
+            assertTaskPhaseTransition(current.task, to, provenance.session === null);
+          }
+          if (to === 'dropped') assertTaskCanDrop(allTasks, current.task.id);
+          const status = taskStatusFromPhase(to);
+          next = {
+            ...next,
+            phase: to,
+            status,
+            statusReason: to === 'dropped' ? reason : null,
+          };
           activityType = 'status';
           data = {
             from: current.task.status,
             to: status,
-            ...(reason !== null ? { reason } : {}),
-            ...(note !== null ? { note } : {}),
+            phaseFrom: current.task.phase,
+            phaseTo: to,
+            reason,
+            ...(transitionNote !== null ? { note: transitionNote } : {}),
+            ...((current.task.phase === 'research' || current.task.phase === 'design') && provenance.session === null
+              ? { approvedByHuman: true }
+              : {}),
           };
-          break;
-        }
-        case 'note':
-        case 'feedback': {
-          activityType = input.action;
-          data = { text: validateTaskNote(input.text, input.action) };
-          break;
-        }
-        case 'link': {
-          const value = validateTaskLinkValue(input.value, input.field);
-          next = { ...next, links: applyLink(next.links, input.field, value) };
-          activityType = 'link';
-          data = { field: input.field, value };
-          break;
-        }
-        case 'assign': {
-          const assignee = trimOrNull(input.assignee);
-          next = { ...next, assignee };
-          activityType = 'assign';
-          data = { from: current.task.assignee, to: assignee };
-          break;
-        }
-        case 'order': {
-          const order = validateTaskOrder(input.order);
-          next = { ...next, order };
-          activityType = 'order';
-          data = { from: current.task.order, to: order };
-          break;
-        }
-        default: {
-          const unknown = input as { action?: unknown };
-          throw new TaskError('invalid', `unknown task action ${String(unknown.action)}`);
-        }
-      }
+        };
 
-      const highest = current.activity.reduce((value, item) => Math.max(value, item.seq), 0);
-      const activity: TaskActivity = {
-        v: TASK_SCHEMA_VERSION,
-        seq: highest + 1,
-        time: at,
-        actor: provenance.actor,
-        actorName: provenance.actorName,
-        type: activityType,
-        data,
-      };
-      return { task: { ...next, updatedAt: at }, activity: [...current.activity, activity] };
+        switch (input.action) {
+          case 'status': {
+            const status = validateTaskStatus(input.status);
+            if (status === 'blocked') {
+              const reason = resolveStatusReason(status, input.reason);
+              const note = input.note === undefined ? null : validateTaskNote(input.note, 'note');
+              next = { ...next, status, statusReason: reason };
+              activityType = 'status';
+              data = {
+                from: current.task.status,
+                to: status,
+                phaseFrom: current.task.phase,
+                phaseTo: current.task.phase,
+                reason,
+                ...(note !== null ? { note } : {}),
+              };
+            } else {
+              movePhase(taskPhaseFromStatus(status), input.reason, input.note);
+            }
+            break;
+          }
+          case 'phase': {
+            movePhase(validateTaskPhase(input.phase), input.reason);
+            break;
+          }
+          case 'note':
+          case 'feedback': {
+            activityType = input.action;
+            data = { text: validateTaskNote(input.text, input.action) };
+            break;
+          }
+          case 'clarify': {
+            if (next.clarifications.length >= MAX_TASK_CLARIFICATIONS) {
+              throw new TaskError(
+                'too-long',
+                `${current.task.id} already has ${next.clarifications.length} clarifications; the maximum is ${MAX_TASK_CLARIFICATIONS}`,
+              );
+            }
+            const clarification = validateTaskMessage({ text: input.text, source: input.source }, 'clarification');
+            next = {
+              ...next,
+              clarifications: [
+                ...next.clarifications,
+                { ...clarification, at, by: provenance.actor, byName: provenance.actorName },
+              ],
+            };
+            activityType = 'clarification';
+            data = { text: clarification.text, source: clarification.source };
+            break;
+          }
+          case 'dependency': {
+            const dependency = validateTaskDependencies([input.taskId])[0]!;
+            if (dependency === current.task.id) {
+              throw new TaskError('cycle', `${current.task.id} cannot depend on itself`);
+            }
+            const remove = input.remove === true;
+            const exists = next.dependsOn.includes(dependency);
+            if (remove && !exists)
+              throw new TaskError('invalid', `${current.task.id} does not depend on ${dependency}`);
+            if (!remove && exists)
+              throw new TaskError('invalid', `${current.task.id} already depends on ${dependency}`);
+            next = {
+              ...next,
+              dependsOn: remove
+                ? next.dependsOn.filter(candidate => candidate !== dependency)
+                : validateTaskDependencies([...next.dependsOn, dependency]),
+            };
+            activityType = 'dependency';
+            data = { taskId: dependency, operation: remove ? 'remove' : 'add' };
+            const candidate = replaceGraphTask(allTasks, next);
+            assertTaskDag(candidate);
+            break;
+          }
+          case 'file': {
+            // Advisory file claims: mutate ONLY the persisted set and record the
+            // change in history. Deliberately no DAG rebuild, no blocker/Attention
+            // derivation, no satisfaction recheck — overlap is surfaced elsewhere,
+            // never arbitrated here. A reason is welcome but NOT required (unlike a
+            // phase/status move), so a discovered claim carries no forced friction.
+            const path = validateTaskFile(input.path);
+            const remove = input.remove === true;
+            const exists = next.files.includes(path);
+            if (remove && !exists) throw new TaskError('invalid', `${current.task.id} does not claim ${path}`);
+            if (!remove && exists) throw new TaskError('invalid', `${current.task.id} already claims ${path}`);
+            if (!remove && next.files.length >= MAX_TASK_FILES) {
+              throw new TaskError(
+                'too-long',
+                `${current.task.id} already claims ${next.files.length} files; the maximum is ${MAX_TASK_FILES}`,
+              );
+            }
+            const reason = trimOrNull(input.reason);
+            next = {
+              ...next,
+              files: remove ? next.files.filter(candidate => candidate !== path) : [...next.files, path],
+            };
+            activityType = 'file';
+            data = {
+              path,
+              operation: remove ? 'remove' : 'add',
+              ...(reason !== null ? { reason: validateTaskNote(reason, 'file change reason') } : {}),
+            };
+            break;
+          }
+          case 'link': {
+            const value = validateTaskLinkValue(input.value, input.field);
+            next = { ...next, links: applyLink(next.links, input.field, value) };
+            activityType = 'link';
+            data = { field: input.field, value };
+            break;
+          }
+          case 'assign': {
+            const assignee = trimOrNull(input.assignee);
+            next = { ...next, assignee };
+            activityType = 'assign';
+            data = { from: current.task.assignee, to: assignee };
+            break;
+          }
+          case 'order': {
+            const order = validateTaskOrder(input.order);
+            next = { ...next, order };
+            activityType = 'order';
+            data = { from: current.task.order, to: order };
+            break;
+          }
+          default: {
+            const unknown = input as { action?: unknown };
+            throw new TaskError('invalid', `unknown task action ${String(unknown.action)}`);
+          }
+        }
+
+        const highest = current.activity.reduce((value, item) => Math.max(value, item.seq), 0);
+        const activity: TaskActivity = {
+          v: TASK_SCHEMA_VERSION,
+          seq: highest + 1,
+          time: at,
+          actor: provenance.actor,
+          actorName: provenance.actorName,
+          type: activityType,
+          data,
+        };
+        satisfactionChanged = dependencySatisfied(current.task) !== dependencySatisfied(next);
+        return { task: { ...next, updatedAt: at }, activity: [...current.activity, activity] };
+      });
+      const graph = replaceGraphTask(allTasks, write.value.task);
+      return { write, graph, satisfactionChanged };
     });
-    const view = await this.view(result.value.task, sessionId);
-    await this.emit(sessionId, provenance);
+    const view = await this.view(outcome.write.value, sessionId, outcome.graph);
+    const emitSessions = new Set([sessionId]);
+    if (outcome.satisfactionChanged) {
+      for (const dependentSession of await this.dependentSessionIds([outcome.write.value.task.id])) {
+        emitSessions.add(dependentSession);
+      }
+    }
+    for (const targetSession of emitSessions) await this.emit(targetSession, provenance);
     return view;
   }
 
@@ -446,16 +654,22 @@ export class TaskService {
 
   /** Compatibility aggregate-id action. It is deliberately ambiguity-safe. */
   async taskAct(id: string, input: TaskActionInput & TaskActor): Promise<ScopedTaskView> {
-    const detail = await this.taskDetail(id);
-    if (detail === undefined) throw new TaskError('not-found', `unknown task ${canonicalTaskId(id)}`);
-    if (detail.sessionId === null) {
+    const canonical = canonicalTaskId(id);
+    const scopes: string[] = [];
+    for (const sessionId of await this.store.listSessionIds()) {
+      if ((await this.store.detail(sessionId, canonical)).entry !== undefined) scopes.push(sessionId);
+    }
+    if (scopes.length > 1) throw new TaskError('ambiguous', `task ${canonical} exists in multiple sessions`);
+    if (scopes.length === 0 && (await this.legacy.readTask(canonical)) !== undefined) {
       throw new TaskError(
         'forbidden',
-        `legacy-unassigned task ${detail.task.id} is read-only; assign it to a real session and rerun migration`,
+        `legacy-unassigned task ${canonical} is read-only; assign it to a real session and rerun migration`,
       );
     }
+    const sessionId = scopes[0];
+    if (sessionId === undefined) throw new TaskError('not-found', `unknown task ${canonical}`);
     const { actor, actorName, ...action } = input;
-    return this.sessionTaskAct(detail.sessionId, detail.task.id, action as TaskActionInput, { actor, actorName });
+    return this.sessionTaskAct(sessionId, canonical, action as TaskActionInput, { actor, actorName });
   }
 
   // ---- internals ---------------------------------------------------------
@@ -479,18 +693,195 @@ export class TaskService {
     return provenance;
   }
 
-  private async view(task: Task, sessionId: string): Promise<ScopedTaskView> {
-    const [view] = await this.annotate([task]);
-    return { ...(view ?? { ...task, live: emptyLive() }), sessionId };
+  private async view(
+    entry: StoredSessionTask,
+    sessionId: string,
+    allTasks: readonly Task[] = [],
+  ): Promise<ScopedTaskView> {
+    const graph = allTasks.length > 0 ? allTasks : await this.graphTasks();
+    const [view] = await this.annotateEntries([entry], graph);
+    return {
+      ...(view ?? {
+        ...entry.task,
+        live: emptyLive(),
+        blocked: false,
+        blockedReason: null,
+        blockedSince: null,
+        blockedBy: [],
+      }),
+      sessionId,
+    };
   }
 
-  private async annotate(tasks: readonly Task[]): Promise<TaskView[]> {
-    if (tasks.length === 0) return [];
+  private async annotateEntries(entries: readonly StoredSessionTask[], allTasks: readonly Task[]): Promise<TaskView[]> {
+    if (entries.length === 0) return [];
+    const tasks = entries.map(entry => entry.task);
     const views = await this.deps.list().catch(() => [] as TaskAssigneeView[]);
     const withMarkers = await this.withDoneMarkers(tasks, views);
     const liveOptions: TaskLiveOptions =
       this.options.quietAfterMs !== undefined ? { quietAfterMs: this.options.quietAfterMs, nowMs: Date.now() } : {};
-    return annotateTasks(tasks, withMarkers, liveOptions);
+    return annotateTasks(tasks, withMarkers, liveOptions)
+      .map((view, index) => withTaskBlocking(view, entries[index]?.activity ?? [], allTasks))
+      .sort(compareTaskViews);
+  }
+
+  /** Complete fleet record set for cross-session edges and derived blockers.
+   * Migrated legacy duplicates stay suppressed exactly like the aggregate read. */
+  private async graphTasks(): Promise<Task[]> {
+    const tasks: Task[] = [];
+    const migrated = new Set<string>();
+    for (const sessionId of await this.store.listSessionIds()) {
+      const read = await this.store.read(sessionId);
+      tasks.push(...read.file.tasks.map(entry => entry.task));
+      for (const id of read.file.migratedGlobalIds) {
+        if (read.file.tasks.some(entry => entry.task.id === id)) migrated.add(id);
+      }
+    }
+    const legacy = await this.legacy.listTasks();
+    tasks.push(...legacy.tasks.filter(task => !migrated.has(task.id)));
+    return tasks;
+  }
+
+  private async scopedEntries(): Promise<Array<{ sessionId: string; entry: StoredSessionTask }>> {
+    const entries: Array<{ sessionId: string; entry: StoredSessionTask }> = [];
+    for (const sessionId of await this.store.listSessionIds()) {
+      const read = await this.store.read(sessionId);
+      entries.push(...read.file.tasks.map(entry => ({ sessionId, entry })));
+    }
+    return entries;
+  }
+
+  /** Session boards whose derived blocker state can change when one of these
+   * dependency nodes becomes satisfied (or ceases to be). */
+  private async dependentSessionIds(taskIds: readonly string[]): Promise<string[]> {
+    if (taskIds.length === 0) return [];
+    const changed = new Set(taskIds);
+    const sessions = new Set<string>();
+    for (const { sessionId, entry } of await this.scopedEntries()) {
+      if (entry.task.dependsOn.some(id => changed.has(id))) sessions.add(sessionId);
+    }
+    return [...sessions];
+  }
+
+  private attachLifecycle(): void {
+    if (this.lifecycleUnsubscribe !== undefined || this.deps.subscribe === undefined) return;
+    this.lifecycleUnsubscribe = this.deps.subscribe(event => {
+      if (event.type !== 'session.completed') return;
+      void this.recordSessionCompletion(event).catch(error => {
+        console.error(`kteamd task completion claim failed for ${event.sessionId}: ${String(error)}`);
+      });
+    });
+  }
+
+  /** Persist a delegated done CLAIM and, only for active build work, advance to
+   * built. Research/design remain in place so the human approval gate cannot be
+   * skipped. Replayed events for the same session turn are idempotent. */
+  async recordSessionCompletion(event: KTeamEvent): Promise<void> {
+    if (event.type !== 'session.completed') return;
+    const touched = await this.graphQueue.run('__task_graph__', async () => {
+      const entries = await this.scopedEntries();
+      const views = await this.deps.list().catch(() => [] as TaskAssigneeView[]);
+      const assigneeView = views.find(view => view.config.id === event.sessionId);
+      const actorName = assigneeView?.config.teammate ?? assigneeView?.config.name ?? null;
+      const affected = entries.filter(({ entry }) => {
+        if (entry.task.assignee === null) return false;
+        return (
+          entry.task.assignee === event.sessionId ||
+          resolveAssignee(entry.task.assignee, views)?.config.id === event.sessionId
+        );
+      });
+      const changed = new Set<string>();
+      const newlySatisfied = new Set<string>();
+
+      for (const { sessionId, entry } of affected) {
+        const alreadyRecorded = entry.activity.some(
+          item =>
+            item.type === 'session' &&
+            item.data['event'] === 'completion-claim' &&
+            item.data['session'] === event.sessionId &&
+            item.data['turn'] === event.turn,
+        );
+        if (alreadyRecorded) continue;
+        let wroteClaim = false;
+        let advanced = false;
+        await this.store.transact(sessionId, entry.task.id, current => {
+          const duplicate = current.activity.some(
+            item =>
+              item.type === 'session' &&
+              item.data['event'] === 'completion-claim' &&
+              item.data['session'] === event.sessionId &&
+              item.data['turn'] === event.turn,
+          );
+          if (duplicate) return current;
+          wroteClaim = true;
+
+          const at = event.time || now();
+          const highest = current.activity.reduce((value, item) => Math.max(value, item.seq), 0);
+          const target = current.task.status === 'blocked' ? null : completionTarget(current.task);
+          const reason = `Assignee ${event.sessionId} signalled done for turn ${event.turn}; recorded as a completion claim.`;
+          const claim: TaskActivity = {
+            v: TASK_SCHEMA_VERSION,
+            seq: highest + 1,
+            time: at,
+            actor: event.sessionId,
+            actorName,
+            type: 'session',
+            data: {
+              event: 'completion-claim',
+              session: event.sessionId,
+              turn: event.turn,
+              phase: current.task.phase,
+              claimedAt: at,
+              ...(target !== null ? { advancesTo: target } : {}),
+            },
+          };
+          if (target === null) {
+            return {
+              task: { ...current.task, updatedAt: at },
+              activity: [...current.activity, claim],
+            };
+          }
+          advanced = true;
+          const phaseChange: TaskActivity = {
+            v: TASK_SCHEMA_VERSION,
+            seq: highest + 2,
+            time: at,
+            actor: event.sessionId,
+            actorName,
+            type: 'status',
+            data: {
+              from: current.task.status,
+              to: taskStatusFromPhase(target),
+              phaseFrom: current.task.phase,
+              phaseTo: target,
+              reason,
+              completionClaim: true,
+            },
+          };
+          return {
+            task: {
+              ...current.task,
+              phase: target,
+              status: taskStatusFromPhase(target),
+              statusReason: null,
+              updatedAt: at,
+            },
+            activity: [...current.activity, claim, phaseChange],
+          };
+        });
+        if (wroteClaim) {
+          changed.add(sessionId);
+          if (advanced) newlySatisfied.add(entry.task.id);
+        }
+      }
+      return { sessions: [...changed], newlySatisfied: [...newlySatisfied] };
+    });
+    const provenance: Provenance = { actor: event.sessionId, actorName: null, session: event.sessionId };
+    const emitSessions = new Set(touched.sessions);
+    for (const dependentSession of await this.dependentSessionIds(touched.newlySatisfied)) {
+      emitSessions.add(dependentSession);
+    }
+    for (const sessionId of emitSessions) await this.emit(sessionId, provenance);
   }
 
   private async withDoneMarkers(
@@ -518,6 +909,7 @@ export class TaskService {
   }
 
   private async emit(sessionId: string, provenance: Provenance): Promise<void> {
+    if (this.listeners.size === 0) return;
     const snapshot = await this.sessionTaskList(sessionId);
     const event: KTeamEvent<SessionTaskListResponse> = {
       sequence: 0,
@@ -619,4 +1011,16 @@ function applyLink(links: TaskLinks, field: 'pr' | 'branch' | 'commit' | 'doc', 
   }
   list.push(value);
   return next;
+}
+
+/** Replace the current graph node, or restore it when a damaged/legacy graph
+ * read omitted the task that the scoped transaction successfully resolved. */
+function replaceGraphTask(tasks: readonly Task[], next: Task): Task[] {
+  let replaced = false;
+  const graph = tasks.map(task => {
+    if (task.id !== next.id) return task;
+    replaced = true;
+    return next;
+  });
+  return replaced ? graph : [...graph, next];
 }
