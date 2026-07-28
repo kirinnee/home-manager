@@ -347,6 +347,20 @@ export function normalizeCodexTranscriptRecord(
     return diagnostic(record, payload, options);
   }
 
+  // Canonical Codex compaction record (observed in real rollouts): unlike
+  // ordinary conversation it is top-level `type: "compacted"`, with the
+  // replacement summary in `payload.message`. It is intentionally surfaced as
+  // chat.user because that is the shared harness-injected-text channel consumed
+  // by the UI's defensive system-block classifier. The mirrored
+  // event_msg/context_compacted marker carries no summary and stays silent, so
+  // one compaction produces exactly one transcript row.
+  if (recordType === 'compacted') {
+    const message = string(payload.message);
+    return message === undefined
+      ? diagnostic(record, payload, options)
+      : [{ ...metadata(record, payload, options), type: 'chat.user', data: { text: message } }];
+  }
+
   if (recordType !== 'response_item' || !itemType) return diagnostic(record, payload, options);
 
   if (itemType === 'message') {

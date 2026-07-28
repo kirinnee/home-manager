@@ -272,6 +272,7 @@ const TRANSCRIPT_JOURNAL_TYPES = new Set([
   'control.send',
   'control.send_queued',
   'control.send_consumed',
+  'control.session_command',
   'attachment.created',
 ]);
 

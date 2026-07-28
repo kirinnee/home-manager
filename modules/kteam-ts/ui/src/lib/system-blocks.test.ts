@@ -168,6 +168,7 @@ describe('classifySystemText — other harness wrappers', () => {
   test('compaction opener → first useful line AFTER Summary header, not the header', () => {
     const info = classifySystemText(COMPACTION);
     expect(info!.label).toBe('context compacted');
+    expect(info!.divider).toBe('compaction');
     expect(info!.summary).toContain('refactor the transcript renderer');
     expect(info!.summary!.toLowerCase()).not.toBe('summary:'); // never the literal header
     expect(info!.summary).not.toMatch(/^1\./); // leading list marker stripped
@@ -177,6 +178,28 @@ describe('classifySystemText — other harness wrappers', () => {
     const info = classifySystemText('This session is being continued from a previous conversation. Nothing else.');
     expect(info!.label).toBe('context compacted');
     expect(info!.summary).toBe('earlier conversation summarised');
+  });
+
+  test('real Claude payload skips the numbered section heading', async () => {
+    const line = await Bun.file(new URL('../../../src/fixtures/claude-compaction-real.jsonl', import.meta.url)).text();
+    const record = JSON.parse(line) as { message: { content: string } };
+    const info = classifySystemText(record.message.content);
+
+    expect(info).toMatchObject({ label: 'context compacted', divider: 'compaction' });
+    expect(info!.summary).toMatch(/^The session was launched as a kteam teammate\./);
+    expect(info!.summary).not.toContain('Primary Request and Intent');
+    expect(info!.raw).toBe(record.message.content);
+  });
+
+  test('real Codex payload is classified and skips its Markdown heading', async () => {
+    const line = await Bun.file(new URL('../../../src/fixtures/codex-compaction-real.jsonl', import.meta.url)).text();
+    const record = JSON.parse(line) as { payload: { message: string } };
+    const info = classifySystemText(record.payload.message);
+
+    expect(info).toMatchObject({ label: 'context compacted', divider: 'compaction' });
+    expect(info!.summary).toMatch(/^Worktree:/);
+    expect(info!.summary).not.toContain('Checkpoint');
+    expect(info!.raw).toBe(record.payload.message);
   });
 });
 

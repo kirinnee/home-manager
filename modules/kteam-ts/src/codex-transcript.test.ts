@@ -50,6 +50,22 @@ function userRecord(text: string): Record<string, unknown> {
 const jsonl = (value: unknown): string => `${JSON.stringify(value)}\n`;
 
 describe('Codex transcript normalization', () => {
+  test('normalizes the real canonical compacted record into the system-text channel', async () => {
+    const line = await Bun.file(path.join(import.meta.dir, 'fixtures', 'codex-compaction-real.jsonl')).text();
+    const events = parseCodexTranscriptLine(line.trim());
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: 'chat.user',
+      source: 'codex',
+      timestamp: '2026-07-19T11:29:21.473Z',
+      recordType: 'compacted',
+    });
+    expect((events[0]!.data as { text: string }).text).toMatch(
+      /^Another language model started to solve this problem and produced a summary/,
+    );
+  });
+
   test('normalizes canonical chat, readable reasoning, and common tool records', () => {
     expect(
       normalizeCodexTranscriptRecord(userRecord('Fixture user prompt.'), { sessionId: SESSION_ID })[0],

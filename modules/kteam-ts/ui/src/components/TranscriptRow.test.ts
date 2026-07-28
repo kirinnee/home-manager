@@ -14,7 +14,14 @@
 // breakpoint-scoped, which is exactly what a `sm:` prefix says.
 
 import { describe, expect, test } from 'bun:test';
-import { ASSISTANT_LAYOUT, isPinnable, isPlainBlockTap, pinPreviewOf, transcriptImagesEqual } from './TranscriptRow';
+import {
+  ASSISTANT_LAYOUT,
+  isPinnable,
+  isPlainBlockTap,
+  pinPreviewOf,
+  SYSTEM_DIVIDER_LAYOUT,
+  transcriptImagesEqual,
+} from './TranscriptRow';
 import type { TranscriptBlock } from '../lib/transcript';
 
 /** Utilities that shrink the content box horizontally. A bare one of these
@@ -84,6 +91,27 @@ describe('the hover timestamp', () => {
   test('stays a hover reveal rather than permanent chrome', () => {
     expect(classes(ASSISTANT_LAYOUT.stamp)).toContain('opacity-0');
     expect(classes(ASSISTANT_LAYOUT.stamp)).toContain('group-hover:opacity-100');
+  });
+});
+
+describe('context boundary chrome', () => {
+  test('draws a full-width rule around a bounded disclosure', () => {
+    expect(classes(SYSTEM_DIVIDER_LAYOUT.track)).toContain('min-w-0');
+    expect(classes(SYSTEM_DIVIDER_LAYOUT.track)).toContain('items-center');
+    expect(classes(SYSTEM_DIVIDER_LAYOUT.rule)).toEqual(
+      expect.arrayContaining(['h-px', 'min-w-3', 'flex-1', 'bg-border-soft']),
+    );
+    expect(classes(SYSTEM_DIVIDER_LAYOUT.button)).toEqual(
+      expect.arrayContaining(['max-w-[88%]', 'border', 'bg-surface-2']),
+    );
+  });
+
+  test('keeps the divider labelled and the raw summary keyboard-expandable', async () => {
+    const source = await Bun.file(new URL('./TranscriptRow.tsx', import.meta.url)).text();
+    expect(source).toContain('role="separator"');
+    expect(source).toContain('aria-orientation="horizontal"');
+    expect(source).toContain('aria-expanded={open}');
+    expect(source).toContain('data-divider={info.divider}');
   });
 });
 
