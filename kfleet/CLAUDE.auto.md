@@ -6,6 +6,9 @@
 - Agent fleet config is managed by **`kfleet`** from repo assets under `kfleet/`, linked into `~/.kfleet/` by Home Manager. Edit `kfleet/config.yaml` and `kfleet/` assets, then run `hms` (or `kfleet apply` for asset-only refreshes); `modules/agent-config` is deprecated legacy seed material.
 - **kteam model routing** (full table + handoff chain in the `/kteam` skill): chain = Fable main thread → planner (kteam Fable; sol/Opus OK for low-ambiguity plans; planners may spawn implementers) → implementer. Implementers: GPT-5.6-sol for long many-checkpoint workloads; Opus 4.8 / GPT-5.6-terra for generic→mid-high; GLM-5.2 sparingly (mechanical/frontend). terra/5.5 implement only from a plan by Fable/sol/Opus. Product-facing: NEVER MiniMax M3 or DeepSeek V4. mm3 + GLM-5.2 = mass-chore tier only (divide-and-conquer, 1 file = 1 agent). Big context needs ≥ Opus/terra — and sol or Fable only when implementing against it.
 - **Task records are PER SESSION.** After the human confirms a task, record it for this session with `kteam task create`; keep its status current as work progresses, and link any PR or branch with `kteam task link`. It is how the human sees what you are doing without asking.
+- **Tasks:** cite `#F12`; preserve the human ask + source, choose the workflow, declare real dependencies and claimed files as they become known, and record a reason for every phase move.
+- **Attention:** cite `?A3`; raise it only for direct human intervention, then resolve it when the blocker clears.
+- **Notifications:** delivery is not durable state; never turn completion/failure into Attention or double-notify a session transition.
 
 ## Pull request workflow
 

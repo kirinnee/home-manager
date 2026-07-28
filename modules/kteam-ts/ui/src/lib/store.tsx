@@ -331,6 +331,10 @@ export class FleetStore {
   /** Bounded per-session replay buffer for late chat subscribers. */
   private buffers = new Map<string, KTeamEvent[]>();
   private subscribers = new Map<string, Set<EventListener>>();
+  /** Live-only fleet event listeners. Unlike per-session chat subscribers,
+   * these do not pin replay buffers; aggregate projections use them to hear
+   * events from sessions that had no relevant record at mount time. */
+  private fleetEventSubscribers = new Set<EventListener>();
 
   private refreshTimers = new Map<string, number>();
   private refreshInflight = new Map<string, Promise<SessionView>>();
@@ -658,6 +662,13 @@ export class FleetStore {
       this.lastSequence.set(id, event.sequence);
     }
 
+    for (const listener of this.fleetEventSubscribers) {
+      try {
+        listener(event);
+      } catch {
+        /* one aggregate listener never breaks the shared stream */
+      }
+    }
     this.buffer(event);
     const listeners = this.subscribers.get(id);
     if (listeners) for (const listener of listeners) listener(event);
@@ -757,6 +768,13 @@ export class FleetStore {
       current.delete(listener);
       if (current.size === 0) this.subscribers.delete(id);
     };
+  }
+
+  /** Subscribe to the live fleet stream without replaying or retaining every
+   * session's chat buffer. Initial state must still come from an API read. */
+  subscribeEvents(listener: EventListener): () => void {
+    this.fleetEventSubscribers.add(listener);
+    return () => this.fleetEventSubscribers.delete(listener);
   }
 
   // -- UI controls ----------------------------------------------------------
@@ -877,6 +895,17 @@ export function useSessionEvents(id: string, handler: EventListener): void {
     if (!id) return;
     return s.subscribeSession(id, event => ref.current(event));
   }, [s, id]);
+}
+
+/** Live events across every session, without opening another socket or pinning
+ * per-session replay buffers. */
+export function useFleetEvents(handler: EventListener): void {
+  const s = useStore();
+  const ref = useRef(handler);
+  useEffect(() => {
+    ref.current = handler;
+  });
+  useEffect(() => s.subscribeEvents(event => ref.current(event)), [s]);
 }
 
 /** The fleet list as a Map-free array plus a stable empty default. */

@@ -8,13 +8,12 @@
 //
 //     DERIVED ANNOTATES. DECLARED ASSERTS. NEITHER WRITES THE OTHER.
 //
-// Auto-promoting `in_progress → built` because a session reported `completed`
-// would launder an agent's claim into board truth. This board exists precisely
-// because a hand-maintained one reported an item as "in progress" while its agent
-// had already failed twice; the fix is a LOUD MISMATCH BADGE, not a silent flip.
-// So `completed` + a done marker produces `staleness: 'maybe-finished'` — a
-// prompt for a human to verify — and the declared status stays exactly where its
-// author left it.
+// This passive annotator never moves the board. `completed` + a done marker
+// therefore produces `staleness: 'maybe-finished'`. Separately, TaskService
+// consumes the durable `session.completed` event, records it as a claim, and
+// advances only active build work to `built` (never `live`, and never across an
+// approval gate). Keeping that mutation out of liveness preserves this module's
+// declared-versus-derived boundary.
 //
 // Structural typing keeps this decoupled: `TaskAssigneeView` is satisfied by a
 // real `SessionView` plus the one fact a pure module cannot derive (whether a
@@ -173,7 +172,14 @@ export function computeTaskLive(
 /** Attach the derived block WITHOUT touching the record. Returns a new object;
  *  the input is never mutated and `status` is copied through verbatim. */
 export function annotateTask(task: Task, assignee: TaskAssigneeView | null, options: TaskLiveOptions = {}): TaskView {
-  return { ...task, live: computeTaskLive(task, assignee, options) };
+  return {
+    ...task,
+    live: computeTaskLive(task, assignee, options),
+    blocked: false,
+    blockedReason: null,
+    blockedSince: null,
+    blockedBy: [],
+  };
 }
 
 /** Annotate a whole board against one fleet listing. O(tasks × sessions) with a

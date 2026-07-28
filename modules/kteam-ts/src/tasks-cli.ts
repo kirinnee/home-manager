@@ -23,12 +23,16 @@
 import {
   TASK_KINDS,
   TASK_LINK_FIELDS,
+  TASK_PHASES,
   TASK_STATUSES,
+  TASK_WORKFLOWS,
   TaskError,
+  taskReference,
   type TaskActionInput,
   type TaskDetailResponse,
   type TaskKind,
   type TaskLinkField,
+  type TaskPhase,
   type TaskListResponse,
   type TaskStatus,
   type TaskSummary,
@@ -36,16 +40,24 @@ import {
 } from './tasks-types';
 import { normalizeTaskId } from './tasks-store';
 import { TASK_STALENESS_COPY, TASK_STATUS_LABEL, renderTaskBoardMd, renderTaskMd } from './tasks-contract';
+import { taskPhaseFromStatus } from './tasks-workflow';
 
 export const TASK_CLI_USAGE = `kteam task <command>
 
   create --kind <${TASK_KINDS.join('|')}> --title <title>
+         --ask <verbatim-human-words> --ask-source <message-link>
+         [--workflow <${TASK_WORKFLOWS.join('|')}>] [--depends-on <#F12>]…
+         [--file <path>]…
          [--description <text> | --description-file <file>] [--status <status>]
          [--reason <why>] [--repo <path>] [--assignee <who>] [--order <n>]
          [--pr <url>] [--branch <b>] [--commit <sha>] [--doc <path>]
-  list   [--repo <path>] [--status <status>]… [--assignee <who>] [--kind <kind>] [--md]
+  list   [--view <list|kanban|dag>] [--repo <path>] [--status <status>]… [--assignee <who>] [--kind <kind>] [--md]
   show   <id> [--after <seq>] [--md]
   status <id> <${TASK_STATUSES.join('|')}> [--reason <why>] [--note <text>]
+  phase  <id> <${TASK_PHASES.join('|')}> --reason <why>
+  clarify <id> <verbatim-text> --source <message-link>
+  depend <id> <dependency-id> [--remove]
+  file   <id> <path> [--remove] [--reason <why>]
   note   <id> <text>
   feedback <id> <text>
   link   <id> --pr <url> | --branch <b> | --commit <sha> | --doc <path>
@@ -56,12 +68,17 @@ export const TASK_CLI_USAGE = `kteam task <command>
                          KTEAM_SESSION_ID (an agent may only write its own)
   list --all             fleet-wide aggregate READ
 
-A status of blocked or dropped REQUIRES --reason.`;
+Every status/phase action REQUIRES --reason; creating blocked or dropped does too.
+File claims are ADVISORY (never a lock); --reason on file is optional.`;
 
 export interface TaskCreateBody {
   kind: TaskKind;
   title: string;
   description?: string;
+  ask?: { text: string; source: string };
+  workflow?: (typeof TASK_WORKFLOWS)[number];
+  dependsOn?: string[];
+  files?: string[];
   status?: TaskStatus;
   statusReason?: string;
   repo?: string;
@@ -72,7 +89,14 @@ export interface TaskCreateBody {
 
 export type TaskCliCommand =
   | { command: 'create'; body: TaskCreateBody; descriptionFile?: string; session?: string }
-  | { command: 'list'; query: URLSearchParams; md: boolean; all?: boolean; session?: string }
+  | {
+      command: 'list';
+      query: URLSearchParams;
+      md: boolean;
+      view: 'list' | 'kanban' | 'dag';
+      all?: boolean;
+      session?: string;
+    }
   | { command: 'show'; id: string; afterSeq: number; md: boolean; session?: string }
   | { command: 'act'; id: string; body: TaskActionInput; session?: string };
 
@@ -155,6 +179,12 @@ export function parseTaskCli(argv: readonly string[]): TaskCliCommand {
         command: 'list',
         query: buildTaskListQuery(flags),
         md: has(flags, 'md'),
+        view: (() => {
+          const view = one(flags, 'view') ?? (has(flags, 'kanban') ? 'kanban' : has(flags, 'dag') ? 'dag' : 'list');
+          if (view !== 'list' && view !== 'kanban' && view !== 'dag')
+            return invalid('--view must be list, kanban, or dag');
+          return view;
+        })(),
         all: has(flags, 'all'),
         ...scoped,
       };
@@ -176,8 +206,8 @@ export function parseTaskCli(argv: readonly string[]): TaskCliCommand {
       const note = one(flags, 'note');
       // Refuse locally too, so the teammate is told what is missing without a
       // round trip (the daemon enforces the same rule — this is not the guard).
-      if ((status === 'blocked' || status === 'dropped') && (reason === undefined || reason.trim() === '')) {
-        return invalid(`status "${status}" requires --reason`);
+      if (reason === undefined || reason.trim() === '') {
+        return invalid(`status "${status}" requires --reason so history records why it moved`);
       }
       return {
         command: 'act',
@@ -187,6 +217,55 @@ export function parseTaskCli(argv: readonly string[]): TaskCliCommand {
           status,
           ...(reason !== undefined && reason !== '' ? { reason } : {}),
           ...(note !== undefined && note !== '' ? { note } : {}),
+        },
+        ...scoped,
+      };
+    }
+    case 'phase': {
+      const id = requireId(positional[1]);
+      const phase = positional[2];
+      if (phase === undefined || !(TASK_PHASES as readonly string[]).includes(phase)) {
+        return invalid(`phase must be one of ${TASK_PHASES.join(', ')}`);
+      }
+      const reason = one(flags, 'reason');
+      if (reason === undefined || reason.trim() === '') return invalid('phase requires --reason');
+      return { command: 'act', id, body: { action: 'phase', phase: phase as TaskPhase, reason }, ...scoped };
+    }
+    case 'clarify': {
+      const id = requireId(positional[1]);
+      const text = positional.slice(2).join(' ').trim();
+      const source = one(flags, 'source');
+      if (text.length === 0 || source === undefined || source.trim() === '') {
+        return invalid('clarify requires verbatim text and --source <message-link>');
+      }
+      return { command: 'act', id, body: { action: 'clarify', text, source }, ...scoped };
+    }
+    case 'depend': {
+      const id = requireId(positional[1]);
+      const taskId = requireId(positional[2]);
+      return {
+        command: 'act',
+        id,
+        body: { action: 'dependency', taskId, ...(has(flags, 'remove') ? { remove: true } : {}) },
+        ...scoped,
+      };
+    }
+    case 'file': {
+      const id = requireId(positional[1]);
+      const path = positional[2];
+      if (path === undefined || path.trim().length === 0) {
+        return invalid('file needs a path, e.g. task file F21 src/foo.ts');
+      }
+      // Advisory claim: --reason is welcome but NOT required (unlike status/phase).
+      const reason = one(flags, 'reason');
+      return {
+        command: 'act',
+        id,
+        body: {
+          action: 'file',
+          path,
+          ...(has(flags, 'remove') ? { remove: true } : {}),
+          ...(reason !== undefined && reason.trim() !== '' ? { reason } : {}),
         },
         ...scoped,
       };
@@ -239,6 +318,23 @@ function parseCreate(flags: Map<string, string[]>, rest: readonly string[], sess
   const title = one(flags, 'title') ?? rest.join(' ');
   if (title.trim().length === 0) return invalid('--title is required');
   const body: TaskCreateBody = { kind: kind as TaskKind, title: title.trim() };
+  const ask = one(flags, 'ask');
+  const askSource = one(flags, 'ask-source');
+  if (ask === undefined || ask.length === 0 || askSource === undefined || askSource.trim().length === 0) {
+    return invalid('create requires --ask with the human words and --ask-source with the source message link');
+  }
+  body.ask = { text: ask, source: askSource };
+  const workflow = one(flags, 'workflow') ?? 'quick';
+  if (!(TASK_WORKFLOWS as readonly string[]).includes(workflow)) {
+    return invalid(`--workflow must be one of ${TASK_WORKFLOWS.join(', ')}`);
+  }
+  body.workflow = workflow as TaskCreateBody['workflow'];
+  const dependsOn = flags.get('depends-on') ?? [];
+  if (dependsOn.length > 0) body.dependsOn = dependsOn.map(requireId);
+  // Advisory file claims: a repeated --file collects. Empty/blank entries are
+  // dropped here; the daemon normalizes and de-dupes authoritatively.
+  const files = (flags.get('file') ?? []).map(file => file.trim()).filter(file => file.length > 0);
+  if (files.length > 0) body.files = files;
   const description = one(flags, 'description');
   if (description !== undefined && description !== '') body.description = description;
   const status = one(flags, 'status');
@@ -342,27 +438,39 @@ const pad = (text: string, width: number): string =>
  *  is shown as `⚠ <flag>` next to the assignee and NEVER as a status. */
 export function renderTaskListText(response: TaskListResponse): string {
   const lines: string[] = [];
-  const groups = new Map<TaskStatus, TaskSummary[]>();
-  for (const task of response.tasks) {
-    const list = groups.get(task.status);
-    if (list) list.push(task);
-    else groups.set(task.status, [task]);
-  }
-  const blocked = groups.get('blocked') ?? [];
-  if (blocked.length > 0) {
-    lines.push('NEEDS YOU');
-    for (const task of blocked) lines.push(`  ${pad(task.id, 5)} ${task.title} — ${task.statusReason ?? ''}`);
-    lines.push('');
-  }
-  for (const [status, tasks] of groups) {
-    if (status === 'blocked') continue;
-    lines.push(`${TASK_STATUS_LABEL[status]} (${tasks.length})`);
-    for (const task of tasks) {
-      const flag = task.live.staleness === null ? '' : ` ⚠ ${task.live.staleness}`;
-      lines.push(`  ${pad(task.id, 5)} ${pad(task.assignee ?? '—', 12)}${pad(flag, 18)} ${task.title}`);
+  const ordered = [...response.tasks].sort((a, b) => {
+    const aUrgency = a.blocked ? 0 : a.live.staleness !== null ? 1 : 2;
+    const bUrgency = b.blocked ? 0 : b.live.staleness !== null ? 1 : 2;
+    if (aUrgency !== bUrgency) return aUrgency - bUrgency;
+    if (a.blocked && b.blocked) {
+      const left = taskListTime(a.blockedSince);
+      const right = taskListTime(b.blockedSince);
+      if (left !== right) return left - right;
     }
+    if (aUrgency === 1) {
+      const left = taskListTime(a.updatedAt);
+      const right = taskListTime(b.updatedAt);
+      if (left !== right) return left - right;
+    }
+    return a.id.localeCompare(b.id, undefined, { numeric: true });
+  });
+  const line = (task: TaskSummary): string => {
+    const stalled = task.blocked ? ` 🚧 ${task.blockedReason ?? 'blocked'}` : '';
+    const stale = task.live.staleness === null ? '' : ` ⚠ ${task.live.staleness}`;
+    const phase = task.phase ?? taskPhaseFromStatus(task.status);
+    return `${pad(taskReference(task.id), 6)} ${pad(phase, 9)} ${pad(task.assignee ?? '—', 12)} ${task.title}${stalled}${stale}`;
+  };
+  const attention = ordered.filter(task => task.blocked && (task.blockedBy ?? []).length === 0);
+  if (attention.length > 0) {
+    lines.push('ATTENTION');
+    for (const task of attention) lines.push(line(task));
     lines.push('');
   }
+  for (const task of ordered) {
+    if (attention.includes(task)) continue;
+    lines.push(line(task));
+  }
+  if (ordered.length > attention.length) lines.push('');
   if (response.tasks.length === 0) lines.push('No tasks.', '');
   if (response.parseErrors > 0) {
     lines.push(
@@ -375,12 +483,54 @@ export function renderTaskListText(response: TaskListResponse): string {
   return lines.join('\n');
 }
 
+const taskListTime = (value: string | null): number => {
+  if (value === null) return Number.POSITIVE_INFINITY;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+};
+
+export function renderTaskKanbanText(response: TaskListResponse): string {
+  const lines: string[] = [];
+  for (const phase of TASK_PHASES) {
+    const tasks = response.tasks.filter(task => (task.phase ?? taskPhaseFromStatus(task.status)) === phase);
+    if (tasks.length === 0) continue;
+    lines.push(`${phase.toUpperCase()} (${tasks.length})`);
+    for (const task of tasks) {
+      lines.push(`  ${taskReference(task.id)} ${task.title}${task.blocked ? ` 🚧 ${task.blockedReason}` : ''}`);
+    }
+    lines.push('');
+  }
+  if (response.tasks.length === 0) lines.push('No tasks.', '');
+  return lines.join('\n');
+}
+
+export function renderTaskDagText(response: TaskListResponse): string {
+  const lines = response.tasks.map(task => {
+    const dependsOn = task.dependsOn ?? [];
+    const edges = dependsOn.length > 0 ? dependsOn.map(taskReference).join(', ') : '∅';
+    return `${taskReference(task.id)} → ${edges}${task.blocked ? `  🚧 ${task.blockedReason}` : ''}  ${task.title}`;
+  });
+  if (lines.length === 0) lines.push('No tasks.');
+  return `${lines.join('\n')}\n`;
+}
+
 /** One task for the terminal. The derived warning is labelled as derived, so
  *  nobody reads it as a status change. */
 export function renderTaskShowText(detail: TaskDetailResponse): string {
   const { task, activity } = detail;
+  const workflow = task.workflow ?? 'quick';
+  const phase = task.phase ?? taskPhaseFromStatus(task.status);
+  const dependsOn = task.dependsOn ?? [];
+  const files = task.files ?? [];
+  const clarifications = task.clarifications ?? [];
+  const ask = task.ask ?? {
+    text: task.description.trim().length > 0 ? task.description : task.title,
+    source: 'legacy record (source unavailable)',
+  };
   const lines = [
-    `${task.id}  ${task.title}`,
+    `${taskReference(task.id)}  ${task.title}`,
+    `workflow  ${workflow}`,
+    `phase     ${phase}`,
     `status    ${task.status}${task.statusReason ? ` — ${task.statusReason}` : ''}`,
     `kind      ${task.kind}`,
     `assignee  ${task.assignee ?? '—'}${task.live.assigneeStatus ? ` (${task.live.assigneeStatus})` : ''}`,
@@ -389,6 +539,10 @@ export function renderTaskShowText(detail: TaskDetailResponse): string {
     `updated   ${task.updatedAt}`,
   ];
   if (task.live.staleness !== null) lines.push(`⚠ derived  ${TASK_STALENESS_COPY[task.live.staleness]}`);
+  if (task.blocked)
+    lines.push(`🚧 blocked  ${task.blockedReason ?? 'blocked'} since ${task.blockedSince ?? 'unknown'}`);
+  lines.push(`depends   ${dependsOn.length > 0 ? dependsOn.map(taskReference).join(', ') : '—'}`);
+  lines.push(`files     ${files.length > 0 ? files.join(', ') : '—'} (advisory)`);
   const links = [
     ...task.links.prs.map(pr => `pr     ${pr}`),
     ...(task.links.branch !== null ? [`branch ${task.links.branch}`] : []),
@@ -396,6 +550,11 @@ export function renderTaskShowText(detail: TaskDetailResponse): string {
     ...task.links.docs.map(doc => `doc    ${doc}`),
   ];
   if (links.length > 0) lines.push('', 'links', ...links.map(link => `  ${link}`));
+  lines.push('', 'original ask', `  "${ask.text.replace(/\n/g, '\n  ')}"`, `  source ${ask.source}`);
+  if (clarifications.length > 0) {
+    lines.push('', 'clarifications');
+    for (const item of clarifications) lines.push(`  ${item.at} ${item.text} — ${item.source}`);
+  }
   if (task.description.trim().length > 0) lines.push('', task.description.trim());
   lines.push('', `activity (${activity.length})`);
   for (const entry of activity) {
@@ -411,11 +570,16 @@ export function renderTaskCli(command: TaskCliCommand, response: unknown): strin
   switch (command.command) {
     case 'create': {
       const task = response as TaskView;
-      return `${task.id}\n`;
+      return `${taskReference(task.id)}\n`;
     }
     case 'list': {
       const listed = response as TaskListResponse;
-      return command.md ? renderTaskBoardMd(listed.tasks) : renderTaskListText(listed);
+      if (command.md) return renderTaskBoardMd(listed.tasks);
+      return command.view === 'kanban'
+        ? renderTaskKanbanText(listed)
+        : command.view === 'dag'
+          ? renderTaskDagText(listed)
+          : renderTaskListText(listed);
     }
     case 'show': {
       const detail = response as TaskDetailResponse;
@@ -424,7 +588,7 @@ export function renderTaskCli(command: TaskCliCommand, response: unknown): strin
     case 'act': {
       const task = response as TaskView;
       const suffix = task.live.staleness === null ? '' : `  ⚠ ${TASK_STALENESS_COPY[task.live.staleness]}`;
-      return `${task.id}  ${task.status}${task.statusReason ? ` — ${task.statusReason}` : ''}${suffix}\n`;
+      return `${taskReference(task.id)}  ${task.phase}${task.statusReason ? ` — ${task.statusReason}` : ''}${suffix}\n`;
     }
   }
 }

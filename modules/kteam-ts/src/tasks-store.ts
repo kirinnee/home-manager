@@ -36,28 +36,40 @@ import type { KTeamPaths } from './paths';
 import { atomicJson, now } from './io';
 import {
   MAX_TASK_DESCRIPTION_LEN,
+  MAX_TASK_CLARIFICATIONS,
+  MAX_TASK_DEPENDENCIES,
+  MAX_TASK_FILES,
+  MAX_TASK_FILE_LEN,
   MAX_TASK_LINKS_PER_FIELD,
   MAX_TASK_LINK_LEN,
   MAX_TASK_NOTE_LEN,
+  MAX_TASK_SOURCE_LEN,
   MAX_TASK_TITLE_LEN,
   TASK_ACTIVITY_TYPES,
   TASK_BOARD_ORDER,
   TASK_ID_PREFIX,
   TASK_KINDS,
   TASK_SCHEMA_VERSION,
+  TASK_PHASES,
   TASK_STATUSES,
+  TASK_WORKFLOWS,
   TaskError,
   emptyTaskLinks,
   type Task,
   type TaskActivity,
   type TaskActivityType,
   type TaskKind,
+  type TaskMessage,
+  type TaskClarification,
   type TaskLinks,
   type TaskListResult,
   type TaskStatus,
+  type TaskPhase,
+  type TaskWorkflow,
   type TaskSummary,
   type TaskView,
 } from './tasks-types';
+import { assertTaskPhaseInWorkflow, inferTaskWorkflow, taskPhaseFromStatus } from './tasks-workflow';
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -102,7 +114,7 @@ export const isTaskId = (value: unknown): value is string => typeof value === 's
  *  Returns null when it is not an id at all — never a guess. */
 export function normalizeTaskId(value: unknown): string | null {
   if (typeof value !== 'string') return null;
-  const upper = value.trim().toUpperCase();
+  const upper = value.trim().replace(/^#/u, '').toUpperCase();
   return TASK_ID.test(upper) ? upper : null;
 }
 
@@ -155,6 +167,67 @@ export function parseTaskLinks(value: unknown): TaskLinks {
   return links;
 }
 
+function parseTaskMessage(value: unknown): TaskMessage | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const message = typeof raw['text'] === 'string' ? raw['text'] : null;
+  const source = nonEmpty(raw['source']);
+  if (
+    message === null ||
+    message.length === 0 ||
+    message.length > MAX_TASK_DESCRIPTION_LEN ||
+    source === null ||
+    source.length > MAX_TASK_SOURCE_LEN
+  ) {
+    return null;
+  }
+  return { text: message, source };
+}
+
+function parseTaskClarifications(value: unknown): TaskClarification[] {
+  if (!Array.isArray(value)) return [];
+  const clarifications: TaskClarification[] = [];
+  for (const item of value) {
+    const message = parseTaskMessage(item);
+    if (message === null || !item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const raw = item as Record<string, unknown>;
+    const at = nonEmpty(raw['at']);
+    const by = nonEmpty(raw['by']);
+    if (at === null || by === null) continue;
+    clarifications.push({ ...message, at, by, byName: nonEmpty(raw['byName']) });
+    if (clarifications.length >= MAX_TASK_CLARIFICATIONS) break;
+  }
+  return clarifications;
+}
+
+function parseTaskDependencies(value: unknown, self: string): string[] {
+  if (!Array.isArray(value)) return [];
+  const dependencies: string[] = [];
+  for (const item of value) {
+    const id = normalizeTaskId(item);
+    if (id === null || id === self || dependencies.includes(id)) continue;
+    dependencies.push(id);
+    if (dependencies.length >= MAX_TASK_DEPENDENCIES) break;
+  }
+  return dependencies;
+}
+
+/** Defensive parse of advisory file claims. Missing/wrong-typed → `[]` (a legacy
+ *  record simply claims nothing), blanks and over-cap paths dropped, de-duped and
+ *  capped. Spelling is preserved verbatim — a claim is compared as the author
+ *  wrote it, not canonicalised, so `./a` and `a` are treated as distinct. */
+function parseTaskFiles(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const files: string[] = [];
+  for (const item of value) {
+    const file = nonEmpty(item);
+    if (file === null || file.length > MAX_TASK_FILE_LEN || files.includes(file)) continue;
+    files.push(file);
+    if (files.length >= MAX_TASK_FILES) break;
+  }
+  return files;
+}
+
 /** Defensive parse of ONE task record. Returns null for anything this build does
  *  not understand, so a single bad file degrades to "that task is missing from
  *  the board" (counted in `parseErrors`), never to a throw.
@@ -190,17 +263,56 @@ export function parseTaskRecord(value: unknown): Task | null {
   const order = typeof orderRaw === 'number' && Number.isSafeInteger(orderRaw) && orderRaw >= 0 ? orderRaw : null;
   const createdAt = nonEmpty(raw['createdAt']);
   if (createdAt === null) return null;
+  const links = parseTaskLinks(raw['links']);
+  const parsedPhase = raw['phase'];
+  const phase =
+    typeof parsedPhase === 'string' && (TASK_PHASES as readonly string[]).includes(parsedPhase)
+      ? (parsedPhase as TaskPhase)
+      : taskPhaseFromStatus(status);
+  const parsedWorkflow = raw['workflow'];
+  const workflow =
+    typeof parsedWorkflow === 'string' && (TASK_WORKFLOWS as readonly string[]).includes(parsedWorkflow)
+      ? (parsedWorkflow as TaskWorkflow)
+      : inferTaskWorkflow(phase);
+  try {
+    assertTaskPhaseInWorkflow(workflow, phase);
+  } catch {
+    return null;
+  }
+  // The v2 status/phase invariant (maya P1): a persisted record must not carry a
+  // declared status that contradicts its phase, or the List/status filter and the
+  // Kanban phase column will disagree and later activity records a transition
+  // whose `from` and `phaseFrom` describe two different states. Reject at the
+  // parse boundary rather than trust one field downstream.
+  //   • `blocked` is EXEMPT — a manual block keeps the phase it was blocked in
+  //     while the status reads `blocked` (status→phase is `todo`, deliberately).
+  //   • every other status maps 1:1 to a phase, so `dropped` is forced to phase
+  //     `dropped` by the same rule. Legacy records with no stored phase inferred
+  //     it from status above, so they satisfy this by construction.
+  if (status !== 'blocked' && taskPhaseFromStatus(status) !== phase) return null;
+  const ask =
+    parseTaskMessage(raw['ask']) ??
+    ({
+      text: description.length > 0 ? description : title,
+      source: links.docs[0] ?? `legacy:${id}`,
+    } satisfies TaskMessage);
   return {
     v: TASK_SCHEMA_VERSION,
     id,
     kind,
     title,
     description,
+    ask,
+    clarifications: parseTaskClarifications(raw['clarifications']),
+    workflow,
+    phase,
+    dependsOn: parseTaskDependencies(raw['dependsOn'], id),
     status,
     statusReason,
     assignee: nonEmpty(raw['assignee']),
     repo: nonEmpty(raw['repo']),
-    links: parseTaskLinks(raw['links']),
+    files: parseTaskFiles(raw['files']),
+    links,
     order,
     createdAt,
     createdBy: nonEmpty(raw['createdBy']),
@@ -219,10 +331,16 @@ export function serializeTask(task: Task): Task {
     kind: task.kind,
     title: task.title,
     description: task.description,
+    ask: { ...task.ask },
+    clarifications: task.clarifications.map(clarification => ({ ...clarification })),
+    workflow: task.workflow,
+    phase: task.phase,
+    dependsOn: [...task.dependsOn],
     status: task.status,
     statusReason: task.statusReason,
     assignee: task.assignee,
     repo: task.repo,
+    files: [...task.files],
     links: {
       prs: [...task.links.prs],
       branch: task.links.branch,
@@ -325,6 +443,83 @@ export function validateTaskDescription(value: unknown): string {
   return capped('description', value, MAX_TASK_DESCRIPTION_LEN);
 }
 
+export function validateTaskSource(value: unknown, label = 'source'): string {
+  const source = nonEmpty(value);
+  if (source === null) throw new TaskError('invalid', `${label} is required and may not be blank`);
+  return capped(label, source, MAX_TASK_SOURCE_LEN);
+}
+
+export function validateTaskMessage(value: unknown, label = 'ask'): TaskMessage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TaskError('invalid', `${label} must contain text and source`);
+  }
+  const raw = value as Record<string, unknown>;
+  if (typeof raw['text'] !== 'string' || raw['text'].trim().length === 0) {
+    throw new TaskError('invalid', `${label}.text is required and may not be blank`);
+  }
+  return {
+    text: capped(`${label}.text`, raw['text'], MAX_TASK_DESCRIPTION_LEN),
+    source: validateTaskSource(raw['source'], `${label}.source`),
+  };
+}
+
+export function validateTaskWorkflow(value: unknown): TaskWorkflow {
+  if (typeof value !== 'string' || !(TASK_WORKFLOWS as readonly string[]).includes(value)) {
+    throw new TaskError('invalid', `workflow must be one of ${TASK_WORKFLOWS.join(', ')}`);
+  }
+  return value as TaskWorkflow;
+}
+
+export function validateTaskPhase(value: unknown): TaskPhase {
+  if (typeof value !== 'string' || !(TASK_PHASES as readonly string[]).includes(value)) {
+    throw new TaskError('invalid', `phase must be one of ${TASK_PHASES.join(', ')}`);
+  }
+  return value as TaskPhase;
+}
+
+export function validateTaskDependencies(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new TaskError('invalid', 'dependsOn must be an array of task ids');
+  if (value.length > MAX_TASK_DEPENDENCIES) {
+    throw new TaskError('too-long', `dependsOn holds ${value.length} entries; the maximum is ${MAX_TASK_DEPENDENCIES}`);
+  }
+  const dependencies: string[] = [];
+  for (const item of value) {
+    const id = normalizeTaskId(item);
+    if (id === null) throw new TaskError('invalid', `dependency must look like #F12, got ${String(item)}`);
+    if (!dependencies.includes(id)) dependencies.push(id);
+  }
+  return dependencies;
+}
+
+/** One advisory file claim, authoritatively supplied. Trimmed, non-blank,
+ *  capped. Spelling is preserved as given — the claim is compared verbatim. */
+export function validateTaskFile(value: unknown, label = 'file'): string {
+  const file = nonEmpty(value);
+  if (file === null) throw new TaskError('invalid', `${label} path is required and may not be blank`);
+  return capped(label, file, MAX_TASK_FILE_LEN);
+}
+
+/** Normalize a supplied `files` array on create: each path trimmed, blanks
+ *  dropped, order-preserving de-dupe, over-long paths refused, count capped.
+ *  Blank entries are noise (trailing commas, empty splits) so they are dropped
+ *  rather than failing the whole create — the single-file action stays strict. */
+export function validateTaskFiles(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new TaskError('invalid', 'files must be an array of paths');
+  if (value.length > MAX_TASK_FILES) {
+    throw new TaskError('too-long', `files holds ${value.length} entries; the maximum is ${MAX_TASK_FILES}`);
+  }
+  const files: string[] = [];
+  for (const item of value) {
+    const file = nonEmpty(item);
+    if (file === null) continue;
+    const checked = capped('file', file, MAX_TASK_FILE_LEN);
+    if (!files.includes(checked)) files.push(checked);
+  }
+  return files;
+}
+
 /** A note / status reason / feedback line. */
 export function validateTaskNote(value: unknown, label = 'note'): string {
   const text = nonEmpty(value);
@@ -390,8 +585,14 @@ export function compareTasks(a: Task, b: Task): number {
 
 /** Strip the brief off a view for list rows, reporting its length instead. */
 export function toTaskSummary(view: TaskView): TaskSummary {
-  const { description, ...rest } = view;
-  return { ...rest, descriptionChars: description.length };
+  const { description, ask, clarifications, ...rest } = view;
+  return {
+    ...rest,
+    descriptionChars: description.length,
+    askChars: ask.text.length,
+    askSource: ask.source,
+    clarificationCount: clarifications.length,
+  };
 }
 
 export interface TaskFilter {

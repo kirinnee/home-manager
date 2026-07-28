@@ -15,9 +15,9 @@
 //     liveness (`TaskLive`) is computed at read time and NEVER stored, and never
 //     changes `status`. That is why `TaskLive` is a separate type joined onto a
 //     `TaskView` instead of fields on `Task`: the record on disk physically
-//     cannot carry a derived verdict. A board that auto-promotes a task because
-//     an agent claimed "completed" launders a claim into truth — the exact
-//     failure this system exists to remove.
+//     cannot carry a derived verdict. TaskService handles a durable
+//     `session.completed` claim separately: it records the evidence and may
+//     advance active build work to the explicit `built` checkpoint, never live.
 //  2. Text is REFUSED over its cap, never truncated (pins.ts MAX_NOTE_LEN
 //     rationale). A brief silently cut at 64 KiB is a brief that lies about what
 //     the work is.
@@ -40,11 +40,25 @@ export const TASK_ID_PREFIX: Record<TaskKind, string> = {
   chore: 'C',
 };
 
+/** Stored ids stay sigil-free; every human-facing reference carries `#`. */
+export type TaskReference = `#${string}`;
+
+export const taskReference = (id: string): TaskReference => `#${id}`;
+
 /** DECLARED status — intent, asserted, stored. Mirrors the live board's seven
  *  states plus `blocked` ("What I need from you"). Deliberately NOT derivable:
  *  `built` means gates ran green, `live` means deployed, `designed` means a human
  *  judged the spec done. Guessing those is the disease, not the cure. */
-export type TaskStatus = 'todo' | 'researched' | 'designed' | 'in_progress' | 'built' | 'live' | 'blocked' | 'dropped';
+export type TaskStatus =
+  | 'todo'
+  | 'researched'
+  | 'designed'
+  | 'in_progress'
+  | 'built'
+  | 'live'
+  | 'done'
+  | 'blocked'
+  | 'dropped';
 
 export const TASK_STATUSES: readonly TaskStatus[] = [
   'todo',
@@ -53,14 +67,45 @@ export const TASK_STATUSES: readonly TaskStatus[] = [
   'in_progress',
   'built',
   'live',
+  'done',
   'blocked',
   'dropped',
 ];
+
+/** The canonical v2 phase vocabulary. `built` is deliberately separate from
+ * `live`: a completion claim can move build work to built, while deployment is
+ * always its own explicit transition. */
+export type TaskPhase = 'todo' | 'research' | 'design' | 'build' | 'built' | 'live' | 'done' | 'dropped';
+
+export const TASK_PHASES: readonly TaskPhase[] = [
+  'todo',
+  'research',
+  'design',
+  'build',
+  'built',
+  'live',
+  'done',
+  'dropped',
+];
+
+export type TaskWorkflow = 'quick' | 'design-first' | 'research-first' | 'investigate';
+
+export const TASK_WORKFLOWS: readonly TaskWorkflow[] = ['quick', 'design-first', 'research-first', 'investigate'];
+
+/** Fixed sub-workflows. `built` is the completion checkpoint between active
+ * build work and deployment; the human-facing shorthand remains build → live. */
+export const TASK_WORKFLOW_PATHS: Readonly<Record<TaskWorkflow, readonly TaskPhase[]>> = {
+  quick: ['todo', 'build', 'built', 'live'],
+  'design-first': ['todo', 'design', 'build', 'built', 'live'],
+  'research-first': ['todo', 'research', 'design', 'build', 'built', 'live'],
+  investigate: ['todo', 'research', 'done'],
+};
 
 /** Board display order (design §7): shipped work first, the things needing a
  *  human last-but-loudest (`blocked` gets its own pinned strip in the UI). */
 export const TASK_BOARD_ORDER: readonly TaskStatus[] = [
   'live',
+  'done',
   'built',
   'in_progress',
   'designed',
@@ -90,6 +135,31 @@ export const MAX_TASK_LINK_LEN = 512;
 /** Per-field link cap, so an automated appender cannot grow the record without
  *  bound. Adding past it is REFUSED (the record is not a log — the log is). */
 export const MAX_TASK_LINKS_PER_FIELD = 64;
+/** A source is a stable message permalink/reference, never a paraphrase. */
+export const MAX_TASK_SOURCE_LEN = 2 * 1024;
+/** Bounded first-class evolution of the human ask. */
+export const MAX_TASK_CLARIFICATIONS = 128;
+/** A task graph edge list is intentionally bounded. */
+export const MAX_TASK_DEPENDENCIES = 128;
+/** Advisory file claims are bounded like every other appendable list. A task
+ *  that touches more than this many files is really several tasks. */
+export const MAX_TASK_FILES = 256;
+/** A single claimed path. Long enough for any real repo path, short enough that a
+ *  hand-edited record cannot smuggle a huge blob into the `files` array. */
+export const MAX_TASK_FILE_LEN = 1024;
+
+export interface TaskMessage {
+  /** The human's words, preserved verbatim. */
+  text: string;
+  /** Link/reference to the exact message containing those words. */
+  source: string;
+}
+
+export interface TaskClarification extends TaskMessage {
+  at: string;
+  by: string;
+  byName: string | null;
+}
 
 export interface TaskLinks {
   /** Full PR urls; the UI renders GitHub ones as `repo#123` chips. */
@@ -120,6 +190,16 @@ export interface Task {
   /** THE brief: full markdown, what this work is supposed to do. May be empty
    *  (a placeholder row), never truncated. */
   description: string;
+  /** Original human ask, verbatim, with its exact source message. */
+  ask: TaskMessage;
+  /** Later verbatim refinements, in arrival order, each independently linked. */
+  clarifications: TaskClarification[];
+  /** Immutable after creation. */
+  workflow: TaskWorkflow;
+  /** Canonical workflow phase. `status` remains as a v1 compatibility view. */
+  phase: TaskPhase;
+  /** Fleet-global task ids. The graph is validated before every edge write. */
+  dependsOn: string[];
   status: TaskStatus;
   /** Required non-empty for `blocked`/`dropped`; null otherwise. */
   statusReason: string | null;
@@ -129,6 +209,11 @@ export interface Task {
   assignee: string | null;
   /** The cwd/repo this task is ABOUT (grouping is by field, not by directory). */
   repo: string | null;
+  /** ADVISORY file claims: the paths this task expects to touch, so two
+   *  concurrent tasks claiming the same file are visible BEFORE either writes.
+   *  Discovered as work proceeds, so it is mutable mid-task. Never a lock and
+   *  never a graph edge — overlap is surfaced, not arbitrated. */
+  files: string[];
   links: TaskLinks;
   /** Lead-set priority rank; null = unranked. Lower sorts first. */
   order: number | null;
@@ -142,7 +227,18 @@ export interface Task {
  *  `from`/`to` (+ optional `note`); `link` carries `field`/`value`; `assign`
  *  carries `from`/`to`; `order` carries `from`/`to` numbers; `session` is the
  *  phase-2 daemon-auto evidence line. */
-export type TaskActivityType = 'created' | 'status' | 'note' | 'link' | 'assign' | 'order' | 'feedback' | 'session';
+export type TaskActivityType =
+  | 'created'
+  | 'status'
+  | 'note'
+  | 'link'
+  | 'assign'
+  | 'order'
+  | 'feedback'
+  | 'clarification'
+  | 'dependency'
+  | 'file'
+  | 'session';
 
 export const TASK_ACTIVITY_TYPES: readonly TaskActivityType[] = [
   'created',
@@ -152,6 +248,9 @@ export const TASK_ACTIVITY_TYPES: readonly TaskActivityType[] = [
   'assign',
   'order',
   'feedback',
+  'clarification',
+  'dependency',
+  'file',
   'session',
 ];
 
@@ -217,6 +316,12 @@ export type TaskRecord = Task;
 /** A record plus its derived annotation — what every read returns. */
 export interface TaskView extends Task {
   live: TaskLive;
+  /** Derived from dependency state, approval claims, and declared/manual hold. */
+  blocked: boolean;
+  blockedReason: string | null;
+  blockedSince: string | null;
+  /** Unmet dependency ids. Empty means a human/direct-intervention blocker. */
+  blockedBy: string[];
 }
 
 /** A task returned from a session-scoped route. `sessionId` is derived from the
@@ -227,7 +332,12 @@ export interface ScopedTaskView extends TaskView {
 
 /** List rows: no `description` (a 40-row board must not ship 40 briefs), but the
  *  length is reported so the UI can show "has a brief" honestly. */
-export type TaskSummary = Omit<TaskView, 'description'> & { descriptionChars: number };
+export type TaskSummary = Omit<TaskView, 'description' | 'ask' | 'clarifications'> & {
+  descriptionChars: number;
+  askChars: number;
+  askSource: string;
+  clarificationCount: number;
+};
 
 /** Aggregate reads carry the storage owner on every row. IDs remain
  *  fleet-global for stable links and spoken references; `null` names an
@@ -305,6 +415,15 @@ export interface TaskCreateInput {
   title: string;
   /** The full brief. Optional; refused over MAX_TASK_DESCRIPTION_LEN. */
   description?: string;
+  /** Required on transport writes; optional here only for v1 source callers. */
+  ask?: TaskMessage;
+  /** Defaults to quick for v1 callers. */
+  workflow?: TaskWorkflow;
+  dependsOn?: string[];
+  /** Advisory file claims. Repeatable on create; each normalized and de-duped. */
+  files?: string[];
+  /** Compatibility/import hook. New interactive creates start at todo. */
+  phase?: TaskPhase;
   /** Defaults to `todo`. A create straight into `blocked`/`dropped` must carry a
    *  reason exactly like any other status write. */
   status?: TaskStatus;
@@ -325,15 +444,30 @@ export interface TaskCreateInput {
  *  user ("every time you get feedback, add to it"). */
 export type TaskActionInput =
   | { action: 'status'; status: TaskStatus; reason?: string; note?: string }
+  | { action: 'phase'; phase: TaskPhase; reason: string }
   | { action: 'note'; text: string }
   | { action: 'feedback'; text: string }
+  | { action: 'clarify'; text: string; source: string }
+  | { action: 'dependency'; taskId: string; remove?: boolean }
+  | { action: 'file'; path: string; remove?: boolean; reason?: string }
   | { action: 'link'; field: TaskLinkField; value: string }
   | { action: 'assign'; assignee: string | null }
   | { action: 'order'; order: number | null };
 
 export type TaskActionName = TaskActionInput['action'];
 
-export const TASK_ACTIONS: readonly TaskActionName[] = ['status', 'note', 'feedback', 'link', 'assign', 'order'];
+export const TASK_ACTIONS: readonly TaskActionName[] = [
+  'status',
+  'phase',
+  'note',
+  'feedback',
+  'clarify',
+  'dependency',
+  'file',
+  'link',
+  'assign',
+  'order',
+];
 
 /** Why a task operation was refused. Mapped to HTTP status by
  *  `taskErrorStatus` (tasks-contract.ts) so the route wiring stays thin. */
@@ -347,6 +481,14 @@ export type TaskErrorCode =
   | 'forbidden'
   /** An aggregate id lookup found a migration conflict or damaged duplicate. */
   | 'ambiguous'
+  /** The chosen workflow does not permit this phase edge. */
+  | 'transition'
+  /** Research/design completion is waiting for the human. */
+  | 'approval-required'
+  /** A dependency write would make the graph cyclic. */
+  | 'cycle'
+  /** A drop/delete would strand dependent tasks. */
+  | 'dependency-conflict'
   /** A non-daemon process attempted a write. */
   | 'read-only';
 

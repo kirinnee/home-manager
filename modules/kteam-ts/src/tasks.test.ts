@@ -6,6 +6,7 @@ import { createPaths, markerFile, type KTeamPaths } from './paths';
 import { TaskService, type TaskDeps } from './tasks';
 import type { TaskAssigneeView } from './tasks-live';
 import { MAX_TASK_DESCRIPTION_LEN, MAX_TASK_LINKS_PER_FIELD, MAX_TASK_NOTE_LEN, TaskError } from './tasks-types';
+import type { KTeamEvent } from './types';
 
 let home: string;
 let paths: KTeamPaths;
@@ -35,17 +36,37 @@ async function created(over: Record<string, unknown> = {}) {
     kind: 'feature',
     title: 'File browser',
     description: '## Brief\nchanges-first viewer',
+    ask: {
+      text: 'Please build a changes-first file browser.',
+      source: 'kteam://messages/ms-lead/1',
+    },
     actor: 'ms-lead',
     actorName: 'zelda',
     ...over,
   } as Parameters<TaskService['taskCreate']>[0]);
 }
 
+const completionEvent = (sessionId: string, turn = 3): KTeamEvent => ({
+  sequence: 17,
+  time: '2027-07-27T03:00:00.000Z',
+  sessionId,
+  turn,
+  type: 'session.completed',
+  source: 'daemon',
+  data: { status: 'completed' },
+});
+
 describe('create', () => {
   test('assigns the board vocabulary id, defaults to todo, and opens the history', async () => {
     const task = await created();
     expect(task.id).toBe('F1');
     expect(task.status).toBe('todo');
+    expect(task.phase).toBe('todo');
+    expect(task.workflow).toBe('quick');
+    expect(task.ask).toEqual({
+      text: 'Please build a changes-first file browser.',
+      source: 'kteam://messages/ms-lead/1',
+    });
     expect(task.createdBy).toBe('ms-lead');
     const detail = await service.taskDetail('F1');
     expect(detail?.activity).toHaveLength(1);
@@ -96,6 +117,9 @@ describe('create', () => {
   test('an invalid kind or a blank title is refused', async () => {
     await expect(created({ kind: 'epic' })).rejects.toThrow('kind must be one of');
     await expect(created({ title: '   ' })).rejects.toThrow('title is required');
+    await expect(created({ ask: { text: '   ', source: 'kteam://messages/ms-lead/1' } })).rejects.toThrow(
+      'ask.text is required',
+    );
   });
 
   test('links supplied at create time are validated and de-duplicated', async () => {
@@ -116,27 +140,39 @@ describe('status action', () => {
     await created();
     const updated = await service.taskAct('F1', {
       action: 'status',
-      status: 'built',
-      note: '590 tests green, not deployed',
+      status: 'in_progress',
+      reason: 'The ask is clear enough to start building.',
+      note: 'Implementation began in the assigned session.',
       actor: 'ms-lead',
       actorName: 'zelda',
     });
-    expect(updated.status).toBe('built');
+    expect(updated.status).toBe('in_progress');
+    expect(updated.phase).toBe('build');
     const detail = await service.taskDetail('F1');
     expect(detail?.activity.at(-1)).toMatchObject({
       seq: 2,
       type: 'status',
       actorName: 'zelda',
-      data: { from: 'todo', to: 'built', note: '590 tests green, not deployed' },
+      data: {
+        from: 'todo',
+        to: 'in_progress',
+        phaseFrom: 'todo',
+        phaseTo: 'build',
+        reason: 'The ask is clear enough to start building.',
+        note: 'Implementation began in the assigned session.',
+      },
     });
   });
 
-  test('blocked and dropped refuse to be set without a reason', async () => {
+  test('manual blocks and every phase move refuse to be set without a reason', async () => {
     await created();
     await expect(service.taskAct('F1', { action: 'status', status: 'blocked' })).rejects.toThrow('requires a reason');
     await expect(service.taskAct('F1', { action: 'status', status: 'dropped', reason: '  ' })).rejects.toThrow(
-      'requires a reason',
+      'require a reason',
     );
+    await expect(service.taskAct('F1', { action: 'status', status: 'in_progress' })).rejects.toMatchObject({
+      code: 'reason-required',
+    });
     // the refusal changed nothing
     expect((await service.taskDetail('F1'))?.task.status).toBe('todo');
     expect((await service.taskDetail('F1'))?.activity).toHaveLength(1);
@@ -145,7 +181,11 @@ describe('status action', () => {
   test('leaving blocked clears the stale reason from the record but keeps it in history', async () => {
     await created();
     await service.taskAct('F1', { action: 'status', status: 'blocked', reason: 'needs the age key' });
-    const back = await service.taskAct('F1', { action: 'status', status: 'in_progress' });
+    const back = await service.taskAct('F1', {
+      action: 'status',
+      status: 'todo',
+      reason: 'The age key was supplied.',
+    });
     expect(back.statusReason).toBeNull();
     const detail = await service.taskDetail('F1');
     expect(JSON.stringify(detail?.activity)).toContain('needs the age key');
@@ -154,7 +194,12 @@ describe('status action', () => {
   test('an over-cap note is refused before anything is written', async () => {
     await created();
     await expect(
-      service.taskAct('F1', { action: 'status', status: 'built', note: 'n'.repeat(MAX_TASK_NOTE_LEN + 1) }),
+      service.taskAct('F1', {
+        action: 'status',
+        status: 'in_progress',
+        reason: 'Start the build.',
+        note: 'n'.repeat(MAX_TASK_NOTE_LEN + 1),
+      }),
     ).rejects.toThrow('not truncated');
     expect((await service.taskDetail('F1'))?.task.status).toBe('todo');
   });
@@ -164,6 +209,180 @@ describe('status action', () => {
     await expect(service.taskAct('F1', { action: 'status', status: 'shipped' as 'built' })).rejects.toThrow(
       'status must be one of',
     );
+  });
+});
+
+describe('v2 workflow, ask, DAG, and delegated completion', () => {
+  test('clarifications preserve the later human words and their own source link', async () => {
+    await created();
+    const clarified = await service.taskAct('#f1', {
+      action: 'clarify',
+      text: 'Keep unchanged files hidden by default.',
+      source: 'kteam://messages/ms-lead/2',
+      actor: 'user',
+    });
+    expect(clarified.clarifications).toEqual([
+      {
+        text: 'Keep unchanged files hidden by default.',
+        source: 'kteam://messages/ms-lead/2',
+        at: expect.any(String),
+        by: 'user',
+        byName: 'user',
+      },
+    ]);
+    expect((await service.taskDetail('F1'))?.activity.at(-1)).toMatchObject({
+      type: 'clarification',
+      data: {
+        text: 'Keep unchanged files hidden by default.',
+        source: 'kteam://messages/ms-lead/2',
+      },
+    });
+  });
+
+  test('research and design may be entered by an agent but only exited by the human', async () => {
+    await created({ workflow: 'research-first' });
+    await service.taskAct('F1', {
+      action: 'phase',
+      phase: 'research',
+      reason: 'Investigate the viable APIs.',
+      actor: 'ms-lead',
+      actorName: 'zelda',
+    });
+    await expect(
+      service.taskAct('F1', {
+        action: 'phase',
+        phase: 'design',
+        reason: 'Research is complete.',
+        actor: 'ms-lead',
+        actorName: 'zelda',
+      }),
+    ).rejects.toMatchObject({ code: 'approval-required' });
+
+    const designed = await service.taskAct('F1', {
+      action: 'phase',
+      phase: 'design',
+      reason: 'The human approved the research.',
+      actor: 'user',
+    });
+    expect(designed.phase).toBe('design');
+    expect((await service.taskDetail('F1'))?.activity.at(-1)?.data).toMatchObject({ approvedByHuman: true });
+
+    await expect(
+      service.taskAct('F1', {
+        action: 'phase',
+        phase: 'build',
+        reason: 'The design looks implementable.',
+        actor: 'ms-lead',
+      }),
+    ).rejects.toMatchObject({ code: 'approval-required' });
+    const building = await service.taskAct('F1', {
+      action: 'phase',
+      phase: 'build',
+      reason: 'The human approved the design.',
+      actor: 'user',
+    });
+    expect(building).toMatchObject({ phase: 'build', status: 'in_progress' });
+    await expect(
+      service.taskAct('F1', { action: 'phase', phase: 'live', reason: 'Skip the built checkpoint.', actor: 'user' }),
+    ).rejects.toMatchObject({ code: 'transition' });
+  });
+
+  test('investigate ends at done after human research approval and never enters build', async () => {
+    await created({ workflow: 'investigate' });
+    await service.taskAct('F1', {
+      action: 'phase',
+      phase: 'research',
+      reason: 'Collect evidence for the investigation.',
+      actor: 'ms-lead',
+    });
+    await expect(
+      service.taskAct('F1', { action: 'phase', phase: 'build', reason: 'Try to build it.', actor: 'user' }),
+    ).rejects.toMatchObject({ code: 'transition' });
+    const done = await service.taskAct('F1', {
+      action: 'phase',
+      phase: 'done',
+      reason: 'The human accepted the investigation document.',
+      actor: 'user',
+    });
+    expect(done).toMatchObject({ phase: 'done', status: 'done' });
+  });
+
+  test('dependencies block visibly, cycles are refused, and dependents prevent dropping', async () => {
+    await created({ title: 'Foundation' });
+    await created({ title: 'Consumer', dependsOn: ['#f1'] });
+
+    const consumer = await service.taskDetail('F2');
+    expect(consumer?.task).toMatchObject({
+      blocked: true,
+      blockedReason: 'Waiting on #F1',
+      blockedBy: ['F1'],
+    });
+    await expect(service.taskAct('F1', { action: 'dependency', taskId: '#F2' })).rejects.toMatchObject({
+      code: 'cycle',
+    });
+    await expect(
+      service.taskAct('F1', { action: 'phase', phase: 'dropped', reason: 'No longer needed.' }),
+    ).rejects.toMatchObject({ code: 'dependency-conflict' });
+
+    await service.taskAct('F1', { action: 'phase', phase: 'build', reason: 'Start the dependency.' });
+    await service.taskAct('F1', { action: 'phase', phase: 'built', reason: 'The dependency is built.' });
+    expect((await service.taskDetail('F2'))?.task).toMatchObject({ blocked: false, blockedBy: [] });
+
+    await service.taskAct('F2', { action: 'dependency', taskId: 'F1', remove: true });
+    const dropped = await service.taskAct('F1', {
+      action: 'phase',
+      phase: 'dropped',
+      reason: 'The consumer no longer depends on it.',
+    });
+    expect(dropped.phase).toBe('dropped');
+  });
+
+  test('a missing dependency is refused before the new task record is written', async () => {
+    await expect(created({ dependsOn: ['#F99'] })).rejects.toMatchObject({ code: 'not-found' });
+    expect((await service.taskList()).tasks).toHaveLength(0);
+  });
+
+  test('a completion claim advances active build only to built and is idempotent per turn', async () => {
+    fleet.push(session({ id: 'ms-builder', teammate: 'builder', turn: 3 }));
+    await created({ assignee: 'ms-builder', status: 'in_progress' });
+    const event = completionEvent('ms-builder');
+
+    // The exact stored session id remains enough even when the terminal
+    // session has fallen out of a transient fleet listing.
+    fleet = [];
+    await service.recordSessionCompletion(event);
+    await service.recordSessionCompletion(event);
+
+    const detail = await service.taskDetail('F1');
+    expect(detail?.task).toMatchObject({ phase: 'built', status: 'built' });
+    expect(detail?.task.status).not.toBe('live');
+    expect(detail?.activity.filter(entry => entry.type === 'session')).toHaveLength(1);
+    expect(detail?.activity.filter(entry => entry.data['completionClaim'] === true)).toHaveLength(1);
+    expect(detail?.activity.at(-1)?.data).toMatchObject({
+      phaseFrom: 'build',
+      phaseTo: 'built',
+      completionClaim: true,
+    });
+  });
+
+  test('a completion claim in research is recorded but cannot cross the approval gate', async () => {
+    fleet.push(session({ id: 'ms-researcher', teammate: 'researcher', turn: 5 }));
+    await created({
+      assignee: 'ms-researcher',
+      workflow: 'research-first',
+      phase: 'research',
+    });
+    await service.recordSessionCompletion(completionEvent('ms-researcher', 5));
+
+    const detail = await service.taskDetail('F1');
+    expect(detail?.task).toMatchObject({
+      phase: 'research',
+      status: 'researched',
+      blocked: true,
+      blockedReason: 'Human approval is required to leave research.',
+      blockedBy: [],
+    });
+    expect(detail?.activity.map(entry => entry.type)).toEqual(['created', 'session']);
   });
 });
 
@@ -249,11 +468,90 @@ describe('note, link, assign and order actions', () => {
   test('every mutation keeps the activity sequence gap-free', async () => {
     await created();
     await service.taskAct('F1', { action: 'assign', assignee: 'ines' });
-    await service.taskAct('F1', { action: 'status', status: 'in_progress' });
+    await service.taskAct('F1', { action: 'status', status: 'in_progress', reason: 'Implementation started.' });
     await service.taskAct('F1', { action: 'note', text: 'started' });
     await service.taskAct('F1', { action: 'order', order: 1 });
     const detail = await service.taskDetail('F1');
     expect(detail?.activity.map(entry => entry.seq)).toEqual([1, 2, 3, 4, 5]);
+  });
+});
+
+describe('advisory file claims', () => {
+  test('files supplied at create are normalized, de-duped, persisted, and named in history', async () => {
+    const task = await created({ files: ['  src/a.ts  ', 'src/a.ts', 'src/b.ts', '   '] });
+    // Trimmed, blanks dropped, duplicates removed, spelling preserved.
+    expect(task.files).toEqual(['src/a.ts', 'src/b.ts']);
+    const detail = await service.taskDetail('F1');
+    expect(detail?.task.files).toEqual(['src/a.ts', 'src/b.ts']);
+    // alisa: the initial claim set is visible in authoritative history, not just the snapshot.
+    expect(detail?.activity[0]).toMatchObject({ type: 'created', data: { files: ['src/a.ts', 'src/b.ts'] } });
+  });
+
+  test('a create with no files defaults to an empty claim set and omits it from history', async () => {
+    const task = await created();
+    expect(task.files).toEqual([]);
+    const detail = await service.taskDetail('F1');
+    expect(detail?.activity[0]?.data).not.toHaveProperty('files');
+  });
+
+  test('file add and remove update the set and append authoritative history naming path/operation/actor', async () => {
+    await created();
+    const added = await service.taskAct('F1', { action: 'file', path: '  src/api.ts ' });
+    expect(added.files).toEqual(['src/api.ts']);
+    const withTwo = await service.taskAct('F1', {
+      action: 'file',
+      path: 'src/store.ts',
+      reason: 'store owns persistence',
+      actor: 'ms-lead',
+      actorName: 'ines',
+    });
+    expect(withTwo.files).toEqual(['src/api.ts', 'src/store.ts']);
+    const removed = await service.taskAct('F1', { action: 'file', path: 'src/api.ts', remove: true });
+    expect(removed.files).toEqual(['src/store.ts']);
+    const detail = await service.taskDetail('F1');
+    const fileEntries = detail?.activity.filter(entry => entry.type === 'file') ?? [];
+    expect(fileEntries.map(entry => entry.data)).toEqual([
+      { path: 'src/api.ts', operation: 'add' },
+      { path: 'src/store.ts', operation: 'add', reason: 'store owns persistence' },
+      { path: 'src/api.ts', operation: 'remove' },
+    ]);
+    // The actor who made the change is named on the authoritative entry.
+    expect(fileEntries[1]).toMatchObject({ actor: 'ms-lead', actorName: 'ines' });
+  });
+
+  test('a reason on a file claim is optional — an add with none is accepted without friction', async () => {
+    await created();
+    const view = await service.taskAct('F1', { action: 'file', path: 'src/x.ts' });
+    expect(view.files).toEqual(['src/x.ts']);
+    const detail = await service.taskDetail('F1');
+    const fileEntry = detail?.activity.find(entry => entry.type === 'file');
+    expect(fileEntry?.data).toEqual({ path: 'src/x.ts', operation: 'add' });
+    expect(fileEntry?.data).not.toHaveProperty('reason');
+  });
+
+  test('claiming the same path twice, or removing an unclaimed path, is refused', async () => {
+    await created({ files: ['src/a.ts'] });
+    await expect(service.taskAct('F1', { action: 'file', path: 'src/a.ts' })).rejects.toThrow('already claims');
+    await expect(service.taskAct('F1', { action: 'file', path: 'src/z.ts', remove: true })).rejects.toThrow(
+      'does not claim',
+    );
+    // a blank path is refused
+    await expect(service.taskAct('F1', { action: 'file', path: '   ' })).rejects.toThrow('required');
+  });
+
+  test('file overlap is advisory ONLY — it derives no dependency, blocker, or Attention', async () => {
+    const a = await created({ title: 'A', files: ['shared/config.ts'] });
+    const b = await created({ title: 'B' });
+    // B claims the very same file A already claims.
+    const claimed = await service.taskAct(b.id, { action: 'file', path: 'shared/config.ts' });
+    // No dependency edge is invented in either direction.
+    expect(claimed.dependsOn).toEqual([]);
+    expect((await service.taskDetail(a.id))?.task.dependsOn).toEqual([]);
+    // No blocker is derived, and no dependency activity is written for a file claim.
+    expect(claimed.blocked).toBe(false);
+    const bDetail = await service.taskDetail(b.id);
+    expect(bDetail?.activity.some(entry => entry.type === 'dependency')).toBe(false);
+    expect(bDetail?.activity.filter(entry => entry.type === 'file')).toHaveLength(1);
   });
 });
 
@@ -263,9 +561,14 @@ describe('concurrent actions on one task cannot lose an update', () => {
   // later write reverted the other's declared fields. Every action is now one
   // read→write→append transaction under a single hold of the task's lock.
   test('a note posted alongside a status change never reverts the status', async () => {
-    await created();
+    await created({ status: 'in_progress' });
     await Promise.all([
-      service.taskAct('F1', { action: 'status', status: 'built', note: 'gates green' }),
+      service.taskAct('F1', {
+        action: 'status',
+        status: 'built',
+        reason: 'Focused gates are green.',
+        note: 'gates green',
+      }),
       service.taskAct('F1', { action: 'note', text: 'concurrent note' }),
     ]);
     const detail = await service.taskDetail('F1');
@@ -286,7 +589,11 @@ describe('concurrent actions on one task cannot lose an update', () => {
   test('a burst of different actions all land, and none clobbers another field', async () => {
     await created({ assignee: null });
     await Promise.all([
-      service.taskAct('F1', { action: 'status', status: 'in_progress' }),
+      service.taskAct('F1', {
+        action: 'status',
+        status: 'in_progress',
+        reason: 'Implementation started.',
+      }),
       service.taskAct('F1', { action: 'assign', assignee: 'ines' }),
       service.taskAct('F1', { action: 'order', order: 2 }),
       service.taskAct('F1', { action: 'link', field: 'branch', value: 'feat/browser' }),
@@ -305,10 +612,22 @@ describe('concurrent actions on one task cannot lose an update', () => {
   });
 
   test('two status writes both appear in history and the LAST one is declared', async () => {
-    await created();
+    await created({ status: 'in_progress' });
     await Promise.all([
-      service.taskAct('F1', { action: 'status', status: 'built', actor: 'ms-lead', actorName: 'zelda' }),
-      service.taskAct('F1', { action: 'status', status: 'live', actor: 'ms-lead', actorName: 'zelda' }),
+      service.taskAct('F1', {
+        action: 'status',
+        status: 'built',
+        reason: 'The build is complete.',
+        actor: 'ms-lead',
+        actorName: 'zelda',
+      }),
+      service.taskAct('F1', {
+        action: 'status',
+        status: 'live',
+        reason: 'The built artifact was deployed.',
+        actor: 'ms-lead',
+        actorName: 'zelda',
+      }),
     ]);
     const detail = await service.taskDetail('F1');
     const statuses = detail?.activity.filter(entry => entry.type === 'status') ?? [];
@@ -487,6 +806,45 @@ describe('session ownership, provenance, and live convergence', () => {
     expect(events).toHaveLength(2);
     expect(events[1]).toMatchObject({ sequence: 0, sessionId: 'ms-lead', type: 'tasks.updated' });
     expect((events[1]?.data as { tasks: unknown[] }).tasks).toHaveLength(1);
+  });
+
+  test('satisfying a dependency also refreshes a dependent task in another session', async () => {
+    fleet.push(session({ id: 'ms-other', teammate: 'other' }));
+    const events: KTeamEvent[] = [];
+    const unsubscribe = service.subscribe(event => events.push(event));
+    await created({ title: 'Shared foundation' });
+    await service.sessionTaskCreate(
+      'ms-other',
+      {
+        kind: 'feature',
+        title: 'Cross-session consumer',
+        ask: { text: 'Build the consumer.', source: 'kteam://messages/ms-other/1' },
+        dependsOn: ['#F1'],
+      },
+      { actor: 'ms-other', actorName: 'other' },
+    );
+    events.length = 0;
+
+    await service.taskAct('F1', {
+      action: 'phase',
+      phase: 'build',
+      reason: 'Start the shared foundation.',
+      actor: 'ms-lead',
+    });
+    events.length = 0;
+    await service.taskAct('F1', {
+      action: 'phase',
+      phase: 'built',
+      reason: 'The shared foundation is now available.',
+      actor: 'ms-lead',
+    });
+    unsubscribe();
+
+    expect(events.map(event => event.sessionId)).toEqual(['ms-lead', 'ms-other']);
+    const dependent = events.find(event => event.sessionId === 'ms-other');
+    expect((dependent?.data as { tasks: Array<{ id: string; blocked: boolean }> }).tasks).toContainEqual(
+      expect.objectContaining({ id: 'F2', blocked: false }),
+    );
   });
 
   test('records are session-local while fleet ids remain globally unique', async () => {

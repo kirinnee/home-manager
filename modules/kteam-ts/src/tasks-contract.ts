@@ -21,8 +21,11 @@ import {
   TASK_BOARD_ORDER,
   TASK_KINDS,
   TASK_LINK_FIELDS,
+  TASK_PHASES,
   TASK_STATUSES,
+  TASK_WORKFLOWS,
   TaskError,
+  taskReference,
   type TaskActionInput,
   type TaskActionName,
   type TaskActivity,
@@ -30,12 +33,14 @@ import {
   type TaskDetailResponse,
   type TaskKind,
   type TaskLinkField,
+  type TaskPhase,
   type TaskStaleness,
   type TaskStatus,
   type TaskSummary,
 } from './tasks-types';
 import { normalizeTaskId } from './tasks-store';
 import { isSafeTaskSessionId } from './session-tasks-store';
+import { taskPhaseFromStatus } from './tasks-workflow';
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -210,6 +215,33 @@ export function parseTaskCreateBody(body: unknown): TaskCreateInput {
   };
   const description = optionalString(raw, 'description');
   if (description !== undefined) input.description = description;
+  if (raw['ask'] === undefined) {
+    throw new TaskError('invalid', 'ask requires verbatim text and a source message link');
+  }
+  const ask = asObject(raw['ask']);
+  const text = optionalString(ask, 'text');
+  const source = optionalString(ask, 'source');
+  if (text === undefined || source === undefined) {
+    throw new TaskError('invalid', 'ask requires verbatim text and a source message link');
+  }
+  input.ask = { text, source };
+  const workflow = optionalString(raw, 'workflow');
+  if (workflow !== undefined) {
+    if (!(TASK_WORKFLOWS as readonly string[]).includes(workflow)) {
+      throw new TaskError('invalid', `workflow must be one of ${TASK_WORKFLOWS.join(', ')}`);
+    }
+    input.workflow = workflow as TaskCreateInput['workflow'];
+  }
+  const phase = optionalString(raw, 'phase');
+  if (phase !== undefined) input.phase = phase as TaskPhase;
+  if (raw['dependsOn'] !== undefined) {
+    if (!Array.isArray(raw['dependsOn'])) throw new TaskError('invalid', 'dependsOn must be an array');
+    input.dependsOn = raw['dependsOn'] as string[];
+  }
+  if (raw['files'] !== undefined) {
+    if (!Array.isArray(raw['files'])) throw new TaskError('invalid', 'files must be an array of paths');
+    input.files = raw['files'] as string[];
+  }
   const status = optionalString(raw, 'status');
   if (status !== undefined) input.status = status as TaskStatus;
   const reason = optionalString(raw, 'statusReason') ?? optionalString(raw, 'reason');
@@ -264,11 +296,52 @@ export function parseTaskActionBody(body: unknown): TaskActionInput {
         ...(note !== undefined ? { note } : {}),
       };
     }
+    case 'phase': {
+      const phase = raw['phase'];
+      if (typeof phase !== 'string' || !(TASK_PHASES as readonly string[]).includes(phase)) {
+        throw new TaskError('invalid', `phase must be one of ${TASK_PHASES.join(', ')}`);
+      }
+      const reason = optionalString(raw, 'reason');
+      if (reason === undefined) throw new TaskError('invalid', 'phase requires a reason');
+      return { action: 'phase', phase: phase as TaskPhase, reason };
+    }
     case 'note':
     case 'feedback': {
       const text = optionalString(raw, 'text');
       if (text === undefined) throw new TaskError('invalid', `${action} requires text`);
       return { action, text };
+    }
+    case 'clarify': {
+      const text = optionalString(raw, 'text');
+      const source = optionalString(raw, 'source');
+      if (text === undefined || source === undefined) {
+        throw new TaskError('invalid', 'clarify requires verbatim text and a source message link');
+      }
+      return { action: 'clarify', text, source };
+    }
+    case 'dependency': {
+      const taskId = optionalString(raw, 'taskId') ?? optionalString(raw, 'dependsOn');
+      if (taskId === undefined) throw new TaskError('invalid', 'dependency requires a task id');
+      if (raw['remove'] !== undefined && typeof raw['remove'] !== 'boolean') {
+        throw new TaskError('invalid', 'dependency remove must be a boolean');
+      }
+      return { action: 'dependency', taskId, ...(raw['remove'] === true ? { remove: true } : {}) };
+    }
+    case 'file': {
+      const path = optionalString(raw, 'path');
+      if (path === undefined) throw new TaskError('invalid', 'file requires a path');
+      if (raw['remove'] !== undefined && typeof raw['remove'] !== 'boolean') {
+        throw new TaskError('invalid', 'file remove must be a boolean');
+      }
+      // A reason is advisory for file claims — accepted and recorded when present,
+      // never required (unlike phase/status moves).
+      const reason = optionalString(raw, 'reason');
+      return {
+        action: 'file',
+        path,
+        ...(raw['remove'] === true ? { remove: true } : {}),
+        ...(reason !== undefined ? { reason } : {}),
+      };
     }
     case 'link': {
       const field = raw['field'];
@@ -311,11 +384,15 @@ export function taskErrorStatus(code: TaskError['code']): number {
       return 413;
     case 'read-only':
     case 'forbidden':
+    case 'approval-required':
       return 403;
     case 'ambiguous':
+    case 'dependency-conflict':
       return 409;
     case 'invalid':
     case 'reason-required':
+    case 'transition':
+    case 'cycle':
       return 400;
   }
 }
@@ -334,6 +411,7 @@ export function taskErrorBody(error: TaskError): { error: string; code: TaskErro
 /** The board's legend, kept because it is the user's vocabulary. */
 export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
   live: '🟢 LIVE',
+  done: '✅ DONE',
   built: '🟡 BUILT',
   in_progress: '🔵 IN PROGRESS',
   designed: '🟣 DESIGNED',
@@ -358,17 +436,18 @@ const cell = (value: string | null | undefined): string => (value ?? '').replace
  *  hatch and a terminal view, NEVER written back to a file. */
 export function renderTaskBoardMd(tasks: readonly TaskSummary[]): string {
   const lines: string[] = ['# Tasks', ''];
-  const blocked = tasks.filter(task => task.status === 'blocked');
+  const blocked = tasks.filter(task => task.blocked);
+  const blockedIds = new Set(blocked.map(task => task.id));
   if (blocked.length > 0) {
     lines.push('## What I need from you', '');
     for (const task of blocked) {
-      lines.push(`- **${task.id}** ${cell(task.title)} — ${cell(task.statusReason)}`);
+      lines.push(`- **${taskReference(task.id)}** ${cell(task.title)} — ${cell(task.blockedReason)}`);
     }
     lines.push('');
   }
   for (const status of TASK_BOARD_ORDER) {
     if (status === 'blocked') continue; // already shown, loudly, at the top
-    const rows = tasks.filter(task => task.status === status);
+    const rows = tasks.filter(task => task.status === status && !blockedIds.has(task.id));
     if (rows.length === 0) continue;
     lines.push(
       `## ${TASK_STATUS_LABEL[status]} (${rows.length})`,
@@ -378,7 +457,9 @@ export function renderTaskBoardMd(tasks: readonly TaskSummary[]): string {
     );
     for (const task of rows) {
       const flag = task.live.staleness === null ? '' : ` ⚠️ ${task.live.staleness}`;
-      lines.push(`| ${task.id} | ${cell(task.title)} | ${cell(task.assignee)}${flag} | ${cell(task.statusReason)} |`);
+      lines.push(
+        `| ${taskReference(task.id)} | ${cell(task.title)} | ${cell(task.assignee)}${flag} | ${cell(task.statusReason)} |`,
+      );
     }
     lines.push('');
   }
@@ -390,10 +471,27 @@ export function renderTaskBoardMd(tasks: readonly TaskSummary[]): string {
  *  annotation (clearly labelled as derived), the full brief, then the history. */
 export function renderTaskMd(detail: TaskDetailResponse): string {
   const { task, activity } = detail;
+  // Renderers also serve compatibility callers, which may still hold a v1
+  // object that did not pass through the additive on-disk parser. Treat every
+  // v2 collection as empty instead of crashing the whole CLI on an old record.
+  const dependsOn = task.dependsOn ?? [];
+  const blockedBy = task.blockedBy ?? [];
+  const clarifications = task.clarifications ?? [];
+  const files = task.files ?? [];
+  const workflow = task.workflow ?? 'quick';
+  const phase = task.phase ?? taskPhaseFromStatus(task.status);
+  const ask = task.ask ?? {
+    text: task.description.trim().length > 0 ? task.description : task.title,
+    source: 'legacy record (source unavailable)',
+  };
   const lines: string[] = [
-    `# ${task.id} · ${task.title}`,
+    `# ${taskReference(task.id)} · ${task.title}`,
     '',
     `- status: **${TASK_STATUS_LABEL[task.status]}**${task.statusReason ? ` — ${task.statusReason}` : ''}`,
+    `- workflow: ${workflow}`,
+    `- phase: ${phase}`,
+    `- depends on: ${dependsOn.length > 0 ? dependsOn.map(taskReference).join(', ') : '—'}`,
+    `- files (advisory): ${files.length > 0 ? files.map(file => `\`${file}\``).join(', ') : '—'}`,
     `- kind: ${task.kind}`,
     `- assignee: ${task.assignee ?? '—'}`,
     `- repo: ${task.repo ?? '—'}`,
@@ -403,6 +501,13 @@ export function renderTaskMd(detail: TaskDetailResponse): string {
   if (task.live.staleness !== null) {
     lines.push(`- ⚠️ derived: ${TASK_STALENESS_COPY[task.live.staleness]} (declared status unchanged)`);
   }
+  if (task.blocked) {
+    lines.push(
+      `- 🚧 blocked since ${task.blockedSince ?? 'unknown'}: ${task.blockedReason ?? 'unknown'}${
+        blockedBy.length > 0 ? ` (${blockedBy.map(taskReference).join(', ')})` : ''
+      }`,
+    );
+  }
   const links = [
     ...task.links.prs.map(pr => `PR ${pr}`),
     ...(task.links.branch !== null ? [`branch ${task.links.branch}`] : []),
@@ -410,6 +515,15 @@ export function renderTaskMd(detail: TaskDetailResponse): string {
     ...task.links.docs.map(doc => `doc ${doc}`),
   ];
   if (links.length > 0) lines.push('', '## Links', '', ...links.map(link => `- ${link}`));
+  lines.push('', '## Original ask', '', `> ${ask.text.replace(/\n/g, '\n> ')}`, '', `[Source message](${ask.source})`);
+  if (clarifications.length > 0) {
+    lines.push('', '## Clarifications', '');
+    for (const clarification of clarifications) {
+      lines.push(
+        `- ${clarification.at} (${clarification.byName ?? clarification.by}): ${clarification.text} — ${clarification.source}`,
+      );
+    }
+  }
   lines.push('', '## Brief', '', task.description.trim().length > 0 ? task.description : '_No description._');
   lines.push('', '## Activity', '');
   if (activity.length === 0) lines.push('_No activity._');
@@ -437,6 +551,14 @@ export function summariseActivity(entry: TaskActivity): string {
     case 'note':
     case 'feedback':
       return text ?? '';
+    case 'clarification':
+      return `${text ?? ''} (${String(data['source'] ?? 'source unavailable')})`;
+    case 'dependency':
+      return `${String(data['operation'] ?? 'add')} ${taskReference(String(data['taskId'] ?? '?'))}`;
+    case 'file':
+      return `${String(data['operation'] ?? 'add')} \`${String(data['path'] ?? '?')}\`${
+        data['reason'] ? ` (${String(data['reason'])})` : ''
+      }`;
     case 'link':
       return `${String(data['field'] ?? '?')} = ${String(data['value'] ?? '')}`;
     case 'assign':
@@ -444,6 +566,8 @@ export function summariseActivity(entry: TaskActivity): string {
     case 'order':
       return `${String(data['from'] ?? '—')} → ${String(data['to'] ?? '—')}`;
     case 'session':
-      return `${String(data['session'] ?? '?')} ${String(data['event'] ?? '')}`;
+      return `${String(data['session'] ?? '?')} ${String(data['event'] ?? '')}${
+        data['turn'] !== undefined ? ` (turn ${String(data['turn'])})` : ''
+      }`;
   }
 }

@@ -37,11 +37,19 @@ const fleetUrl = (pathAndQuery: string) => new URL(`http://d${pathAndQuery}`);
 
 const actor = { actor: 'ms-lead', actorName: 'zelda' };
 
+// Transport parsing now REQUIRES a verbatim ask {text, source} on every create,
+// so the shared helper carries a valid one; a test that wants a malformed ask
+// overrides it explicitly (spreading `ask: undefined` removes it).
 async function create(body: Record<string, unknown> = {}, requestId?: string) {
   return api.handle({
     method: 'POST',
     url: url('/v1/tasks'),
-    body: { kind: 'feature', title: 'File browser', ...body },
+    body: {
+      kind: 'feature',
+      title: 'File browser',
+      ask: { text: 'Build a file browser', source: 'ms-lead:msg-1' },
+      ...body,
+    },
     actor,
     ...(requestId !== undefined ? { requestId } : {}),
   });
@@ -116,7 +124,13 @@ describe('mutations', () => {
     const response = await api.handle({
       method: 'POST',
       url: url('/v1/tasks'),
-      body: { kind: 'bug', title: 'x', actor: 'somebody-else', actorName: 'forged' },
+      body: {
+        kind: 'bug',
+        title: 'x',
+        ask: { text: 'x', source: 'ms-lead:msg-1' },
+        actor: 'somebody-else',
+        actorName: 'forged',
+      },
       actor,
     });
     expect((response?.body as TaskView).createdBy).toBe('ms-lead');
@@ -126,21 +140,59 @@ describe('mutations', () => {
 
   test('POST /v1/tasks/:id applies an action and answers the updated view', async () => {
     await create();
+    // A fresh task sits at phase todo; the only legal quick-workflow step is into
+    // build (status in_progress). A status move requires a nonblank reason.
     const response = await api.handle({
       method: 'POST',
       url: url('/v1/tasks/F1'),
-      body: { action: 'status', status: 'built', note: 'gates green' },
+      body: { action: 'status', status: 'in_progress', reason: 'starting the build' },
       actor,
     });
     expect(response?.status).toBe(200);
-    expect(response?.body).toMatchObject({ status: 'built' });
+    expect(response?.body).toMatchObject({ status: 'in_progress', phase: 'build' });
+  });
+
+  test('advisory file claims survive create and the file action end-to-end', async () => {
+    // Repeated files on create are normalized and persisted on the view.
+    const created = await create({ files: ['  src/a.ts  ', 'src/a.ts', 'src/b.ts'] });
+    expect(created?.status).toBe(201);
+    expect((created?.body as TaskView).files).toEqual(['src/a.ts', 'src/b.ts']);
+
+    // The file action adds a claim (no reason required) and answers the updated view.
+    const added = await api.handle({
+      method: 'POST',
+      url: url('/v1/tasks/F1'),
+      body: { action: 'file', path: 'src/c.ts' },
+      actor,
+    });
+    expect(added?.status).toBe(200);
+    expect((added?.body as TaskView).files).toEqual(['src/a.ts', 'src/b.ts', 'src/c.ts']);
+
+    // --remove drops a claim; the change is named in authoritative history.
+    const removed = await api.handle({
+      method: 'POST',
+      url: url('/v1/tasks/F1'),
+      body: { action: 'file', path: 'src/a.ts', remove: true },
+      actor,
+    });
+    expect((removed?.body as TaskView).files).toEqual(['src/b.ts', 'src/c.ts']);
+
+    const detail = (await api.handle({ method: 'GET', url: url('/v1/tasks/F1') }))?.body as TaskDetailResponse;
+    expect(detail.activity.filter(entry => entry.type === 'file').map(entry => entry.data)).toEqual([
+      { path: 'src/c.ts', operation: 'add' },
+      { path: 'src/a.ts', operation: 'remove' },
+    ]);
   });
 
   test('legacy global POST routes transparently write the caller session store', async () => {
     const created = await api.handle({
       method: 'POST',
       url: fleetUrl('/v1/tasks'),
-      body: { kind: 'feature', title: 'old client create' },
+      body: {
+        kind: 'feature',
+        title: 'old client create',
+        ask: { text: 'old client create', source: 'ms-lead:msg-1' },
+      },
       actor,
     });
     expect(created).toMatchObject({ status: 201, body: { id: 'F1', sessionId: 'ms-lead' } });
@@ -149,11 +201,11 @@ describe('mutations', () => {
     const updated = await api.handle({
       method: 'POST',
       url: fleetUrl('/v1/tasks/F1'),
-      body: { action: 'status', status: 'built' },
+      body: { action: 'status', status: 'in_progress', reason: 'picking it up' },
       actor,
     });
-    expect(updated).toMatchObject({ status: 200, body: { id: 'F1', status: 'built', sessionId: 'ms-lead' } });
-    expect((await service.sessionTaskDetail('ms-lead', 'F1'))?.task.status).toBe('built');
+    expect(updated).toMatchObject({ status: 200, body: { id: 'F1', status: 'in_progress', sessionId: 'ms-lead' } });
+    expect((await service.sessionTaskDetail('ms-lead', 'F1'))?.task.status).toBe('in_progress');
   });
 
   test('cross-session writes map forbidden to HTTP 403', async () => {
@@ -164,7 +216,7 @@ describe('mutations', () => {
     const response = await api.handle({
       method: 'POST',
       url: new URL('http://d/v1/sessions/ms-other/tasks'),
-      body: { kind: 'feature', title: 'wrong board' },
+      body: { kind: 'feature', title: 'wrong board', ask: { text: 'wrong board', source: 'ms-lead:msg-1' } },
       actor,
     });
     expect(response).toMatchObject({ status: 403, body: { code: 'forbidden' } });
@@ -272,14 +324,14 @@ describe('idempotency (a retried POST must not double-write history)', () => {
     const a = await api.handle({
       method: 'POST',
       url: url('/v1/tasks'),
-      body: { kind: 'feature', title: 'Ordered', repo: '/a' },
+      body: { kind: 'feature', title: 'Ordered', repo: '/a', ask: { text: 'Ordered', source: 'ms-lead:msg-1' } },
       actor,
       requestId: 'req-order',
     });
     const b = await api.handle({
       method: 'POST',
       url: url('/v1/tasks'),
-      body: { repo: '/a', title: 'Ordered', kind: 'feature' },
+      body: { ask: { source: 'ms-lead:msg-1', text: 'Ordered' }, repo: '/a', title: 'Ordered', kind: 'feature' },
       actor,
       requestId: 'req-order',
     });
@@ -312,7 +364,7 @@ describe('idempotency (a retried POST must not double-write history)', () => {
     const statused = await api.handle({
       method: 'POST',
       url: url('/v1/tasks/F1'),
-      body: { action: 'status', status: 'built' },
+      body: { action: 'status', status: 'in_progress', reason: 'starting work' },
       actor,
       requestId: 'req-mixed',
     });
@@ -323,9 +375,9 @@ describe('idempotency (a retried POST must not double-write history)', () => {
       actor,
       requestId: 'req-mixed',
     });
-    expect((statused?.body as TaskView).status).toBe('built');
+    expect((statused?.body as TaskView).status).toBe('in_progress');
     expect((assigned?.body as TaskView).assignee).toBe('ines');
-    expect((assigned?.body as TaskView).status).toBe('built');
+    expect((assigned?.body as TaskView).status).toBe('in_progress');
   });
 
   test('a retry whose ACTOR metadata changed is still one write (rename between attempts)', async () => {
@@ -493,7 +545,13 @@ describe('actor attribution (never authorization)', () => {
     await api.handle({
       method: 'POST',
       url: url('/v1/tasks'),
-      body: { kind: 'bug', title: 'x', actor: 'ms-forged', actorName: 'somebody' },
+      body: {
+        kind: 'bug',
+        title: 'x',
+        ask: { text: 'x', source: 'ms-lead:msg-1' },
+        actor: 'ms-forged',
+        actorName: 'somebody',
+      },
       actor,
     });
     const detail = (await api.handle({ method: 'GET', url: url('/v1/tasks/B1') }))?.body as TaskDetailResponse;
@@ -520,6 +578,92 @@ describe('request adaptation', () => {
   test('a missing request-id header simply means "not deduped"', () => {
     const request = { method: 'GET', headers: { get: () => null } };
     expect(taskApiRequestFrom(request, url('/v1/tasks'), undefined, {}).requestId).toBeUndefined();
+  });
+});
+
+describe('v2 ask + workflow fields cross the transport', () => {
+  test('a create with no ask is a 400 invalid, and writes nothing', async () => {
+    const response = await create({ ask: undefined });
+    expect(response?.status).toBe(400);
+    expect(response?.body).toMatchObject({ code: 'invalid' });
+    // The refusal happens at the transport before the service, so the board stays empty.
+    const listed = (await api.handle({ method: 'GET', url: url('/v1/tasks') }))?.body as TaskListResponse;
+    expect(listed.tasks).toHaveLength(0);
+  });
+
+  test('an ask missing text or missing source is a 400 invalid', async () => {
+    expect((await create({ ask: { source: 'ms-lead:msg-1' } }))?.status).toBe(400);
+    expect((await create({ ask: { text: 'only text' } }))?.status).toBe(400);
+    const listed = (await api.handle({ method: 'GET', url: url('/v1/tasks') }))?.body as TaskListResponse;
+    expect(listed.tasks).toHaveLength(0);
+  });
+
+  test('the verbatim ask round-trips onto the created view, the detail, and the summary', async () => {
+    const ask = { text: 'Please build the file browser exactly like the mock', source: 'ms-lead:msg-42' };
+    const created = (await create({ ask }))?.body as TaskView;
+    expect(created.ask).toEqual(ask);
+
+    const detail = (await api.handle({ method: 'GET', url: url('/v1/tasks/F1') }))?.body as TaskDetailResponse;
+    expect(detail.task.ask).toEqual(ask);
+
+    const listed = (await api.handle({ method: 'GET', url: url('/v1/tasks') }))?.body as TaskListResponse;
+    // The list row omits the full ask but reports its source and length honestly.
+    expect(listed.tasks[0]).toMatchObject({ askSource: ask.source, askChars: ask.text.length });
+    expect(listed.tasks[0]).not.toHaveProperty('ask');
+  });
+
+  test('v2 create fields round-trip, and absent ones take their defaults', async () => {
+    // Defaults: no workflow/phase/dependsOn supplied → quick / todo / [].
+    const plain = (await create())?.body as TaskView;
+    expect(plain).toMatchObject({ workflow: 'quick', phase: 'todo', dependsOn: [] });
+
+    // An explicit workflow is honoured; phase still starts at todo.
+    const researchFirst = (await create({ title: 'Investigate first', workflow: 'research-first' }))?.body as TaskView;
+    expect(researchFirst).toMatchObject({ workflow: 'research-first', phase: 'todo' });
+
+    // A declared dependency edge survives the round-trip.
+    const dependent = (await create({ title: 'Depends on F1', dependsOn: ['F1'] }))?.body as TaskView;
+    expect(dependent.dependsOn).toEqual(['F1']);
+    const detail = (await api.handle({ method: 'GET', url: url(`/v1/tasks/${dependent.id}`) }))
+      ?.body as TaskDetailResponse;
+    expect(detail.task.dependsOn).toEqual(['F1']);
+  });
+
+  test('a v2 action round-trips: a clarify lands in the detail with its source', async () => {
+    await create();
+    const response = await api.handle({
+      method: 'POST',
+      url: url('/v1/tasks/F1'),
+      body: { action: 'clarify', text: 'Actually make it read-only', source: 'ms-lead:msg-7' },
+      actor,
+    });
+    expect(response?.status).toBe(200);
+    const detail = (await api.handle({ method: 'GET', url: url('/v1/tasks/F1') }))?.body as TaskDetailResponse;
+    expect(detail.task.clarifications).toMatchObject([{ text: 'Actually make it read-only', source: 'ms-lead:msg-7' }]);
+    expect(detail.activity.map(entry => entry.type)).toContain('clarification');
+  });
+
+  test('a legal phase step round-trips; a gate exit refuses the agent but admits the human', async () => {
+    // research-first starts at research; the agent may sit in the gate but not leave it.
+    await create({ workflow: 'research-first', status: 'researched' });
+    const blockedExit = await api.handle({
+      method: 'POST',
+      url: url('/v1/tasks/F1'),
+      body: { action: 'phase', phase: 'design', reason: 'research is done' },
+      actor,
+    });
+    expect(blockedExit?.status).toBe(403);
+    expect(blockedExit?.body).toMatchObject({ code: 'approval-required' });
+
+    // The human at the CLI/UI resolves to session:null and may approve the exit.
+    const humanExit = await api.handle({
+      method: 'POST',
+      url: url('/v1/tasks/F1'),
+      body: { action: 'phase', phase: 'design', reason: 'approved' },
+      actor: { actor: 'user', actorName: 'user' },
+    });
+    expect(humanExit?.status).toBe(200);
+    expect(humanExit?.body).toMatchObject({ phase: 'design' });
   });
 });
 
