@@ -299,7 +299,7 @@ describe('manual resume vs automatic recovery dedupe', () => {
       await launchMayFinish;
       await originalLaunch();
     };
-    fixture.manager.tmux.state = async () => ({
+    (fixture.manager.tmux as Loose).state = async () => ({
       alive: fixture.launches > 0,
       dead: fixture.launches === 0,
       promptReady: fixture.launches > 0,
