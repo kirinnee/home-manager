@@ -115,8 +115,7 @@ export async function requestRemoteEnhancement(input: RemoteEnhancementInput): P
   try {
     let response: Response;
     try {
-      const fetchImpl: RemoteEnhancementFetch = input.fetchImpl ?? ((request, init) => fetch(request, init));
-      response = await fetchImpl(STT_ENHANCE_PATH, {
+      const requestInit: RequestInit = {
         method: 'POST',
         headers: {
           authorization: `Bearer ${auth.token}`,
@@ -131,7 +130,10 @@ export async function requestRemoteEnhancement(input: RemoteEnhancementInput): P
           userContext: input.userContext,
         }),
         signal: controller.signal,
-      });
+      };
+      response = input.fetchImpl
+        ? await input.fetchImpl(STT_ENHANCE_PATH, requestInit)
+        : await fetch(STT_ENHANCE_PATH, requestInit);
     } catch {
       if (timedOut) {
         throw new RemoteEnhancementError(
