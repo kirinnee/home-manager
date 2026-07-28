@@ -1,5 +1,8 @@
+// Imported through `./model-cost`, which is now a re-export shim over
+// `src/model-cost.ts`. Keeping the UI's import path under test is the point:
+// the daemon and the browser must price a token identically.
 import { describe, expect, test } from 'bun:test';
-import { billingFromUsageFeed, estimateModelCost } from './model-cost';
+import { PRICING_REGISTRY, billingFromUsageFeed, estimateEquivalentApiCost, estimateModelCost } from './model-cost';
 
 const base = {
   migrated: false,
@@ -83,6 +86,11 @@ describe('estimateModelCost', () => {
     });
   });
 
+  test('reaches the shared registry through the shim', () => {
+    expect(PRICING_REGISTRY.length).toBeGreaterThan(0);
+    expect(PRICING_REGISTRY.every(entry => /^\d{4}-\d{2}-\d{2}$/.test(entry.verifiedAt))).toBe(true);
+  });
+
   test("requires exact Anthropic TTL splits and honours Sonnet's bounded price window", () => {
     const anthropic = {
       ...base,
@@ -109,5 +117,42 @@ describe('estimateModelCost', () => {
     expect(estimateModelCost('api_metered', { ...anthropic, pricingModel: 'claude-haiku-4-5-20251001' })).toMatchObject(
       { kind: 'known', pricingModel: 'claude-haiku-4-5-20251001' },
     );
+  });
+});
+
+describe('estimateEquivalentApiCost', () => {
+  test('answers the comparison question regardless of how the session was billed', () => {
+    // Identical arithmetic to the billed estimate — this is the same tokens at
+    // public rates, so a subscription session gets a number where the BILLED
+    // estimate correctly refuses one.
+    expect(estimateEquivalentApiCost(base)).toMatchObject({ kind: 'known', usdMicros: 34_225_000n });
+    expect(estimateEquivalentApiCost({ ...base, migrated: true })).toMatchObject({ kind: 'known' });
+    expect(estimateEquivalentApiCost({ ...base, migrated: undefined })).toMatchObject({ kind: 'known' });
+    expect(estimateModelCost('subscription', base)).toEqual({ kind: 'unknown', reason: 'subscription_billing' });
+  });
+
+  test('a model with NO price entry stays unknown — no neighbouring rate is borrowed', () => {
+    const unpriced = estimateEquivalentApiCost({ ...base, pricingModel: 'some-unpriced-model' });
+    expect(unpriced).toEqual({ kind: 'unknown', reason: 'unknown_pricing_model' });
+    expect(estimateEquivalentApiCost({ ...base, pricingModel: null })).toEqual({
+      kind: 'unknown',
+      reason: 'missing_pricing_model',
+    });
+    // Every token-math refusal survives the billing gates being dropped.
+    expect(estimateEquivalentApiCost({ ...base, createdAt: '2026-07-27T23:59:59.999Z' })).toMatchObject({
+      kind: 'unknown',
+      reason: 'pricing_outside_validity_window',
+    });
+    expect(estimateEquivalentApiCost({ ...base, outputTokens: null })).toMatchObject({
+      kind: 'unknown',
+      reason: 'incomplete_token_counts',
+    });
+    expect(estimateEquivalentApiCost({ ...base, inputTokens: 1 })).toMatchObject({
+      kind: 'unknown',
+      reason: 'negative_uncached_input',
+    });
+    expect(
+      estimateEquivalentApiCost({ ...base, pricingModel: 'claude-fable-5', cacheWrite5mInputTokens: 40_000 }),
+    ).toMatchObject({ kind: 'unknown', reason: 'missing_anthropic_cache_write_split' });
   });
 });

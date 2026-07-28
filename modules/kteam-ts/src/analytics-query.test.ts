@@ -26,6 +26,20 @@ describe('analytics query language', () => {
     expect(parsed.canonical).toBe('avg by (model, harness) {label=ui-r28-*, status=completed}');
   });
 
+  test('parses exact tree grouping and root-included subtree selection', () => {
+    expect(parseAnalyticsQuery('sum by (tree) {tree=ms1}')).toMatchObject({
+      canonical: 'sum by (tree) {tree=ms1}',
+      aggregation: 'sum',
+      groupBy: ['tree'],
+      matchers: [{ label: 'tree', op: '=', value: 'ms1', wildcard: false }],
+    });
+  });
+
+  test('rejects glob and regex tree anchors clearly', () => {
+    expect(() => parseAnalyticsQuery('{tree=ms1*}')).toThrow('tree filters take one exact session id');
+    expect(() => parseAnalyticsQuery('{tree=~ms1}')).toThrow('tree filters take one exact session id');
+  });
+
   test('supports bounded raw filtering and quoted commas', () => {
     const parsed = parseAnalyticsQuery(`{id=session-1, cwd='/tmp/a,b', wrapper=~claude-auto-*, label=don't-ship}`);
     expect(parsed.aggregation).toBeUndefined();

@@ -5,6 +5,7 @@ import { appendFile, mkdtemp, rm, stat, utimes, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { AnalyticsIndex } from './analytics-index';
+import { estimateEquivalentApiCost } from './model-cost';
 
 const opened: AnalyticsIndex[] = [];
 const roots: string[] = [];
@@ -80,6 +81,8 @@ function insertSession(
     model?: string;
     harness?: 'claude' | 'codex';
     label?: string;
+    /** Defaults to a dangling `lead`, which sanitizes to a session's own root. */
+    parent?: string | null;
     transcriptFile?: string;
     createdAt?: string;
     startedAt?: string;
@@ -97,7 +100,7 @@ function insertSession(
     mode: 'auto',
     cwd: '/work/repo',
     label: input.label ?? 'batch-a',
-    parent: 'lead',
+    parent: input.parent === undefined ? 'lead' : input.parent,
     createdAt,
     ...(input.transcriptFile ? { transcriptFile: input.transcriptFile } : {}),
   };
@@ -710,6 +713,235 @@ describe('AnalyticsIndex', () => {
     const retried = await index.refreshTokens({ byteBudget: 1024 * 1024, sourceLimit: 10 });
     expect(retried.sources).toBe(1);
     expect(retried.errors).toBe(1);
+    source.close();
+  });
+
+  test('roots lineages exactly like the client, including cycles and broken parents', async () => {
+    const { file, source } = await fixture();
+    const tree = (id: string, parent: string | null) =>
+      insertSession(source, { id, status: 'completed', parent, label: id });
+    tree('root', null);
+    tree('mid', 'root');
+    tree('leaf', 'mid');
+    // A parent edge that closes a loop is dropped from BOTH members, but an
+    // ordinary child hanging off a loop member keeps its edge and lands in
+    // that member's tree rather than rooting itself.
+    tree('loop-a', 'loop-b');
+    tree('loop-b', 'loop-a');
+    tree('loop-child', 'loop-a');
+    tree('selfie', 'selfie');
+    tree('orphan', 'no-such-session');
+
+    const index = new AnalyticsIndex({ databasePath: file });
+    opened.push(index);
+
+    const rooted = index.query('count by (tree)');
+    expect(rooted.kind).toBe('aggregate');
+    if (rooted.kind !== 'aggregate') throw new Error('expected aggregate');
+    expect(rooted.results.map(result => [result.labels.tree, result.sessions])).toEqual([
+      ['loop-a', 2],
+      ['loop-b', 1],
+      ['orphan', 1],
+      ['root', 3],
+      ['selfie', 1],
+    ]);
+
+    const ids = (query: string): string[] => {
+      const response = index.query(query);
+      if (response.kind !== 'raw') throw new Error('expected raw');
+      return response.results.map(result => result.id).sort();
+    };
+    // The anchor is part of its own subtree at every depth.
+    expect(ids('{tree=root}')).toEqual(['leaf', 'mid', 'root']);
+    expect(ids('{tree=mid}')).toEqual(['leaf', 'mid']);
+    expect(ids('{tree=leaf}')).toEqual(['leaf']);
+    expect(ids('{tree=loop-a}')).toEqual(['loop-a', 'loop-child']);
+    expect(ids('{tree=loop-b}')).toEqual(['loop-b']);
+    expect(ids('{tree=selfie}')).toEqual(['selfie']);
+    expect(ids('{tree=no-such-session}')).toEqual([]);
+
+    const raw = index.query('{tree=root}');
+    if (raw.kind !== 'raw') throw new Error('expected raw');
+    expect(raw.results.every(result => result.tree === 'root')).toBe(true);
+    // Queries that never mention `tree` must not imply a lineage placement.
+    const untreed = index.query('{status=completed}');
+    expect(untreed.kind === 'raw' && untreed.results[0]?.tree).toBeUndefined();
+
+    const narrow = new AnalyticsIndex({ databasePath: file, groupLimit: 2 });
+    opened.push(narrow);
+    expect(() => narrow.query('count by (tree)')).toThrow('{tree=<session-id>}');
+    source.close();
+  });
+
+  test('keeps deep chains and long cycles complete beyond the former 64-edge cutoff', async () => {
+    const { file, source } = await fixture();
+    const add = (id: string, parent: string | null) =>
+      insertSession(source, { id, status: 'completed', parent, label: id });
+
+    const chainIds = ['deep-root'];
+    add(chainIds[0]!, null);
+    for (let depth = 1; depth <= 70; depth += 1) {
+      const id = `deep-${String(depth).padStart(3, '0')}`;
+      add(id, chainIds.at(-1)!);
+      chainIds.push(id);
+    }
+
+    // buildLineage drops every edge within this 65-member cycle, but keeps the
+    // ordinary child edge into cycle-000. Thus every cycle member is a root,
+    // and only cycle-000 owns the child.
+    const cycleIds = Array.from({ length: 65 }, (_, index) => `cycle-${String(index).padStart(3, '0')}`);
+    for (const [index, id] of cycleIds.entries()) add(id, cycleIds[(index + 1) % cycleIds.length]!);
+    add('cycle-child', cycleIds[0]!);
+
+    const index = new AnalyticsIndex({ databasePath: file });
+    opened.push(index);
+
+    const rooted = index.query('count by (tree)');
+    if (rooted.kind !== 'aggregate') throw new Error('expected aggregate');
+    const counts = new Map(rooted.results.map(result => [result.labels.tree, result.sessions]));
+    expect(counts.size).toBe(66);
+    expect(counts.get('deep-root')).toBe(chainIds.length);
+    expect(counts.get(cycleIds[0]!)).toBe(2);
+    expect(cycleIds.slice(1).every(id => counts.get(id) === 1)).toBe(true);
+
+    const subtree = (anchor: string): Set<string> => {
+      const response = index.query(`{tree=${anchor}}`);
+      if (response.kind !== 'raw') throw new Error('expected raw');
+      expect(response.truncated).toBe(false);
+      return new Set(response.results.map(result => result.id));
+    };
+    expect(subtree('deep-root')).toEqual(new Set(chainIds));
+    expect(subtree(cycleIds[0]!)).toEqual(new Set([cycleIds[0]!, 'cycle-child']));
+    expect(subtree(cycleIds[1]!)).toEqual(new Set([cycleIds[1]!]));
+    source.close();
+  });
+
+  test('prices equivalent API cost in SQL exactly as the shared registry does', async () => {
+    const { root, file, source } = await fixture();
+    const priced = '2026-07-28T12:00:00.000Z';
+    const codexFile = path.join(root, 'cost-codex.jsonl');
+    const anthropicFile = path.join(root, 'cost-anthropic.jsonl');
+    const unpricedFile = path.join(root, 'cost-unpriced.jsonl');
+    const splitFile = path.join(root, 'cost-split.jsonl');
+    await writeFile(
+      codexFile,
+      `${JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.6-sol' } })}\n${JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: {
+              input_tokens: 1_000,
+              output_tokens: 200,
+              cached_input_tokens: 300,
+              cache_write_input_tokens: 100,
+            },
+          },
+        },
+      })}\n`,
+    );
+    const claudeUsage = (id: string, model: string, cacheCreation?: Record<string, number>) =>
+      `${JSON.stringify({
+        type: 'assistant',
+        message: {
+          id,
+          model,
+          usage: {
+            input_tokens: 600,
+            cache_read_input_tokens: 300,
+            cache_creation_input_tokens: 100,
+            ...(cacheCreation ? { cache_creation: cacheCreation } : {}),
+            output_tokens: 200,
+          },
+        },
+      })}\n`;
+    await writeFile(
+      anthropicFile,
+      claudeUsage('cost-anthropic', 'claude-opus-5', {
+        ephemeral_5m_input_tokens: 60,
+        ephemeral_1h_input_tokens: 40,
+      }),
+    );
+    await writeFile(
+      unpricedFile,
+      claudeUsage('cost-unpriced', 'claude-transcript-model', {
+        ephemeral_5m_input_tokens: 60,
+        ephemeral_1h_input_tokens: 40,
+      }),
+    );
+    // Anthropic cache writes without an exact TTL breakdown cannot be priced.
+    await writeFile(splitFile, claudeUsage('cost-split', 'claude-opus-5'));
+
+    const sessions: Array<{ id: string; harness: 'claude' | 'codex'; transcriptFile?: string; createdAt: string }> = [
+      { id: 'openai', harness: 'codex', transcriptFile: codexFile, createdAt: priced },
+      // Same usage, but created before this rate identity took effect.
+      { id: 'stale-window', harness: 'codex', transcriptFile: codexFile, createdAt: '2026-07-01T00:00:00.000Z' },
+      { id: 'anthropic', harness: 'claude', transcriptFile: anthropicFile, createdAt: priced },
+      { id: 'unpriced', harness: 'claude', transcriptFile: unpricedFile, createdAt: priced },
+      { id: 'split', harness: 'claude', transcriptFile: splitFile, createdAt: priced },
+      { id: 'no-tokens', harness: 'claude', createdAt: priced },
+    ];
+    for (const session of sessions) {
+      insertSession(source, {
+        id: session.id,
+        status: 'completed',
+        label: session.id,
+        harness: session.harness,
+        wrapper: session.harness === 'codex' ? 'codex-auto-loge' : 'claude-auto-loge',
+        model: `display-${session.id}`,
+        createdAt: session.createdAt,
+        finishedAt: session.createdAt,
+        ...(session.transcriptFile ? { transcriptFile: session.transcriptFile } : {}),
+      });
+      if (session.transcriptFile)
+        addChatSource(source, session.id, session.transcriptFile, await stat(session.transcriptFile));
+    }
+
+    const index = new AnalyticsIndex({ databasePath: file });
+    opened.push(index);
+    expect((await index.refreshTokens({ byteBudget: 1024 * 1024, sourceLimit: 20 })).errors).toBe(0);
+
+    const rows = index.query('{}');
+    if (rows.kind !== 'raw') throw new Error('expected raw');
+    const byId = new Map(rows.results.map(result => [result.id, result]));
+    // Hand-checked against the published rates so SQL and TypeScript cannot be
+    // wrong together: (1000-300-100)*$5 + 300*$0.50 + 100*$6.25 + 200*$30 per
+    // million tokens is 9_775 USD micros.
+    expect(byId.get('openai')?.equivalentApiCostUsdMicros).toBe(9_775);
+    // Claude reports uncached input separately, so gross input is 600+300+100.
+    // (1000-300-100)*$5 + 300*$0.50 + 60*$6.25 + 40*$10 + 200*$25 per million.
+    expect(byId.get('anthropic')?.equivalentApiCostUsdMicros).toBe(8_925);
+    for (const id of ['stale-window', 'unpriced', 'split', 'no-tokens']) {
+      expect(byId.get(id)?.equivalentApiCostUsdMicros).toBeNull();
+    }
+    // An unpriced model still reports every token it does know.
+    expect(byId.get('unpriced')?.tokens).toBe(1_200);
+    expect(byId.get('split')?.cacheWriteInputTokens).toBe(100);
+
+    for (const result of rows.results) {
+      const expected = estimateEquivalentApiCost(result);
+      expect(result.equivalentApiCostUsdMicros).toBe(expected.kind === 'known' ? Number(expected.usdMicros) : null);
+    }
+
+    const single = index.query('sum {label=openai}');
+    expect(single.kind === 'aggregate' && single.results[0]?.equivalentApiCostUsdMicros).toEqual({
+      value: 9_775,
+      known: 1,
+      total: 1,
+    });
+    // One unpriceable session makes the whole group unknown, never a partial sum.
+    const whole = index.query('sum');
+    expect(whole.kind === 'aggregate' && whole.results[0]?.equivalentApiCostUsdMicros).toEqual({
+      value: null,
+      known: 2,
+      total: 6,
+    });
+    const counted = index.query('count');
+    expect(counted.kind === 'aggregate' && counted.results[0]?.equivalentApiCostUsdMicros).toEqual({
+      value: null,
+      known: 0,
+      total: 0,
+    });
     source.close();
   });
 });

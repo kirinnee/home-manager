@@ -1,6 +1,8 @@
 import type { AnalyticsMeasure, AnalyticsResponse } from './analytics-types';
+import { EQUIVALENT_API_COST_CAVEAT, PRICING_REGISTRY_VERIFIED_AT } from './model-cost';
 
 const DASH = '—';
+const UNKNOWN = 'unknown';
 
 function compactNumber(value: number): string {
   const absolute = Math.abs(value);
@@ -24,10 +26,23 @@ function percent(value: number): string {
   return `${value.toFixed(value >= 10 ? 1 : 2)}%`;
 }
 
+function usdMicros(value: number): string {
+  const dollars = value / 1_000_000;
+  const decimals = Math.abs(dollars) >= 10 ? 2 : Math.abs(dollars) >= 0.1 ? 3 : 4;
+  return `$${dollars.toFixed(decimals)}`;
+}
+
 function measure(value: AnalyticsMeasure, format: (number: number) => string): string {
   if (value.value !== null) return format(value.value);
   if (value.known === 0) return DASH;
   return `${DASH}[${value.known}/${value.total}]`;
+}
+
+/** Cost unknowns stay explicit: zero priced rows is materially different from
+ * a zero-dollar result, and raw rows have no known/total measure to annotate. */
+function equivalentCost(value: AnalyticsMeasure | undefined): string {
+  if (!value) return UNKNOWN;
+  return value.value === null ? `${DASH}[${value.known}/${value.total}]` : usdMicros(value.value);
 }
 
 function renderTable(header: string[], rows: string[][]): string {
@@ -53,14 +68,44 @@ export function renderAnalytics(response: AnalyticsResponse): string {
     const countOnly = response.aggregation === 'count';
     const header = countOnly
       ? ['GROUP', 'SESSIONS', 'STALL', 'FAIL', 'DONE']
-      : ['GROUP', 'SESSIONS', 'TOKENS', 'TURNS', 'DURATION', 'TTFO', 'CTX END', 'STALL', 'FAIL', 'DONE'];
-    const rows = response.results.map(result => {
+      : [
+          'GROUP',
+          'SESSIONS',
+          'INPUT',
+          'OUTPUT',
+          'CACHE READ',
+          'CACHE WRITE',
+          'TOTAL',
+          'EQUIV API COST',
+          'TURNS',
+          'DURATION',
+          'TTFO',
+          'CTX END',
+          'STALL',
+          'FAIL',
+          'DONE',
+        ];
+    const results = countOnly
+      ? response.results
+      : [...response.results].sort((left, right) => {
+          const leftCost = left.equivalentApiCostUsdMicros?.value ?? null;
+          const rightCost = right.equivalentApiCostUsdMicros?.value ?? null;
+          if (leftCost === null) return rightCost === null ? 0 : 1;
+          if (rightCost === null) return -1;
+          return rightCost - leftCost;
+        });
+    const rows = results.map(result => {
       const rates = [percent(result.rates.stall), percent(result.rates.failure), percent(result.rates.completion)];
       if (countOnly) return [groupLabel(result.labels), String(result.sessions), ...rates];
       return [
         groupLabel(result.labels),
         String(result.sessions),
+        measure(result.inputTokens, compactNumber),
+        measure(result.outputTokens, compactNumber),
+        measure(result.cachedInputTokens, compactNumber),
+        measure(result.cacheWriteInputTokens, compactNumber),
         measure(result.tokens, compactNumber),
+        equivalentCost(result.equivalentApiCostUsdMicros),
         measure(result.turns, compactNumber),
         measure(result.durationMs, duration),
         measure(result.timeToFirstOutputMs, duration),
@@ -70,7 +115,7 @@ export function renderAnalytics(response: AnalyticsResponse): string {
     });
     lines.push(rows.length ? renderTable(header, rows) : 'No sessions match the query.');
   } else {
-    const header = ['ID', 'STATUS', 'MODEL', 'WRAPPER', 'LABEL', 'TOKENS', 'TURNS', 'DURATION'];
+    const header = ['ID', 'STATUS', 'MODEL', 'WRAPPER', 'LABEL', 'TOKENS', 'EQUIV API COST', 'TURNS', 'DURATION'];
     const rows = response.results.map(result => [
       result.id,
       result.status ?? DASH,
@@ -78,6 +123,9 @@ export function renderAnalytics(response: AnalyticsResponse): string {
       result.wrapper ?? DASH,
       result.label ?? DASH,
       result.tokens === null ? DASH : compactNumber(result.tokens),
+      result.equivalentApiCostUsdMicros === null || result.equivalentApiCostUsdMicros === undefined
+        ? UNKNOWN
+        : usdMicros(result.equivalentApiCostUsdMicros),
       result.turns === null ? DASH : compactNumber(result.turns),
       result.durationMs === null ? DASH : duration(result.durationMs),
     ]);
@@ -95,5 +143,7 @@ export function renderAnalytics(response: AnalyticsResponse): string {
   );
   if (response.index.refreshing) lines.push('Token backfill is running in the daemon.');
   lines.push(`${DASH}[known/total] means the group is incomplete; kteam does not substitute zero or a partial value.`);
+  lines.push(EQUIVALENT_API_COST_CAVEAT);
+  lines.push(`Rates verified ${PRICING_REGISTRY_VERIFIED_AT}.`);
   return `${lines.join('\n')}\n`;
 }

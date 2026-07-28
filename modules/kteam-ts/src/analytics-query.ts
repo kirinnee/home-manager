@@ -87,7 +87,12 @@ function parseMatchers(source: string): AnalyticsMatcher[] {
       );
     const op = match[2] as '=' | '=~';
     const value = parseValue(match[3]!);
-    return [{ label: label as AnalyticsLabel, op, value, wildcard: op === '=~' || /[*?]/.test(value) }];
+    const wildcard = op === '=~' || /[*?]/.test(value);
+    // A subtree of every glob match is both expensive and ambiguous; an honest
+    // error beats silently walking an unbounded number of lineages.
+    if (label === 'tree' && wildcard)
+      throw new AnalyticsQueryError('tree filters take one exact session id: use {tree=<session-id>}');
+    return [{ label: label as AnalyticsLabel, op, value, wildcard }];
   });
 }
 

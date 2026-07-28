@@ -2,19 +2,28 @@ import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { AnalyticsRawResponse } from '../../../src/analytics-types';
 import { ApiError } from '../lib/api';
+import { buildLineage } from '../lib/lineage';
 import { peerMedianCost } from '../lib/lineage-costs';
 import type { ModelCost } from '../lib/model-cost';
+import type { SessionView } from '../types';
 import {
   AnalyticsSurface,
   analyticsErrorMessage,
   analyticsIdQuery,
   analyticsRows,
+  analyticsStarterQueries,
+  analyticsTreeQuery,
   boundedTreeQueries,
   bucketCoverage,
   formatUsdMicros,
   ownCostCopy,
+  resolveLineageRoot,
   type CostedRow,
 } from './AnalyticsSurface';
+
+function session(id: string, parent?: string): SessionView {
+  return { config: { id, parent }, state: {}, directory: '/repo' } as unknown as SessionView;
+}
 
 const known: ModelCost = {
   kind: 'known',
@@ -82,6 +91,47 @@ describe('analytics ledger facts', () => {
     const peers = (count: number) => Array.from({ length: count }, (_, index) => ({ ...target, id: `peer-${index}` }));
     expect(peerMedianCost(target, peers(4))).toBeUndefined();
     expect(peerMedianCost(target, peers(5))?.sampleSize).toBe(5);
+  });
+
+  test('resolves the tree anchor through buildLineage rather than re-walking parents', () => {
+    const lineage = buildLineage([
+      session('root'),
+      session('mid', 'root'),
+      session('leaf', 'mid'),
+      // buildLineage already drops self-parents, dangling parents and cycles;
+      // this surface must inherit that judgement, not repeat it.
+      session('self', 'self'),
+      session('orphan', 'missing'),
+      session('cycle-a', 'cycle-b'),
+      session('cycle-b', 'cycle-a'),
+    ]);
+    expect(resolveLineageRoot('leaf', lineage)).toBe('root');
+    expect(resolveLineageRoot('root', lineage)).toBe('root');
+    expect(resolveLineageRoot('self', lineage)).toBe('self');
+    expect(resolveLineageRoot('orphan', lineage)).toBe('orphan');
+    expect(resolveLineageRoot('cycle-a', lineage)).toBe('cycle-a');
+    expect(resolveLineageRoot('unindexed', lineage)).toBe('unindexed');
+  });
+
+  test('starter queries teach the grammar and anchor the tree at the resolved root', () => {
+    expect(analyticsTreeQuery('ms1"a')).toBe('{tree="ms1\\"a"}');
+    const starters = analyticsStarterQueries('root-1');
+    expect(starters.map(starter => starter.query)).toEqual([
+      'sum by (id) {tree="root-1"}',
+      'sum {tree="root-1"}',
+      'sum by (wrapper)',
+      'sum by (model)',
+      'avg by (model)',
+      'count by (status)',
+    ]);
+    // Without a resolved lineage the tree starters are absent rather than
+    // pointed at the focused session and quietly mislabelled "whole tree".
+    expect(analyticsStarterQueries(null).map(starter => starter.id)).toEqual([
+      'by-wrapper',
+      'by-model',
+      'avg-model',
+      'count-status',
+    ]);
   });
 
   test('keeps the pre-load surface useful and explains a 503', () => {

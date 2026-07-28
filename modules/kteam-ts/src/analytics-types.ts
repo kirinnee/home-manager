@@ -18,6 +18,9 @@ export const ANALYTICS_LABELS = [
   'cwd',
   'repo',
   'parent',
+  /** Sanitized lineage root; `{tree=<id>}` selects that anchor plus every
+   *  transitive descendant. Exact ids only — no glob, no `=~`. */
+  'tree',
   'day',
   'week',
   'token_data',
@@ -66,6 +69,10 @@ export interface AnalyticsAggregateResult {
   /** Schema v5 always emits these; optionality keeps older typed response fixtures compatible. */
   cacheWrite5mInputTokens?: AnalyticsMeasure;
   cacheWrite1hInputTokens?: AnalyticsMeasure;
+  /** What this usage would cost at public API rates, in USD micros — a
+   *  comparison, never a bill. Unknown whenever any matched session has no
+   *  usable price, exactly like every other measure. */
+  equivalentApiCostUsdMicros?: AnalyticsMeasure;
   turns: AnalyticsMeasure;
   durationMs: AnalyticsMeasure;
   timeToFirstOutputMs: AnalyticsMeasure;
@@ -82,10 +89,14 @@ export interface AnalyticsRawSession {
   label: string | null;
   cwd: string | null;
   parent: string | null;
+  /** Sanitized lineage root, present only when the query mentioned `tree`. */
+  tree?: string | null;
   day: string | null;
   week: string | null;
   createdAt: string | null;
   pricingModel: string | null;
+  /** Per-session equivalent API cost in USD micros; null when unpriceable. */
+  equivalentApiCostUsdMicros?: number | null;
   tokens: number | null;
   inputTokens: number | null;
   outputTokens: number | null;

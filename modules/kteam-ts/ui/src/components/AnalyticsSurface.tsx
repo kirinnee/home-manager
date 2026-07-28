@@ -3,10 +3,17 @@
 // raw questions and explains the coverage those questions can prove.
 
 import { useEffect, useId, useMemo, useState } from 'react';
-import { Loader2, Search } from 'lucide-react';
-import type { AnalyticsRawResponse, AnalyticsResponse, AnalyticsRawSession } from '../../../src/analytics-types';
+import { Loader2 } from 'lucide-react';
+import type {
+  AnalyticsAggregateResponse,
+  AnalyticsRawResponse,
+  AnalyticsRawSession,
+  AnalyticsResponse,
+} from '../../../src/analytics-types';
 import { api, ApiError } from '../lib/api';
-import { buildLineage } from '../lib/lineage';
+import { buildLineage, type LineageIndex } from '../lib/lineage';
+import { AnalyticsQueryAutocomplete } from './AnalyticsQueryAutocomplete';
+import { AnalyticsResultTable, formatUsdMicros } from './AnalyticsResultTable';
 import {
   peerMedianCost,
   rollupLineageCosts,
@@ -36,6 +43,11 @@ type AnalyticsState =
   | { phase: 'ready'; data: LoadedAnalytics; error: null }
   | { phase: 'error'; data: null; error: string };
 
+type TreeTableState =
+  | { phase: 'loading'; response: null; error: null }
+  | { phase: 'ready'; response: AnalyticsAggregateResponse; error: null }
+  | { phase: 'error'; response: null; error: string };
+
 interface LoadedAnalytics {
   rowsById: ReadonlyMap<string, CostRow>;
   comparison: AnalyticsRawResponse | null;
@@ -62,18 +74,79 @@ export function analyticsIdQuery(id: string): string {
   return `{id=${JSON.stringify(id)}}`;
 }
 
+/** The subtree anchored at `id`, root included. `tree` takes one exact id. */
+export function analyticsTreeQuery(id: string): string {
+  return `{tree=${JSON.stringify(id)}}`;
+}
+
+export interface AnalyticsStarter {
+  id: string;
+  label: string;
+  query: string;
+  hint: string;
+}
+
+/** Visible starters that TEACH the grammar rather than hiding it: each one puts
+ * a real, editable query in the box. The tree pair covers both halves of the
+ * lineage question — the broken-down descendants (with the table's strict
+ * roll-up) and the server's single rolled-up row. */
+export function analyticsStarterQueries(rootId: string | null): AnalyticsStarter[] {
+  const tree = rootId
+    ? [
+        {
+          id: 'tree-rows',
+          label: 'Whole tree',
+          query: `sum by (id) ${analyticsTreeQuery(rootId)}`,
+          hint: 'Every session in the resolved lineage, root included, one row each.',
+        },
+        {
+          id: 'tree-total',
+          label: 'Tree total',
+          query: `sum ${analyticsTreeQuery(rootId)}`,
+          hint: 'The same subtree rolled up by the server into one row.',
+        },
+      ]
+    : [];
+  return [
+    ...tree,
+    { id: 'by-wrapper', label: 'By CLI', query: 'sum by (wrapper)', hint: 'Tokens and cost per CLI account.' },
+    { id: 'by-model', label: 'By model', query: 'sum by (model)', hint: 'Tokens and cost per model.' },
+    {
+      id: 'avg-model',
+      label: 'Avg per session',
+      query: 'avg by (model)',
+      hint: 'avg, min and max work everywhere sum does.',
+    },
+    {
+      id: 'count-status',
+      label: 'Count by status',
+      query: 'count by (status)',
+      hint: 'count returns sessions only — no token or cost measures.',
+    },
+  ];
+}
+
 export function analyticsRows(response: AnalyticsResponse): CostRow[] {
   return response.kind === 'raw' ? (response.results as CostRow[]) : [];
 }
 
-function childrenFor(rootId: string, sessions: readonly SessionView[]): string[] {
-  const lineage = buildLineage(sessions);
-  let root = rootId;
+/** Walk `buildLineage`'s edges to the lineage root. Ancestry is NEVER
+ * recomputed here: `buildLineage` already drops self-parents, dangling parents
+ * and cycles, and a second implementation would eventually disagree with the
+ * lineage surface about what a tree is. */
+export function resolveLineageRoot(id: string, lineage: Pick<LineageIndex, 'parentOf'>): string {
+  let root = id;
   const seen = new Set<string>();
   while (lineage.parentOf.has(root) && !seen.has(root)) {
     seen.add(root);
     root = lineage.parentOf.get(root)!;
   }
+  return root;
+}
+
+function childrenFor(rootId: string, sessions: readonly SessionView[]): string[] {
+  const lineage = buildLineage(sessions);
+  const root = resolveLineageRoot(rootId, lineage);
   const ids: string[] = [];
   const included = new Set<string>();
   const pending = [root];
@@ -120,14 +193,10 @@ function asCosted(view: SessionView, row: CostRow, feed: ReturnType<typeof useUs
   };
 }
 
-export function formatUsdMicros(value: bigint): string {
-  const sign = value < 0n ? '-' : '';
-  const absolute = value < 0n ? -value : value;
-  const whole = absolute / 1_000_000n;
-  const micros = (absolute % 1_000_000n).toString().padStart(6, '0');
-  const fraction = micros.replace(/0+$/, '').padEnd(2, '0');
-  return `${sign}$${whole.toLocaleString('en-US')}.${fraction}`;
-}
+// One money formatter for the whole analytics surface. It lives with the table
+// so the ledger and this pane can never drift apart; re-exported because it is
+// part of this module's tested contract.
+export { formatUsdMicros };
 
 function countLabel(value: number, singular: string): string {
   return `${value} ${value === 1 ? singular : `${singular}s`}`;
@@ -184,16 +253,12 @@ function RawResult({ response }: { response: AnalyticsResponse }) {
   );
   if (response.kind === 'aggregate') {
     return (
-      <div className="grid gap-xs">
+      // min-w-0 so the table's own scroller, not this pane, absorbs a wide
+      // result. A grid item defaults to min-width:auto and would otherwise
+      // stretch the whole side pane sideways.
+      <div className="grid min-w-0 gap-xs">
         {base}
-        {response.results.map((result, index) => (
-          <div key={index} className="rounded-control border border-border-soft bg-surface px-3 py-2 text-cell text-fg">
-            {Object.entries(result.labels)
-              .map(([key, value]) => `${key}=${value ?? 'unknown'}`)
-              .join(' · ') || 'All sessions'}
-            : {result.sessions} sessions
-          </div>
-        ))}
+        <AnalyticsResultTable response={response} caption={`Result for ${response.query}`} />
       </div>
     );
   }
@@ -228,11 +293,42 @@ export function AnalyticsSurface({ sessionId }: { sessionId: string }) {
   const [queryResult, setQueryResult] = useState<AnalyticsResponse | null>(null);
   const [queryError, setQueryError] = useState<string | null>(null);
   const [querying, setQuerying] = useState(false);
+  const [treeTable, setTreeTable] = useState<TreeTableState>({ phase: 'loading', response: null, error: null });
 
   const treeIds = useMemo(() => (sessions && view ? childrenFor(view.config.id, sessions) : []), [sessions, view]);
   const queriedIds = useMemo(() => boundedTreeQueries(treeIds, sessionId), [sessionId, treeIds]);
   const treeKey = queriedIds.join('\u0000');
   const fleetContextReady = Boolean(view && sessions);
+  // childrenFor seeds its walk at the resolved lineage ROOT, so treeIds[0] is
+  // that root — the same anchor the lineage surface draws from.
+  const rootId = treeIds[0] ?? null;
+
+  // The whole-tree ledger is the DEFAULT view, not something behind a starter
+  // chip: one `sum by (id) {tree=<root>}` gives every session in the lineage,
+  // root included, and the table's strict roll-up supplies the total.
+  useEffect(() => {
+    if (!rootId) return;
+    let current = true;
+    setTreeTable({ phase: 'loading', response: null, error: null });
+    void api
+      .analytics(`sum by (id) ${analyticsTreeQuery(rootId)}`)
+      .then(response => {
+        // A response that arrives after the reader moved to another session
+        // describes a different tree. Dropping it is the only honest option.
+        if (!current) return;
+        if (response.kind !== 'aggregate') {
+          setTreeTable({ phase: 'error', response: null, error: 'The tree query did not return an aggregate.' });
+          return;
+        }
+        setTreeTable({ phase: 'ready', response, error: null });
+      })
+      .catch(reason => {
+        if (current) setTreeTable({ phase: 'error', response: null, error: analyticsErrorMessage(reason) });
+      });
+    return () => {
+      current = false;
+    };
+  }, [rootId]);
 
   useEffect(() => {
     if (!fleetContextReady) return;
@@ -344,17 +440,22 @@ export function AnalyticsSurface({ sessionId }: { sessionId: string }) {
     return peerMedianCost(target, candidates);
   }, [own, sessionId, state.data?.comparison, usage.feed, viewById]);
 
-  async function runQuery() {
+  async function runQuery(source = query) {
     setQuerying(true);
     setQueryError(null);
     setQueryResult(null);
     try {
-      setQueryResult(await api.analytics(query.trim() || undefined));
+      setQueryResult(await api.analytics(source.trim() || undefined));
     } catch (reason) {
       setQueryError(analyticsErrorMessage(reason));
     } finally {
       setQuerying(false);
     }
+  }
+
+  function runStarter(starter: AnalyticsStarter) {
+    setQuery(starter.query);
+    void runQuery(starter.query);
   }
 
   if (!sessions || !view)
@@ -374,6 +475,11 @@ export function AnalyticsSurface({ sessionId }: { sessionId: string }) {
 
   const account = usage.index.get(view.config.binary);
   const selectedRows = own ? [own.row] : [];
+  const starters = analyticsStarterQueries(rootId);
+  const treeSuggestions = [
+    ...(rootId ? [{ id: rootId, detail: 'resolved lineage root' }] : []),
+    ...(rootId === sessionId ? [] : [{ id: sessionId, detail: 'this session' }]),
+  ];
   const unqueried = Math.max(0, treeIds.length - queriedIds.length);
   const missingIndexedRows = Math.max(0, queriedIds.length - costed.length);
   const partialCoverage = [
@@ -436,6 +542,24 @@ export function AnalyticsSurface({ sessionId }: { sessionId: string }) {
               Coverage is partial: {partialCoverage}. They are unknown, not zero.
             </p>
           )}
+          {/* The same ledger the Explore box renders — one table, shown by
+              default for the focused session's whole tree rather than hidden
+              behind a click. */}
+          {treeTable.phase === 'loading' ? (
+            <p className="m-0 text-cell text-muted" role="status">
+              Reading the whole-tree ledger…
+            </p>
+          ) : treeTable.phase === 'error' ? (
+            <p className="m-0 text-meta text-warn" role="status">
+              Whole-tree ledger unavailable: {treeTable.error} The summary above still holds; nothing was assumed to be
+              zero.
+            </p>
+          ) : (
+            <AnalyticsResultTable
+              response={treeTable.response}
+              caption={`Whole resolved tree anchored at ${rootId ?? 'this session'}`}
+            />
+          )}
         </section>
 
         <section aria-labelledby="analytics-comparison" className="grid gap-xs border-t border-border-soft pt-3">
@@ -491,21 +615,32 @@ export function AnalyticsSurface({ sessionId }: { sessionId: string }) {
           <label htmlFor={queryId} className="sr-only">
             Analytics query
           </label>
+          {/* Starters teach the grammar: each chip drops a real, editable
+              query into the box rather than running something invisible. */}
+          <div className="flex gap-xs overflow-x-auto overscroll-x-contain pb-1 scroll-thin">
+            {starters.map(starter => (
+              <button
+                key={starter.id}
+                type="button"
+                className="kt-btn min-h-[44px] shrink-0 text-xs"
+                title={starter.hint}
+                onClick={() => runStarter(starter)}
+                disabled={querying}
+              >
+                {starter.label}
+              </button>
+            ))}
+          </div>
           <div className="flex gap-2">
-            <span className="relative min-w-0 flex-1">
-              <Search
-                size={15}
-                aria-hidden="true"
-                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint"
-              />
-              <input
-                id={queryId}
-                className="kt-input min-h-[44px] w-full pl-9 pr-3"
-                value={query}
-                onChange={event => setQuery(event.currentTarget.value)}
-                placeholder="count by (status)"
-              />
-            </span>
+            <AnalyticsQueryAutocomplete
+              inputId={queryId}
+              value={query}
+              onValueChange={setQuery}
+              onRun={() => void runQuery()}
+              disabled={querying}
+              sources={{ treeIds: treeSuggestions }}
+              placeholder="sum by (model)"
+            />
             <button
               type="button"
               className="kt-btn min-h-[44px] shrink-0"
