@@ -1,9 +1,9 @@
 // The dictation controller — one local engine, a pause-independent rolling
 // preview, and exactly one way for text to leave it.
 //
-// `onTranscriptEvent` publishes a read-only live preview. On stop, one clean
-// batch decode replaces that disposable preview, enhancement runs exactly once,
-// and `onDraft` inserts the result at the reader's CURRENT caret. There is no
+// `onTranscriptEvent` publishes a read-only live preview. On stop, the newest
+// bounded window settles with the flushed microphone tail, enhancement runs
+// exactly once, and `onDraft` inserts at the reader's CURRENT caret. There is no
 // `onSubmit`, no `onSend`, and no path from model output to message sending.
 //
 // TAP CONTROL. `start()` is called synchronously from the mic button so the
@@ -35,6 +35,7 @@ import { insertTranscript, readSelection, type SelectionLike } from '../lib/stt/
 import { enhance } from '../lib/stt/enhancement';
 import {
   LocalAgreementTranscriber,
+  liveTranscriptionWindowMs,
   unreadableTranscriptReason,
   type LiveTranscriptEvent,
   type LiveTranscriptSnapshot,
@@ -53,8 +54,30 @@ export interface DictationError {
  *  5–10 messages actually used, because the page is full of tool calls and
  *  thinking blocks and only a fraction of any window is user/assistant text. */
 export const CONTEXT_FETCH_LIMIT = 60;
+/** Context improves correction but must never become the slow part of stop.
+ * The daemon is local, so a quarter second is enough to get a healthy response;
+ * after that enhancement continues with the explicit dictionary alone. */
+export const CONTEXT_FETCH_TIMEOUT_MS = 250;
 export const MIN_CONTEXT_MESSAGES = 5;
 export const MAX_CONTEXT_MESSAGES = 10;
+
+const CONTEXT_FETCH_TIMED_OUT = Symbol('context-fetch-timed-out');
+
+export async function withinContextFetchBudget<T>(
+  request: Promise<T>,
+  timeoutMs = CONTEXT_FETCH_TIMEOUT_MS,
+): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<typeof CONTEXT_FETCH_TIMED_OUT>(resolve => {
+    timer = setTimeout(() => resolve(CONTEXT_FETCH_TIMED_OUT), Math.max(1, timeoutMs));
+  });
+  try {
+    const result = await Promise.race([request, timeout]);
+    return result === CONTEXT_FETCH_TIMED_OUT ? undefined : result;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 /** The last 5–10 user/assistant TEXT messages, oldest first.
  *
@@ -84,11 +107,25 @@ export function hasUsableContext(messages: readonly string[]): boolean {
   return messages.length >= MIN_CONTEXT_MESSAGES;
 }
 
+/** The expensive complete-utterance decode is data-loss rescue only. A settled
+ * bounded preview is authoritative and must not be decoded from zero again. */
+export function needsFullFinalDecode(settledText: string, sampleCount: number): boolean {
+  return sampleCount > 0 && settledText.trim().length === 0;
+}
+
 export interface DictationDraftResult {
   /** The complete next draft value — not the transcript on its own. */
   text: string;
   /** Where the caret should sit afterwards. */
   caret: number;
+  /** Non-fatal post-dictation failure. `text` already contains the raw model
+   * words; the UI keeps the panel open solely to show the real provider reason. */
+  enhancementError?: DictationError;
+}
+
+interface EnhancementOutcome {
+  text: string;
+  error?: DictationError;
 }
 
 export interface UseDictationOptions {
@@ -135,7 +172,7 @@ export interface DictationHandle {
 
 export interface LiveAudioRun {
   inputSampleRate: number | null;
-  transcriber: Pick<LocalAgreementTranscriber, 'push' | 'stop'>;
+  transcriber: Pick<LocalAgreementTranscriber, 'push' | 'finish' | 'stop'>;
 }
 
 interface ActiveLiveRun extends LiveAudioRun {
@@ -160,14 +197,14 @@ export function observeLiveSamples(run: LiveAudioRun, samples: Float32Array, inp
 }
 
 /** Stop capture first: its worklet flush synchronously delivers the last PCM to
- * `observeLiveSamples` and returns the exact full 16 kHz utterance. Then freeze
- * preview publication before handing that complete buffer to the final pass. */
+ * `observeLiveSamples`. Then settle ONE newest bounded snapshot, including that
+ * tail, instead of re-decoding the complete growing utterance from zero. */
 export async function finishLiveAudioRun(
   capture: Pick<CaptureLike, 'stop'>,
   run: LiveAudioRun,
 ): Promise<{ samples: Float32Array; preview: LiveTranscriptSnapshot }> {
   const samples = await capture.stop();
-  const preview = run.transcriber.stop();
+  const preview = await run.transcriber.finish();
   return { samples, preview };
 }
 
@@ -182,9 +219,10 @@ export function dictationErrorFromFailure(failure: unknown): DictationError | nu
 }
 
 export function useDictation(options: UseDictationOptions): DictationHandle {
-  const { sessionId, disabled } = options;
+  const { sessionId } = options;
   const settingsHandle = useSttSettings();
   const settings = options.settings ?? settingsHandle.settings;
+  const disabled = Boolean(options.disabled || !settings.enabled);
 
   const [phase, setPhase] = useState<DictationPhase>('idle');
   const [error, setError] = useState<DictationError | null>(null);
@@ -244,9 +282,13 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
     setInputMonitor(null);
     setError(null);
     setPhase('idle');
+    // This is a resource switch, not a cosmetic one. `unloadLocalEngine`
+    // explicitly releases both ONNX sessions after any in-flight decode, so a
+    // disabled phone no longer holds ~1 GB of model memory.
+    void import('../lib/stt/local-engine').then(engine => engine.unloadLocalEngine());
   }, [disabled, teardown]);
 
-  const commit = useCallback((transcript: string) => {
+  const commit = useCallback((transcript: string, enhancementError?: DictationError) => {
     const spoken = transcript.trim();
     if (spoken.length === 0) return;
     const current = optionsRef.current;
@@ -254,17 +296,17 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
     const [start, end] = readSelection(current.selectionRef?.current, draft);
     const result = insertTranscript(draft, start, end, spoken);
     // THE ONLY OUTPUT.
-    current.onDraft(result);
+    current.onDraft({ ...result, ...(enhancementError ? { enhancementError } : {}) });
   }, []);
 
   const enhanceTranscript = useCallback(
-    async (raw: string, token: number): Promise<string> => {
-      if (!settings.enhancement) return raw;
+    async (raw: string, token: number, signal: AbortSignal): Promise<EnhancementOutcome> => {
+      if (!settings.enhancement) return { text: raw };
       const { entries } = sttDictionary(settings);
       let context: string[] = [];
       if (sessionId) {
         try {
-          const page = await api.chatHistory(sessionId, undefined, CONTEXT_FETCH_LIMIT);
+          const page = await withinContextFetchBudget(api.chatHistory(sessionId, undefined, CONTEXT_FETCH_LIMIT));
           const recent = extractContextMessages(page?.records);
           // The declared window is the LAST 5–10 messages. Below the floor
           // there is no window, so there is no mined vocabulary — the
@@ -280,14 +322,42 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
           context = [];
         }
       }
-      if (!latch.isCurrent(token)) return raw;
+      if (!latch.isCurrent(token)) return { text: raw };
+      if (settings.enhancementProvider === 'groq') {
+        try {
+          const remote = await import('../lib/stt/remote-enhancement');
+          const result = await remote.requestRemoteEnhancement({
+            provider: 'groq',
+            model: settings.enhancementModel,
+            text: raw,
+            dictionary: entries,
+            context,
+            userContext: settings.userContext,
+            signal,
+          });
+          return { text: result.text };
+        } catch (failure) {
+          if (!latch.isCurrent(token) || signal.aborted) return { text: raw };
+          const code = (failure as { code?: unknown } | null)?.code;
+          return {
+            text: raw,
+            error: {
+              code: `enhancement-${typeof code === 'string' ? code : 'provider'}`,
+              message:
+                failure instanceof Error
+                  ? failure.message
+                  : 'Enhancement failed for an unknown reason; raw dictation was kept.',
+            },
+          };
+        }
+      }
       const candidate = enhance({ text: raw, dictionary: entries, context, userContext: settings.userContext });
-      if (candidate.text === raw) return raw;
+      if (candidate.text === raw) return { text: raw };
       // THE VERIFIER IS NOT OPTIONAL AND NOT ADVISORY. If it refuses — for any
       // reason — the reader gets the model's own words, unmodified. Enhancement
       // can improve a transcript; it can never cost one.
       const verdict = verifyWordOnly(raw, candidate.text);
-      return verdict.ok ? candidate.text : raw;
+      return { text: verdict.ok ? candidate.text : raw };
     },
     [latch, sessionId, settings],
   );
@@ -310,9 +380,10 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
     [latch],
   );
 
-  /** Claim and finish this generation exactly once. Live text is deliberately
-   * disposable: after capture flushes, stop its publisher, run ONE clean batch
-   * decode of the complete utterance, enhance once, then insert once. */
+  /** Claim and finish this generation exactly once. Capture flushes its tail,
+   * LocalAgreement settles the newest bounded window, enhancement runs once,
+   * then insertion happens once. A full batch decode is only an empty-preview
+   * rescue, never the normal stop-time tax. */
   const finish = useCallback(
     async (token: number): Promise<void> => {
       const capture = latch.claim(token);
@@ -341,7 +412,7 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
         if (!latch.isCurrent(token) || run.failed) return;
 
         let raw = preview.text.trim();
-        if (samples.length > 0) {
+        if (needsFullFinalDecode(raw, samples.length)) {
           try {
             const engine = await import('../lib/stt/local-engine');
             const final = await engine.transcribeLocalFinal(samples, {
@@ -350,20 +421,25 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
             });
             if (unreadableTranscriptReason(final, { requireTimestamps: false }) === null) raw = final.text.trim();
           } catch (failure) {
-            // VoiceInk uses the inverse fallback (live → batch). Here a usable
-            // live hypothesis is still safer than throwing it away because the
-            // final batch helper failed. With no preview, surface the real error.
+            // This is the rescue path only: if even the settled bounded window
+            // produced no usable words, one full decode is better than silently
+            // losing voiced audio. A normal non-empty preview never pays it.
             if (!raw) throw failure;
           }
         }
         if (!latch.isCurrent(token) || run.failed) return;
-        const finalText = raw ? await enhanceTranscript(raw, token) : '';
+        const enhanced = raw ? await enhanceTranscript(raw, token, run.finalController.signal) : { text: '' };
         if (!latch.isCurrent(token) || run.failed) return;
         const current = optionsRef.current;
-        current.onTranscriptEvent?.({ type: 'complete', generation: token, text: finalText });
-        commit(finalText);
+        current.onTranscriptEvent?.({ type: 'complete', generation: token, text: enhanced.text });
+        commit(enhanced.text, enhanced.error);
         setPendingSegments(0);
-        setPhase('idle');
+        if (enhanced.error) {
+          setError(enhanced.error);
+          setPhase('error');
+        } else {
+          setPhase('idle');
+        }
       } catch (failure) {
         if (latch.isCurrent(token)) reportRunFailure(run, failure);
       } finally {
@@ -385,6 +461,7 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
     let run!: ActiveLiveRun;
     const finalController = new AbortController();
     const transcriber = new LocalAgreementTranscriber({
+      maxBufferMs: liveTranscriptionWindowMs(capabilities.likelyMobile),
       transcribe: async (samples, signal) => {
         const engine = await (localEnginePromise ??= import('../lib/stt/local-engine'));
         return engine.transcribeLocalDetailed(samples, { capabilities, signal });

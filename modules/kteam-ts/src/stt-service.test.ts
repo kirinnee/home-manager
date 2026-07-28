@@ -5,8 +5,14 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { KTeamPaths } from './paths';
 import { encodeCanonicalWav } from './stt-audio';
+import { ENHANCEMENT_LIMITS, EnhancementError, type EnhanceRequest, type EnhanceResult } from './stt-enhancement';
 import type { PublicSttModelFile } from './stt-model';
-import { createSttService, type SttModelManager } from './stt-service';
+import {
+  STT_ENHANCEMENT_BODY_LIMIT_BYTES,
+  createSttService,
+  type SttEnhancerLike,
+  type SttModelManager,
+} from './stt-service';
 import {
   STT_MAX_PCM_BYTES,
   SttError,
@@ -129,6 +135,22 @@ class FakeWorker implements SttWorkerClientLike {
   }
 }
 
+class FakeEnhancer implements SttEnhancerLike {
+  calls: EnhanceRequest[] = [];
+  result: EnhanceResult = {
+    text: 'Corrected words.',
+    provider: 'groq',
+    model: 'llama-3.1-8b-instant',
+  };
+  failure: unknown;
+
+  async enhance(request: EnhanceRequest): Promise<EnhanceResult> {
+    this.calls.push(structuredClone(request));
+    if (this.failure) throw this.failure;
+    return this.result;
+  }
+}
+
 function bytesBody(bytes: Uint8Array): ArrayBuffer {
   return Uint8Array.from(bytes).buffer;
 }
@@ -164,16 +186,19 @@ describe('STT service API', () => {
   let root: string;
   let models: FakeModels;
   let worker: FakeWorker;
+  let enhancer: FakeEnhancer;
   let service: ReturnType<typeof createSttService>;
 
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), 'kteam-stt-service-'));
     models = new FakeModels();
     worker = new FakeWorker();
+    enhancer = new FakeEnhancer();
     service = createSttService({
       paths: { home: root, daemon: path.join(root, 'daemon') } as KTeamPaths,
       models,
       worker,
+      enhancer,
     });
   });
 
@@ -229,6 +254,96 @@ describe('STT service API', () => {
       streaming: false,
     });
     expect('partial' in body).toBe(false);
+  });
+
+  test('enhances through the daemon adapter with bounded context and canonical alias mappings', async () => {
+    const url = new URL('http://localhost/v1/stt/enhance');
+    const request = new Request(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        provider: 'groq',
+        model: 'llama-3.1-8b-instant',
+        text: 'raw words',
+        context: ['older message', 'newest message'],
+        userContext: 'project vocabulary',
+        dictionary: [
+          { term: 'kteam', aliases: ['kayteam'] },
+          { term: 'Kubernetes', aliases: [] },
+        ],
+        apiKey: 'must-not-be-forwarded',
+      }),
+    });
+    const response = await service.handleApi(request, url);
+    expect(response.status).toBe(200);
+    expect(enhancer.calls).toEqual([
+      {
+        transcript: 'raw words',
+        provider: 'groq',
+        model: 'llama-3.1-8b-instant',
+        context:
+          'Reader context:\nproject vocabulary\n\nRecent chat (oldest to newest):\nolder message\nnewest message',
+        dictionary: ['kteam', 'kayteam -> kteam', 'Kubernetes'],
+      },
+    ]);
+    expect(await responseJson(response)).toEqual({
+      text: 'Corrected words.',
+      provider: 'groq',
+      model: 'llama-3.1-8b-instant',
+      latencyMs: expect.any(Number),
+    });
+  });
+
+  test('surfaces safe enhancement failures and rejects malformed or oversized JSON before the provider', async () => {
+    const url = new URL('http://localhost/v1/stt/enhance');
+    enhancer.failure = new EnhancementError('secret_missing', 'enhancement provider is not configured');
+    let response = await service.handleApi(
+      new Request(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: 'groq', text: 'raw words' }),
+      }),
+      url,
+    );
+    expect(response.status).toBe(503);
+    expect(await responseJson(response)).toEqual({
+      error: 'enhancement provider is not configured',
+      code: 'secret_missing',
+    });
+
+    enhancer.failure = undefined;
+    response = await service.handleApi(
+      new Request(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' }),
+      url,
+    );
+    expect(response.status).toBe(400);
+    expect((await responseJson(response)).code).toBe('bad_request');
+
+    response = await service.handleApi(
+      new Request(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': String(STT_ENHANCEMENT_BODY_LIMIT_BYTES + 1),
+        },
+        body: '{}',
+      }),
+      url,
+    );
+    expect(response.status).toBe(413);
+    expect((await responseJson(response)).code).toBe('too_long');
+
+    response = await service.handleApi(
+      new Request(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: 'groq', text: 'x'.repeat(ENHANCEMENT_LIMITS.maxTranscriptChars + 1) }),
+      }),
+      url,
+    );
+    expect(response.status).toBe(413);
+    expect((await responseJson(response)).code).toBe('too_long');
+    expect(enhancer.calls).toHaveLength(1);
   });
 
   test('accepts canonical WAV and validates English-only/content-type contracts', async () => {
@@ -331,6 +446,7 @@ describe('STT service API', () => {
   test('returns route-specific Allow headers and stable unknown-route errors', async () => {
     const methodCases = [
       { pathname: '/v1/stt/status', method: 'POST', allow: 'GET' },
+      { pathname: '/v1/stt/enhance', method: 'GET', allow: 'POST' },
       { pathname: '/v1/stt/transcribe', method: 'GET', allow: 'POST' },
       { pathname: '/v1/stt/models', method: 'POST', allow: 'GET' },
       { pathname: '/v1/stt/models/daemon-fixture/install', method: 'PATCH', allow: 'GET, POST' },

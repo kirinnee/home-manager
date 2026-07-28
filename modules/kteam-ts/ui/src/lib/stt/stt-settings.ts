@@ -19,11 +19,12 @@
 //     each other's changes. This file broadcasts its own event as well, and
 //     `useSttSettings` listens to both.
 //
-// DEFAULTS: browser-local transcription, enhancement ON, empty dictionary, and
-// either Alt for push-to-talk. Version 2 was the local-only migration; version
-// 3 adds the shortcut. v1/v2 payloads are accepted so a reader's dictionary and
-// context survive, but old execution choices are never used to route microphone
-// audio to the daemon.
+// DEFAULTS: dictation ON, browser-local transcription, deterministic local
+// enhancement ON, empty dictionary, and either Alt for push-to-talk. Version 2
+// was the local-only migration; version 3 added the shortcut; version 4 adds the
+// master switch and an optional post-dictation provider/model. v1/v2/v3 payloads
+// are migrated field by field so a reader's dictionary, context and shortcut
+// survive. No provider credential is stored here (or anywhere in the browser).
 
 import { useCallback, useSyncExternalStore } from 'react';
 import { MAX_USER_CONTEXT_CHARS, parseDictionary, type DictionaryEntry, type DictionaryParse } from './enhancement';
@@ -34,7 +35,7 @@ import {
 } from './dictation-shortcut';
 
 export const STT_SETTINGS_KEY = 'kteam-stt-v1';
-export const STT_SETTINGS_VERSION = 3;
+export const STT_SETTINGS_VERSION = 4;
 
 /** Same-tab change notification. `storage` only crosses tabs. */
 export const STT_SETTINGS_EVENT = 'kteam:stt-settings';
@@ -43,6 +44,15 @@ export const STT_SETTINGS_EVENT = 'kteam:stt-settings';
  *  before the parser has to. */
 export const MAX_DICTIONARY_LINES = 200;
 export const MAX_DICTIONARY_LINE_LENGTH = 160;
+export const MAX_ENHANCEMENT_MODEL_CHARS = 120;
+
+export const ENHANCEMENT_PROVIDERS = [
+  { id: 'local', label: 'On-device word correction' },
+  { id: 'groq', label: 'Groq correction' },
+] as const;
+
+export type EnhancementProviderId = (typeof ENHANCEMENT_PROVIDERS)[number]['id'];
+export const DEFAULT_GROQ_ENHANCEMENT_MODEL = 'llama-3.1-8b-instant';
 
 /** The free-text context cap, re-exported so the settings textarea can carry
  *  the same `maxLength` the parser enforces on the way back in. */
@@ -50,6 +60,9 @@ export { MAX_USER_CONTEXT_CHARS };
 
 export interface SttSettings {
   v: typeof STT_SETTINGS_VERSION;
+  /** Master resource switch. False means capture cannot start and any resident
+   * local ONNX sessions are released. */
+  enabled: boolean;
   /** Word-only enhancement. On by default: it only ever swaps whole words, and
    *  a verifier throws the whole result away if it did anything else. */
   enhancement: boolean;
@@ -59,6 +72,11 @@ export interface SttSettings {
   /** Free text mined for extra vocabulary — project jargon, names, a pasted
    *  glossary. Stored verbatim; extraction happens on use. */
   userContext: string;
+  /** Post-dictation correction provider. `local` is the deterministic enhancer;
+   * `groq` calls the daemon, whose environment owns the API key. */
+  enhancementProvider: EnhancementProviderId;
+  /** Non-secret provider model id. The Groq API key is deliberately absent. */
+  enhancementModel: string;
   /** Browser-local push-to-talk binding. Alt (either side) is the default, but
    * it is data, never a hardcoded event-handler special case. */
   shortcut: DictationShortcutBinding;
@@ -66,9 +84,12 @@ export interface SttSettings {
 
 export const DEFAULT_STT_SETTINGS: SttSettings = Object.freeze({
   v: STT_SETTINGS_VERSION,
+  enabled: true,
   enhancement: true,
   dictionary: [] as string[],
   userContext: '',
+  enhancementProvider: 'local',
+  enhancementModel: DEFAULT_GROQ_ENHANCEMENT_MODEL,
   shortcut: DEFAULT_DICTATION_SHORTCUT as DictationShortcutBinding,
 });
 
@@ -83,12 +104,13 @@ export function parseSttSettings(raw: string | null | undefined): SttSettings {
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ...DEFAULT_STT_SETTINGS };
   const obj = parsed as Record<string, unknown>;
-  // v1/v2 are migrated explicitly below. Unknown/future payloads are still a clean
-  // reset, but removing the execution choice must not discard someone's jargon.
-  if (obj['v'] !== STT_SETTINGS_VERSION && obj['v'] !== 2 && obj['v'] !== 1) {
+  // v1/v2/v3 are migrated explicitly below. Unknown/future payloads are still a
+  // clean reset, but adding resource/provider choices must not discard jargon.
+  if (obj['v'] !== STT_SETTINGS_VERSION && obj['v'] !== 3 && obj['v'] !== 2 && obj['v'] !== 1) {
     return { ...DEFAULT_STT_SETTINGS };
   }
 
+  const enabled = obj['v'] === STT_SETTINGS_VERSION && typeof obj['enabled'] === 'boolean' ? obj['enabled'] : true;
   const enhancement = typeof obj['enhancement'] === 'boolean' ? obj['enhancement'] : DEFAULT_STT_SETTINGS.enhancement;
 
   const dictionaryRaw = obj['dictionary'];
@@ -102,14 +124,32 @@ export function parseSttSettings(raw: string | null | undefined): SttSettings {
   }
 
   const userContext = typeof obj['userContext'] === 'string' ? obj['userContext'].slice(0, MAX_USER_CONTEXT_CHARS) : '';
+  const enhancementProvider =
+    obj['v'] === STT_SETTINGS_VERSION &&
+    ENHANCEMENT_PROVIDERS.some(provider => provider.id === obj['enhancementProvider'])
+      ? (obj['enhancementProvider'] as EnhancementProviderId)
+      : DEFAULT_STT_SETTINGS.enhancementProvider;
+  const enhancementModel =
+    obj['v'] === STT_SETTINGS_VERSION && typeof obj['enhancementModel'] === 'string'
+      ? obj['enhancementModel'].trim().slice(0, MAX_ENHANCEMENT_MODEL_CHARS) || DEFAULT_STT_SETTINGS.enhancementModel
+      : DEFAULT_STT_SETTINGS.enhancementModel;
   const shortcut =
-    obj['v'] === STT_SETTINGS_VERSION
+    obj['v'] === STT_SETTINGS_VERSION || obj['v'] === 3
       ? parseDictationShortcut(obj['shortcut'])
       : { ...DEFAULT_DICTATION_SHORTCUT, modifiers: [] };
 
   // v1's `mode` and `language`, plus either field injected into v2, are ignored:
   // there is one local engine and parakeet.js exposes no language input.
-  return { v: STT_SETTINGS_VERSION, enhancement, dictionary, userContext, shortcut };
+  return {
+    v: STT_SETTINGS_VERSION,
+    enabled,
+    enhancement,
+    dictionary,
+    userContext,
+    enhancementProvider,
+    enhancementModel,
+    shortcut,
+  };
 }
 
 /** Normalise before writing, so a caller cannot persist an out-of-range shape

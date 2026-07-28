@@ -2,9 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   DICTATION_SAFETY_NOTE,
+  DICTATION_DISABLED_EXPLANATION,
   DictationSettings,
   ENHANCEMENT_EXPLANATION,
   ENHANCEMENT_SOURCES_EXPLANATION,
+  ENHANCEMENT_TOGGLE_EXPLANATION,
+  GROQ_ENHANCEMENT_EXPLANATION,
   USER_CONTEXT_EXPLANATION,
   LOCAL_MODE_SUMMARY,
   LOCAL_MODE_TRADEOFFS,
@@ -26,7 +29,7 @@ const text = html
   .replace(/&#x2F;/gu, '/');
 
 function interactiveElements(source: string): string[] {
-  return source.match(/<(button|select|textarea)\b[^>]*>/gu) ?? [];
+  return source.match(/<(button|input|select|textarea)\b[^>]*>/gu) ?? [];
 }
 
 describe('formatBytes', () => {
@@ -99,6 +102,25 @@ describe('one local engine', () => {
   });
 });
 
+describe('the dictation master switch', () => {
+  test('is on by default and says exactly which work stops when disabled', () => {
+    expect(html).toMatch(/aria-label="Dictation availability"[\s\S]*role="switch"[\s\S]*aria-checked="true"/u);
+    expect(text).toContain(DICTATION_DISABLED_EXPLANATION);
+    expect(DICTATION_DISABLED_EXPLANATION).toContain('microphone cannot start');
+    expect(DICTATION_DISABLED_EXPLANATION).toContain('model files are not fetched');
+    expect(DICTATION_DISABLED_EXPLANATION).toContain('no decode runs');
+    expect(DICTATION_DISABLED_EXPLANATION).toContain('about 1 GB of memory');
+    expect(DICTATION_DISABLED_EXPLANATION).toContain('without a reload');
+  });
+
+  test('the control calls the real ONNX unload path, not only a UI hide', async () => {
+    const source = await Bun.file(new URL('./DictationSettings.tsx', import.meta.url).pathname).text();
+    expect(source).toContain('void unloadLocalEngine()');
+    expect(source).toContain('preparing.current?.abort()');
+    expect(source).toContain('update({ enabled })');
+  });
+});
+
 describe('push to talk', () => {
   test('shows the customizable default and the hold/tap interaction', () => {
     expect(text).toContain('Push to talk');
@@ -118,6 +140,9 @@ describe('enhancement', () => {
   test('is on by default and is a switch, not a checkbox nobody can find', () => {
     expect(html).toContain('role="switch"');
     expect(html).toMatch(/role="switch"[^>]*aria-checked="true"/u);
+    expect(text).toContain(ENHANCEMENT_TOGGLE_EXPLANATION);
+    expect(ENHANCEMENT_TOGGLE_EXPLANATION).toContain('after local transcription');
+    expect(ENHANCEMENT_TOGGLE_EXPLANATION).toContain('cannot send a message');
   });
 
   test('explains WORDS ONLY verbatim', () => {
@@ -132,6 +157,20 @@ describe('enhancement', () => {
     expect(ENHANCEMENT_SOURCES_EXPLANATION).toContain('always win');
     expect(ENHANCEMENT_SOURCES_EXPLANATION).toContain('no AI model, nothing sent anywhere');
     expect(ENHANCEMENT_SOURCES_EXPLANATION).toContain('changes nothing');
+  });
+
+  test('offers a table-driven provider choice while keeping credentials out of browser storage', async () => {
+    expect(html).toContain('id="stt-enhancement-provider"');
+    expect(text).toContain('On-device word correction');
+    expect(text).toContain('Groq correction');
+    expect(GROQ_ENHANCEMENT_EXPLANATION).toContain('GROQ_API_KEY');
+    expect(GROQ_ENHANCEMENT_EXPLANATION).toContain('~/.secrets');
+    expect(GROQ_ENHANCEMENT_EXPLANATION).toContain('never stored in this browser');
+    expect(GROQ_ENHANCEMENT_EXPLANATION).toContain('never in the live-text path');
+    expect(GROQ_ENHANCEMENT_EXPLANATION).toContain('sends Groq the raw transcript');
+    expect(GROQ_ENHANCEMENT_EXPLANATION).toContain('capitalization and punctuation');
+    const settingsSource = await Bun.file(new URL('../lib/stt/stt-settings.ts', import.meta.url).pathname).text();
+    expect(settingsSource).not.toMatch(/apiKey|api_key/u);
   });
 });
 
@@ -192,14 +231,13 @@ describe('the touch and focus rules', () => {
 
   test('does not render a language selector the local engine cannot honour', () => {
     expect(html).not.toContain('id="stt-language"');
-    expect(html).not.toContain('<select');
   });
 });
 
 describe('the safety note', () => {
   test('leads with the promise that nothing is ever sent', () => {
     expect(text).toContain(DICTATION_SAFETY_NOTE);
-    expect(DICTATION_SAFETY_NOTE).toContain('one final local decode and enhancement pass');
+    expect(DICTATION_SAFETY_NOTE).toContain('newest bounded local window');
     expect(DICTATION_SAFETY_NOTE).toContain('current caret');
     expect(DICTATION_SAFETY_NOTE).toContain('Nothing is ever sent for you.');
   });

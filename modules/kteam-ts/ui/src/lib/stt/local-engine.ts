@@ -418,7 +418,7 @@ export async function openPreparedAssets(): Promise<
  *  and changes nothing. Dictation would keep working on the page that just
  *  removed the model, and ~1 GB of weights would stay resident until reload. */
 export async function clearLocalModel(): Promise<boolean> {
-  unloadLocalEngine();
+  await unloadLocalEngine();
   const caches = cacheStorage();
   if (!caches) return false;
   return caches.delete(STT_MODEL_CACHE).catch(() => false);
@@ -440,6 +440,17 @@ interface LoadedModel {
     sampleRate?: number,
     opts?: Record<string, unknown>,
   ): Promise<ModelLongTranscriptResult>;
+  /** parakeet.js does not expose a public model-level dispose method, but these
+   * are the ONNX sessions it owns. Releasing them is what actually gives the
+   * ~1 GB of weights back when dictation is disabled. */
+  encoderSession?: { release?(): Promise<void> | void };
+  joinerSession?: { release?(): Promise<void> | void };
+  _onnxPreprocessor?: { session?: { release?(): Promise<void> | void } } | null;
+  _combState1?: { dispose?(): void };
+  _combState2?: { dispose?(): void };
+  _targetTensor?: { dispose?(): void };
+  _targetLenTensor?: { dispose?(): void };
+  _encoderFrameTensor?: { dispose?(): void } | null;
 }
 
 interface ModelTranscriptWord {
@@ -490,6 +501,8 @@ export interface LocalTranscript {
 
 let loaded: LoadedModel | null = null;
 let loading: Promise<LoadedModel> | null = null;
+let engineGeneration = 0;
+let releaseTail: Promise<void> = Promise.resolve();
 /** `ParakeetModel.transcribe` has no concurrency or cancellation contract.
  * Keep one global tail so a new recording cannot enter the same model while a
  * logically-cancelled decode from the previous generation is still running. */
@@ -507,8 +520,16 @@ export interface LoadLocalOptions {
 export async function loadLocalEngine(options: LoadLocalOptions = {}): Promise<LoadedModel> {
   if (loaded) return loaded;
   if (loading) return loading;
+  const generation = engineGeneration;
+  const priorRelease = releaseTail;
   const capabilities = options.capabilities ?? { webgpu: false, likelyMobile: false };
-  loading = (async () => {
+  const load = (async () => {
+    // A reader may re-enable immediately after disabling. Never instantiate new
+    // sessions while the old pair is still releasing its ~1 GB allocation.
+    await priorRelease;
+    if (generation !== engineGeneration) {
+      throw new PrepareError('aborted', 'Dictation was disabled before the speech model loaded.');
+    }
     // THE READINESS GATE, and it comes before everything.
     //
     // `fromUrls` fetches whatever it is given. Without this check, a reader who
@@ -558,6 +579,10 @@ export async function loadLocalEngine(options: LoadLocalOptions = {}): Promise<L
         nMels: 128,
         cpuThreads: 1,
       })) as unknown as LoadedModel;
+      if (generation !== engineGeneration) {
+        await releaseLoadedModel(model);
+        throw new PrepareError('aborted', 'Dictation was disabled while the speech model was loading.');
+      }
       loaded = model;
       return model;
     } finally {
@@ -568,13 +593,11 @@ export async function loadLocalEngine(options: LoadLocalOptions = {}): Promise<L
       prepared.revoke();
     }
   })();
+  loading = load;
   try {
-    return await loading;
-  } catch (error) {
-    loading = null;
-    throw error;
+    return await load;
   } finally {
-    if (loaded) loading = null;
+    if (loading === load) loading = null;
   }
 }
 
@@ -583,11 +606,48 @@ export function localEngineLoaded(): boolean {
   return loaded !== null;
 }
 
-/** Drop the in-page model. The CacheStorage copy is untouched — this frees
- *  ~1 GB of memory, not the download. */
-export function unloadLocalEngine(): void {
+async function releaseLoadedModel(model: LoadedModel): Promise<void> {
+  const tensors = [
+    model._combState1,
+    model._combState2,
+    model._targetTensor,
+    model._targetLenTensor,
+    model._encoderFrameTensor,
+  ];
+  for (const tensor of tensors) {
+    try {
+      tensor?.dispose?.();
+    } catch {
+      // Session release below is still the material memory reclamation.
+    }
+  }
+  const sessions = [model.encoderSession, model.joinerSession, model._onnxPreprocessor?.session];
+  await Promise.allSettled(
+    sessions.map(async session => {
+      await session?.release?.();
+    }),
+  );
+}
+
+/** Drop the in-page model while keeping its prepared CacheStorage copy. The
+ * ONNX sessions are explicitly released after any in-flight decode, so this
+ * gives back the ~1 GB resident allocation rather than waiting for GC. A model
+ * that was still loading is released as soon as construction finishes. */
+export function unloadLocalEngine(): Promise<void> {
+  engineGeneration += 1;
+  const model = loaded;
+  const pendingLoad = loading;
   loaded = null;
   loading = null;
+  const prior = releaseTail;
+  releaseTail = (async () => {
+    await prior;
+    // The stale load observes engineGeneration and releases its own sessions.
+    if (pendingLoad) await pendingLoad.catch(() => undefined);
+    await localDecodeTail;
+    if (model) await releaseLoadedModel(model);
+  })();
+  return releaseTail;
 }
 
 function finiteNumber(value: unknown): number | null {

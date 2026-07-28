@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
   DEFAULT_STT_SETTINGS,
+  DEFAULT_GROQ_ENHANCEMENT_MODEL,
   MAX_DICTIONARY_LINES,
   MAX_DICTIONARY_LINE_LENGTH,
   MAX_USER_CONTEXT_CHARS,
+  MAX_ENHANCEMENT_MODEL_CHARS,
   STT_SETTINGS_KEY,
   STT_SETTINGS_VERSION,
   loadSttSettings,
@@ -32,12 +34,15 @@ function memoryStorage(initial?: string): SttStorage & { value: string | null; w
 }
 
 describe('defaults', () => {
-  test('are browser-local, enhancement on, empty vocabulary, and either Alt', () => {
+  test('enable dictation with local enhancement, empty vocabulary, and either Alt', () => {
     expect(DEFAULT_STT_SETTINGS).toEqual({
       v: STT_SETTINGS_VERSION,
+      enabled: true,
       enhancement: true,
       dictionary: [],
       userContext: '',
+      enhancementProvider: 'local',
+      enhancementModel: DEFAULT_GROQ_ENHANCEMENT_MODEL,
       shortcut: DEFAULT_DICTATION_SHORTCUT,
     });
   });
@@ -72,9 +77,12 @@ describe('parseSttSettings — never throws, always usable', () => {
     });
     expect(parseSttSettings(raw)).toEqual({
       v: STT_SETTINGS_VERSION,
+      enabled: true,
       enhancement: false,
       dictionary: ['tmux'],
       userContext: '',
+      enhancementProvider: 'local',
+      enhancementModel: DEFAULT_GROQ_ENHANCEMENT_MODEL,
       shortcut: DEFAULT_DICTATION_SHORTCUT,
     });
   });
@@ -90,9 +98,12 @@ describe('parseSttSettings — never throws, always usable', () => {
     });
     expect(parseSttSettings(raw)).toEqual({
       v: STT_SETTINGS_VERSION,
+      enabled: true,
       enhancement: false,
       dictionary: ['kteam'],
       userContext: 'nitroso and diene',
+      enhancementProvider: 'local',
+      enhancementModel: DEFAULT_GROQ_ENHANCEMENT_MODEL,
       shortcut: DEFAULT_DICTATION_SHORTCUT,
     });
   });
@@ -114,6 +125,43 @@ describe('parseSttSettings — never throws, always usable', () => {
       ...DEFAULT_STT_SETTINGS,
       dictionary: ['kteam'],
       userContext: 'nitroso',
+    });
+  });
+
+  test('migrates v3 by preserving its shortcut and adding enabled/local provider defaults', () => {
+    const shortcut: SttSettings['shortcut'] = { code: 'KeyV', key: 'v', modifiers: ['Alt', 'Shift'] };
+    const parsed = parseSttSettings(
+      JSON.stringify({ v: 3, enhancement: false, dictionary: ['kteam'], userContext: 'nitroso', shortcut }),
+    );
+    expect(parsed).toEqual({
+      ...DEFAULT_STT_SETTINGS,
+      enhancement: false,
+      dictionary: ['kteam'],
+      userContext: 'nitroso',
+      shortcut,
+    });
+  });
+
+  test('reads the v4 master switch and provider/model defensively field by field', () => {
+    const parsed = parseSttSettings(
+      JSON.stringify({
+        ...DEFAULT_STT_SETTINGS,
+        enabled: false,
+        enhancementProvider: 'groq',
+        enhancementModel: `  ${'m'.repeat(MAX_ENHANCEMENT_MODEL_CHARS + 20)}  `,
+      }),
+    );
+    expect(parsed.enabled).toBe(false);
+    expect(parsed.enhancementProvider).toBe('groq');
+    expect(parsed.enhancementModel).toHaveLength(MAX_ENHANCEMENT_MODEL_CHARS);
+
+    const hostile = parseSttSettings(
+      JSON.stringify({ ...DEFAULT_STT_SETTINGS, enabled: 'no', enhancementProvider: 'mystery', enhancementModel: [] }),
+    );
+    expect(hostile).toMatchObject({
+      enabled: true,
+      enhancementProvider: 'local',
+      enhancementModel: DEFAULT_GROQ_ENHANCEMENT_MODEL,
     });
   });
 
@@ -202,9 +250,12 @@ describe('storage', () => {
     const storage = memoryStorage();
     const next: SttSettings = {
       v: STT_SETTINGS_VERSION,
+      enabled: false,
       enhancement: false,
       dictionary: ['tmux'],
       userContext: 'nitroso and diene',
+      enhancementProvider: 'groq',
+      enhancementModel: 'custom-fast-model',
       shortcut: { code: 'KeyV', key: 'v', modifiers: ['Alt', 'Shift'] },
     };
     expect(saveSttSettings(next, storage)).toBe(true);

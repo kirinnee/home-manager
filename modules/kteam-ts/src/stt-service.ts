@@ -1,5 +1,14 @@
 import type { KTeamPaths } from './paths';
 import { decodeSttAudio, SttAudioError } from './stt-audio';
+import {
+  ENHANCEMENT_LIMITS,
+  EnhancementError,
+  SttEnhancer,
+  enhancementErrorView,
+  type EnhanceRequest,
+  type EnhanceResult,
+  type EnhancementProvider,
+} from './stt-enhancement';
 import { SttModelStore, type PublicSttModelFile, type SttModelStoreOptions } from './stt-model';
 import { deriveSttPaths, type SttPaths } from './stt-paths';
 import {
@@ -24,6 +33,11 @@ import {
 import { KTEAM_VERSION } from './version';
 
 const WAV_CONTAINER_OVERHEAD_LIMIT = 64 * 1_024;
+export const STT_ENHANCEMENT_BODY_LIMIT_BYTES = 64 * 1_024;
+
+export interface SttEnhancerLike {
+  enhance(request: EnhanceRequest): Promise<EnhanceResult>;
+}
 
 export interface SttModelManager {
   inventory(): Promise<{ daemon: SttModelStatus; browser: SttModelStatus }>;
@@ -50,6 +64,7 @@ export interface CreateSttServiceOptions {
   maxDurationSeconds?: number;
   models?: SttModelManager;
   worker?: SttWorkerClientLike;
+  enhancer?: SttEnhancerLike;
   modelOptions?: Omit<SttModelStoreOptions, 'paths'>;
   workerOptions?: Omit<SttWorkerClientOptions, 'resolveModel' | 'stderrLog'>;
 }
@@ -70,6 +85,10 @@ const unknownRoute = (method: string, path: string) => ({
 
 function errorResponse(error: SttError, headers?: HeadersInit): Response {
   return json({ error: error.message, code: error.code }, error.status, headers);
+}
+
+function enhancementErrorResponse(error: EnhancementError): Response {
+  return json(enhancementErrorView(error), error.status);
 }
 
 function routeError(code: SttErrorCode, message: string, status: number, headers?: HeadersInit): Response {
@@ -128,6 +147,162 @@ async function readBoundedBody(request: Request, limit: number): Promise<Uint8Ar
     offset += chunk.byteLength;
   }
   return bytes;
+}
+
+async function readBoundedEnhancementJson(request: Request): Promise<unknown> {
+  const mime = request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
+  if (mime !== 'application/json') {
+    throw new EnhancementError('bad_request', 'content-type must be application/json');
+  }
+  const declared = request.headers.get('content-length');
+  if (declared !== null) {
+    if (!/^\d+$/.test(declared)) throw new EnhancementError('bad_request', 'content-length is invalid');
+    if (Number(declared) > STT_ENHANCEMENT_BODY_LIMIT_BYTES) {
+      throw new EnhancementError('too_long', 'enhancement request exceeds the maximum size');
+    }
+  }
+  if (!request.body) throw new EnhancementError('bad_request', 'enhancement request body is empty');
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > STT_ENHANCEMENT_BODY_LIMIT_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new EnhancementError('too_long', 'enhancement request exceeds the maximum size');
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (total === 0) throw new EnhancementError('bad_request', 'enhancement request body is empty');
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let source: string;
+  try {
+    source = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new EnhancementError('bad_request', 'enhancement request is not valid UTF-8');
+  }
+  try {
+    return JSON.parse(source) as unknown;
+  } catch {
+    throw new EnhancementError('bad_request', 'enhancement request is not valid JSON');
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function boundedEnhancementContext(contextValue: unknown, userContextValue: unknown): string | undefined {
+  if (contextValue !== undefined && !Array.isArray(contextValue)) {
+    throw new EnhancementError('bad_request', 'context must be an array of strings');
+  }
+  if (userContextValue !== undefined && typeof userContextValue !== 'string') {
+    throw new EnhancementError('bad_request', 'user context must be a string');
+  }
+
+  const recent: string[] = [];
+  if (Array.isArray(contextValue)) {
+    for (const item of contextValue.slice(-10)) {
+      if (typeof item !== 'string') {
+        throw new EnhancementError('bad_request', 'context must be an array of strings');
+      }
+      const trimmed = item.trim();
+      if (trimmed) recent.push(trimmed);
+    }
+  }
+
+  const sections: string[] = [];
+  const explicit = typeof userContextValue === 'string' ? userContextValue.trim() : '';
+  if (explicit) sections.push(`Reader context:\n${explicit}`);
+  if (recent.length > 0) sections.push(`Recent chat (oldest to newest):\n${recent.join('\n')}`);
+  if (sections.length === 0) return undefined;
+  return sections.join('\n\n').slice(0, ENHANCEMENT_LIMITS.maxContextChars);
+}
+
+function boundedEnhancementDictionary(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new EnhancementError('bad_request', 'dictionary must be an array of entries');
+  }
+
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  const append = (line: string): void => {
+    if (lines.length >= ENHANCEMENT_LIMITS.maxDictionaryTerms) return;
+    const key = line.toLocaleLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    lines.push(line);
+  };
+
+  for (const rawEntry of value) {
+    if (lines.length >= ENHANCEMENT_LIMITS.maxDictionaryTerms) break;
+    if (!isRecord(rawEntry) || typeof rawEntry['term'] !== 'string') {
+      throw new EnhancementError('bad_request', 'dictionary entries must contain a term');
+    }
+    const term = rawEntry['term'].trim();
+    if (!term) continue;
+    if (term.length > ENHANCEMENT_LIMITS.maxDictionaryTermChars) {
+      throw new EnhancementError('too_long', 'a dictionary term exceeds the maximum size');
+    }
+    append(term);
+
+    const aliases = rawEntry['aliases'];
+    if (aliases === undefined) continue;
+    if (!Array.isArray(aliases)) {
+      throw new EnhancementError('bad_request', 'dictionary aliases must be an array of strings');
+    }
+    for (const rawAlias of aliases) {
+      if (typeof rawAlias !== 'string') {
+        throw new EnhancementError('bad_request', 'dictionary aliases must be an array of strings');
+      }
+      const alias = rawAlias.trim();
+      if (!alias) continue;
+      if (alias.length > ENHANCEMENT_LIMITS.maxDictionaryTermChars) {
+        throw new EnhancementError('too_long', 'a dictionary alias exceeds the maximum size');
+      }
+      const mapping = `${alias} -> ${term}`;
+      if (mapping.length <= ENHANCEMENT_LIMITS.maxDictionaryTermChars) append(mapping);
+    }
+  }
+  return lines.length > 0 ? lines : undefined;
+}
+
+function normalizeEnhancementPayload(value: unknown): EnhanceRequest {
+  if (!isRecord(value)) throw new EnhancementError('bad_request', 'enhancement request must be an object');
+  if (typeof value['text'] !== 'string') throw new EnhancementError('bad_request', 'transcript is required');
+  if (value['text'].length > ENHANCEMENT_LIMITS.maxTranscriptChars) {
+    throw new EnhancementError('too_long', 'transcript exceeds the maximum size');
+  }
+  if (typeof value['provider'] !== 'string') {
+    throw new EnhancementError('bad_request', 'enhancement provider is required');
+  }
+  const model = value['model'];
+  if (model !== undefined && typeof model !== 'string') {
+    throw new EnhancementError('bad_model', 'model must be a string');
+  }
+
+  return {
+    transcript: value['text'],
+    provider: value['provider'] as EnhancementProvider,
+    ...(model === undefined ? {} : { model }),
+    context: boundedEnhancementContext(value['context'], value['userContext']),
+    dictionary: boundedEnhancementDictionary(value['dictionary']),
+  };
 }
 
 interface ByteRange {
@@ -202,6 +377,7 @@ class DefaultSttService implements SttService {
   constructor(
     private readonly models: SttModelManager,
     private readonly worker: SttWorkerClientLike,
+    private readonly enhancer: SttEnhancerLike,
     private readonly maxDurationSeconds: number,
   ) {}
 
@@ -234,6 +410,10 @@ class DefaultSttService implements SttService {
         return json(await this.status());
       }
       if (this.closed) throw new SttError('service_closed', 'speech-to-text service is closed', 503);
+      if (url.pathname === '/v1/stt/enhance') {
+        if (request.method !== 'POST') return methodNotAllowed('POST');
+        return await this.enhance(request);
+      }
       if (url.pathname === '/v1/stt/transcribe') {
         if (request.method !== 'POST') return methodNotAllowed('POST');
         return await this.transcribe(request, url);
@@ -260,6 +440,7 @@ class DefaultSttService implements SttService {
       }
       return json(unknownRoute(request.method, url.pathname), 404);
     } catch (error) {
+      if (error instanceof EnhancementError) return enhancementErrorResponse(error);
       return errorResponse(boundedUnknownError(error));
     }
   }
@@ -345,6 +526,13 @@ class DefaultSttService implements SttService {
     };
     return json(transcript);
   }
+
+  private async enhance(request: Request): Promise<Response> {
+    const input = normalizeEnhancementPayload(await readBoundedEnhancementJson(request));
+    const started = performance.now();
+    const result = await this.enhancer.enhance(input);
+    return json({ ...result, latencyMs: Math.max(0, performance.now() - started) });
+  }
 }
 
 export function createSttService(options: CreateSttServiceOptions): SttService {
@@ -370,5 +558,6 @@ export function createSttService(options: CreateSttServiceOptions): SttService {
       stderrLog: createBoundedSttLogSink(paths.workerLog),
       ...options.workerOptions,
     });
-  return new DefaultSttService(models, worker, maxDurationSeconds);
+  const enhancer = options.enhancer ?? new SttEnhancer();
+  return new DefaultSttService(models, worker, enhancer, maxDurationSeconds);
 }

@@ -15,7 +15,7 @@
 // the simple wrapper for mounting them together.
 //
 // THE ONE OUTPUT IS STILL THE DRAFT — AND IT IS AUTOMATIC. `useDictation` now
-// owns insertion: on Stop it runs one clean final decode, enhances once, and
+// owns insertion: on Stop it settles one bounded tail-inclusive decode, enhances once, and
 // calls `onDraft` exactly once with the complete next draft placed at the
 // caret — never sent, never anywhere else. There is no review step and no
 // manual Insert. This bundle simply forwards `draft`/`selectionRef`, adapts the
@@ -54,7 +54,7 @@ export interface DictationControlProps {
    *  appended at the end — the right fallback, not an error. */
   selectionRef?: { current: SelectionLike | null };
   /** Receives the COMPLETE next draft plus where the caret should sit. Called
-   *  exactly once, automatically, after the final on-device decode. */
+   *  exactly once, automatically, after the bounded on-device settle. */
   onDraftChange: (result: DictationDraftResult) => void;
   disabled?: boolean;
   /** `compact` keeps the 44px square icon-only, for the mobile action column.
@@ -118,8 +118,10 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
   const [liveText, setLiveText] = useState(() => emptyLiveTranscript());
   const [elapsedMs, setElapsedMs] = useState(0);
   const [wasCapturing, setWasCapturing] = useState(false);
+  const [postInsertError, setPostInsertError] = useState<DictationDraftResult['enhancementError']>(undefined);
   const startedAt = useRef(0);
   const { settings: sttSettings } = useSttSettings();
+  const effectiveDisabled = Boolean(disabled || !sttSettings.enabled);
 
   // Panel-only UI reset. The hook already returns itself to idle after a
   // successful insertion, so this just tears down the visible flow without
@@ -129,10 +131,15 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
     setLiveText(current => emptyLiveTranscript(current.generation));
     setElapsedMs(0);
     setWasCapturing(false);
+    setPostInsertError(undefined);
   }, []);
 
+  useEffect(() => {
+    if (effectiveDisabled) closePanel();
+  }, [closePanel, effectiveDisabled]);
+
   // The capture machine now owns insertion end-to-end: it reads the real draft
-  // and caret, runs one final decode, enhances once, and calls `onDraft`
+  // and caret, settles the bounded tail, enhances once, and calls `onDraft`
   // exactly once with the complete next draft. Live transcript events are a
   // disposable read-only preview reduced into `liveText` for the caption.
   const dictation = useDictation({
@@ -140,16 +147,19 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
     draft,
     selectionRef,
     onDraft: result => {
-      // The single, final output. Forward it, then close the flow — there is no
-      // review stage to leave open.
+      // The single, final output. A successful pass closes immediately; a
+      // non-fatal provider reason keeps only the status sheet open after the
+      // raw words have already landed. There is no transcript review stage.
       onDraftChange(result);
-      closePanel();
+      if (result.enhancementError) setPostInsertError(result.enhancementError);
+      else closePanel();
     },
     onTranscriptEvent: event => setLiveText(current => reduceLiveTranscript(current, event)),
-    disabled,
+    disabled: effectiveDisabled,
   });
 
   const phase = dictation.phase;
+  const visibleError = postInsertError ?? dictation.error;
 
   // Once we have passed through a capturing phase, a return to idle with no
   // insertion is a too-short clip — a dead end worth naming ("didn't catch
@@ -178,24 +188,25 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
     setElapsedMs(0);
     setWasCapturing(false);
     startedAt.current = performance.now();
+    setPostInsertError(undefined);
     dictation.dismissError();
     dictation.start();
   }, [dictation]);
 
   const openAndRecord = useCallback(() => {
-    if (disabled) return;
+    if (effectiveDisabled) return;
     setOpen(true);
     if (
       dictationTriggerStartsFresh({
         phase,
         hasTranscript: completeTranscriptText(liveText).trim().length > 0,
-        hasError: dictation.error !== null,
+        hasError: visibleError !== null && visibleError !== undefined,
         wasCapturing,
       })
     ) {
       beginRecording();
     }
-  }, [beginRecording, dictation.error, disabled, liveText, phase, wasCapturing]);
+  }, [beginRecording, effectiveDisabled, liveText, phase, visibleError, wasCapturing]);
 
   const dismissPanel = useCallback(() => {
     // Hiding is intentionally not cancellation. The recorder and elapsed clock
@@ -207,24 +218,25 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
 
   const stage = dictationStage({
     phase,
-    hasError: dictation.error !== null,
+    hasError: visibleError !== null && visibleError !== undefined,
     wasCapturing,
   });
 
   const flowActive = !dictationTriggerStartsFresh({
     phase,
     hasTranscript,
-    hasError: dictation.error !== null,
+    hasError: visibleError !== null && visibleError !== undefined,
     wasCapturing,
   });
 
-  const control = dictation.supported ? (
+  const enabledAndSupported = sttSettings.enabled && dictation.supported;
+  const control = enabledAndSupported ? (
     <Button
       type="button"
       variant="ghost"
       size="sm"
       className={cn('min-h-[44px] min-w-[44px] select-none px-2', dictation.recording && 'text-err', className)}
-      disabled={disabled}
+      disabled={effectiveDisabled}
       aria-expanded={open}
       aria-pressed={dictation.recording}
       aria-keyshortcuts={dictationShortcutAria(sttSettings.shortcut)}
@@ -242,7 +254,7 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
     </Button>
   ) : null;
 
-  const sheet = dictation.supported ? (
+  const sheet = enabledAndSupported ? (
     <DictationSheet
       open={open}
       stage={stage}
@@ -250,8 +262,8 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
       inputMonitor={dictation.inputMonitor}
       liveText={completeTranscriptText(liveText)}
       pendingSegments={dictation.pendingSegments}
-      errorCode={dictation.error?.code}
-      errorMessage={dictation.error?.message}
+      errorCode={visibleError?.code}
+      errorMessage={visibleError?.message}
       onDismiss={dismissPanel}
       onStop={dictation.stop}
       onCancel={reset}
@@ -263,7 +275,7 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
   // to the real capture start; the rest of the handle contract is preserved.
   const handle: DictationHandle = { ...dictation, start: openAndRecord };
 
-  return { supported: dictation.supported, control, sheet, handle, shortcut: sttSettings.shortcut, stage };
+  return { supported: enabledAndSupported, control, sheet, handle, shortcut: sttSettings.shortcut, stage };
 }
 
 /** The simple mounting form: mic button and its non-modal panel together. */

@@ -2,10 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import {
   LIVE_TRANSCRIPTION_FIRST_LOOK_MS,
   LIVE_TRANSCRIPTION_INTERVAL_MS,
+  LIVE_TRANSCRIPTION_MAX_BUFFER_MS,
+  LIVE_TRANSCRIPTION_MOBILE_MAX_BUFFER_MS,
   LocalAgreementTranscriber,
   completeTranscriptText,
   emptyLiveTranscript,
   longestCommonWordPrefix,
+  liveTranscriptionWindowMs,
   normalizeAgreementWord,
   padTrailingSilence,
   peakFrameRms,
@@ -135,6 +138,12 @@ describe('audio helpers', () => {
 });
 
 describe('LocalAgreementTranscriber', () => {
+  test('uses the measured 5s desktop / 4s phone rolling-window bounds', () => {
+    expect(LIVE_TRANSCRIPTION_MAX_BUFFER_MS).toBe(5_000);
+    expect(LIVE_TRANSCRIPTION_MOBILE_MAX_BUFFER_MS).toBe(4_000);
+    expect(liveTranscriptionWindowMs(false)).toBe(5_000);
+    expect(liveTranscriptionWindowMs(true)).toBe(4_000);
+  });
   test('cuts the deterministic first-visible schedule from 2.9s to 2.15s, then widens the cadence', async () => {
     const updates: LiveTranscriptSnapshot[] = [];
     let calls = 0;
