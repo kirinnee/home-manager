@@ -258,6 +258,60 @@ describe('LocalAgreementTranscriber', () => {
     expect(snapshot.stats.maxDecodedAudioMs).toBeLessThanOrEqual(2_000);
     expect(snapshot.stats.maxModelInputAudioMs).toBeLessThanOrEqual(2_000);
     expect(snapshot.stats.forcedAudioDropMs).toBeGreaterThan(0);
+    expect(snapshot.stats.forcedFinalizationCount).toBeGreaterThan(0);
+    stream.cancel();
+  });
+
+  test('seals an evicted provisional prefix exactly once before starting a new agreement epoch', async () => {
+    const passes: TranscriptHypothesis[] = [
+      {
+        text: 'changing carry',
+        words: [
+          { text: 'changing', startTime: 0.1, endTime: 0.3, confidence: 0.9 },
+          { text: 'carry', startTime: 0.6, endTime: 0.8, confidence: 0.9 },
+        ],
+        confidence: 0.9,
+      },
+      {
+        text: 'evicted retained',
+        words: [
+          { text: 'evicted', startTime: 0.1, endTime: 0.3, confidence: 0.9 },
+          { text: 'retained', startTime: 1.2, endTime: 1.4, confidence: 0.9 },
+        ],
+        confidence: 0.9,
+      },
+      {
+        text: 'retained later',
+        words: [
+          { text: 'retained', startTime: 0.2, endTime: 0.4, confidence: 0.9 },
+          { text: 'later', startTime: 1.2, endTime: 1.4, confidence: 0.9 },
+        ],
+        confidence: 0.9,
+      },
+    ];
+    const updates: LiveTranscriptSnapshot[] = [];
+    let call = 0;
+    const stream = make(async () => passes[call++]!, updates, { maxBufferMs: 2_000 });
+
+    stream.push(tone(1_000));
+    await tick();
+    stream.push(tone(1_000));
+    await tick();
+    expect(updates.at(-1)?.text).toBe('evicted retained');
+
+    stream.push(tone(1_000));
+    await tick();
+    const snapshot = updates.at(-1)!;
+    expect(snapshot).toMatchObject({
+      committed: 'evicted',
+      provisional: 'retained later',
+      text: 'evicted retained later',
+    });
+    expect(snapshot.text.split(' ').filter(word => word === 'evicted')).toHaveLength(1);
+    expect(snapshot.text.split(' ').filter(word => word === 'retained')).toHaveLength(1);
+    expect(snapshot.stats.forcedFinalizationCount).toBe(1);
+    expect(snapshot.stats.forcedFinalizedWords).toBe(1);
+    expect(snapshot.stats.committedRevisionCount).toBe(0);
     stream.cancel();
   });
 

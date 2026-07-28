@@ -47,6 +47,13 @@ describe('shared settings catalog', () => {
     }
   });
 
+  test('the dictation palette entry shows the current push-to-talk binding', () => {
+    const entry = settingsPaletteEntries('push to talk', { dictationShortcutLabel: 'Alt + Shift + V' }).find(
+      item => item.settingId === 'dictation',
+    );
+    expect(entry?.description).toContain('Push-to-talk shortcut: Alt + Shift + V');
+  });
+
   test('link rows: warden & failover is findable and points at /warden#config', () => {
     const warden = SETTINGS_LINKS.find(link => link.id === 'warden');
     expect(warden?.href).toBe('/warden#config');
