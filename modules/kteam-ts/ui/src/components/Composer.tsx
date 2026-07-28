@@ -794,8 +794,8 @@ export function Composer({
           form share it. */}
       <ComposerAutocompletePopover controller={autocomplete} />
       {attachmentSlot}
-      {/* The dictation mini panel is fixed outside the composer flow, so it
-          renders once regardless of layout and paints nothing while hidden. */}
+      {/* The dictation strip anchors to this composer root, so it renders once
+          directly above either layout and paints nothing while hidden. */}
       {dictation.sheet}
       {compact ? (
         // PHONE DOCK (Telegram). Attach TOP-left, send/queue BOTTOM-right, and

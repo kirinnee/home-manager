@@ -5,7 +5,8 @@
 // produced no text. This controller follows the LocalAgreement pattern used by
 // whisper_streaming and VoiceInk's Parakeet v2/v3 path instead:
 //
-//   1. Snapshot the newest audio every ~1.5 s, whether or not speech paused.
+//   1. Take 750-ms first looks until words appear, then snapshot the newest
+//      audio every ~1.5 s, whether or not speech paused.
 //   2. Re-decode the bounded unconfirmed tail with word timestamps.
 //   3. Commit the longest prefix shared by two consecutive hypotheses.
 //   4. Trim audio behind the commit timestamp, retaining a little context.
@@ -19,6 +20,7 @@
 import { concatFloat32 } from './audio-capture';
 
 export const LIVE_TRANSCRIPTION_INTERVAL_MS = 1_500;
+export const LIVE_TRANSCRIPTION_FIRST_LOOK_MS = 750;
 export const LIVE_TRANSCRIPTION_MAX_BUFFER_MS = 8_000;
 export const LIVE_TRANSCRIPTION_CONTEXT_MS = 500;
 export const LIVE_TRANSCRIPTION_EDGE_GUARD_MS = 320;
@@ -207,6 +209,8 @@ export interface LocalAgreementTranscriberOptions {
   onError?(error: unknown): void;
   sampleRate?: number;
   intervalMs?: number;
+  /** Faster cadence used only until the first readable preview is published. */
+  firstLookMs?: number;
   maxBufferMs?: number;
   contextMs?: number;
   edgeGuardMs?: number;
@@ -226,6 +230,7 @@ export class LocalAgreementTranscriber {
   private readonly options: LocalAgreementTranscriberOptions;
   private readonly sampleRate: number;
   private readonly intervalSamples: number;
+  private readonly firstLookSamples: number;
   private readonly maxBufferSamples: number;
   private readonly contextSamples: number;
   private readonly edgeGuardSamples: number;
@@ -277,7 +282,20 @@ export class LocalAgreementTranscriber {
   constructor(options: LocalAgreementTranscriberOptions) {
     this.options = options;
     this.sampleRate = finitePositive(options.sampleRate, 16_000);
-    this.intervalSamples = millisecondsToSamples(options.intervalMs, LIVE_TRANSCRIPTION_INTERVAL_MS, this.sampleRate);
+    const intervalMs = finitePositive(options.intervalMs, LIVE_TRANSCRIPTION_INTERVAL_MS);
+    this.intervalSamples = millisecondsToSamples(intervalMs, LIVE_TRANSCRIPTION_INTERVAL_MS, this.sampleRate);
+    this.minAudioSamples = millisecondsToSamples(options.minAudioMs, LIVE_TRANSCRIPTION_MIN_AUDIO_MS, this.sampleRate);
+    this.firstLookSamples = Math.min(
+      this.intervalSamples,
+      Math.max(
+        this.minAudioSamples,
+        millisecondsToSamples(
+          options.firstLookMs,
+          Math.min(LIVE_TRANSCRIPTION_FIRST_LOOK_MS, intervalMs),
+          this.sampleRate,
+        ),
+      ),
+    );
     this.maxBufferSamples = millisecondsToSamples(
       options.maxBufferMs,
       LIVE_TRANSCRIPTION_MAX_BUFFER_MS,
@@ -296,7 +314,6 @@ export class LocalAgreementTranscriber {
       true,
     );
     this.paddingMs = finiteNonNegative(options.paddingMs, LIVE_TRANSCRIPTION_PADDING_MS);
-    this.minAudioSamples = millisecondsToSamples(options.minAudioMs, LIVE_TRANSCRIPTION_MIN_AUDIO_MS, this.sampleRate);
     this.minPassConfidence = finiteNonNegative(options.minPassConfidence, LIVE_TRANSCRIPTION_MIN_PASS_CONFIDENCE);
     this.minWordConfidence = finiteNonNegative(options.minWordConfidence, LIVE_TRANSCRIPTION_MIN_WORD_CONFIDENCE);
     this.minStableWords =
@@ -314,7 +331,7 @@ export class LocalAgreementTranscriber {
     if (!this.accepting || this.cancelled || this.completed || samples.length === 0) return;
     this.buffer = concatFloat32([this.buffer, samples]);
     this.totalSamples += samples.length;
-    if (this.totalSamples - this.lastSnapshotEndSample >= this.intervalSamples) this.requestDecode();
+    if (this.totalSamples - this.lastSnapshotEndSample >= this.decodeCadenceSamples()) this.requestDecode();
   }
 
   /** Complete using the newest bounded live hypothesis. Product dictation uses
@@ -422,7 +439,7 @@ export class LocalAgreementTranscriber {
 
         // Audio may have arrived while the WASM call was running. Skip every
         // stale cadence boundary and immediately decode only the newest state.
-        if (this.totalSamples - this.lastSnapshotEndSample >= this.intervalSamples) this.requested = true;
+        if (this.totalSamples - this.lastSnapshotEndSample >= this.decodeCadenceSamples()) this.requested = true;
       }
     } catch (error) {
       if (!this.cancelled) {
@@ -437,6 +454,10 @@ export class LocalAgreementTranscriber {
       this.settleWaiters();
       if (this.requested && !this.cancelled && !this.completed && this.failure === null) void this.pump();
     }
+  }
+
+  private decodeCadenceSamples(): number {
+    return this.stats.firstVisibleAudioMs === null ? this.firstLookSamples : this.intervalSamples;
   }
 
   private applyHypothesis(

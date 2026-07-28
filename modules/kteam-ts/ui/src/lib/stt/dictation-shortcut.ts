@@ -230,7 +230,11 @@ export function sameDictationShortcutTrigger(
   event: Pick<ShortcutKeyboardEvent, 'code' | 'key'>,
 ): boolean {
   return primaryMatches(binding, {
-    ...event,
+    // Native KeyboardEvent fields are prototype-backed accessors, so spreading
+    // the event drops both values. Read them explicitly for real browser
+    // keyups as well as the plain objects used by unit tests.
+    key: event.key,
+    code: event.code,
     metaKey: false,
     ctrlKey: false,
     altKey: false,

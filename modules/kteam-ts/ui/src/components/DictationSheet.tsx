@@ -4,9 +4,9 @@
 // NON-MODAL IS THE PRODUCT REQUIREMENT. The first single-tap redesign used a
 // BottomSheet: clearer than hold-to-talk, but it trapped focus and blocked the
 // exact workflow the reader wanted to continue while recording. This panel has
-// no scrim, no inert page, no focus trap and no mount-time focus call. It sits
-// near the top edge, away from the composer and newest transcript rows, and can
-// be hidden without cancelling the recording; the mic button brings it back.
+// no scrim, no inert page, no focus trap and no mount-time focus call. It is a
+// single slim strip anchored directly above the composer and can be hidden
+// without cancelling the recording; the mic button brings it back.
 //
 // A READ-ONLY LIVE CAPTION, NOT AN EDITOR. The rolling on-device decoder now
 // runs pause-independently: words appear WHILE the reader keeps speaking, with
@@ -19,9 +19,8 @@
 //     local decode stalled — each with Try again / Cancel rather than a dead spinner.
 //
 import { useId } from 'react';
-import { Mic, Square, Loader2, AlertCircle, RotateCcw, X } from 'lucide-react';
+import { Mic, Square, Loader2, AlertCircle, RotateCcw, EyeOff, X } from 'lucide-react';
 import { Button } from './Primitives';
-import { InputWaveform } from './InputWaveform';
 import type { DictationPhase } from '../hooks/useDictation';
 import type { CaptureMonitor } from '../lib/stt/audio-capture';
 import { cn } from '../lib/utils';
@@ -132,11 +131,38 @@ function LiveDot() {
   );
 }
 
+function stripStatus(
+  stage: DictationStage,
+  liveText: string,
+  pendingSegments: number,
+  errorMessage: string | undefined,
+  failure: ReturnType<typeof dictationFailureCopy>,
+): string {
+  const preview = liveText.trim();
+  switch (stage) {
+    case 'recording':
+      if (preview) return `${preview}${pendingSegments > 0 ? ' …' : ''}`;
+      if (pendingSegments > 0) return 'Listening locally…';
+      return 'Words appear as you speak — you never have to pause. Audio stays on this device.';
+    case 'transcribing':
+      return `Final on-device decode and enhancement… ${
+        preview ? `Last heard: ${preview}` : 'The result will be added to your draft.'
+      }`;
+    case 'empty':
+      return 'No speech was captured. Record again when you are ready.';
+    case 'error':
+      return [errorMessage ?? failure.title, failure.hint, preview ? `Last heard: ${preview}` : undefined]
+        .filter(Boolean)
+        .join(' ');
+    case 'starting':
+      return 'Opening the microphone and local speech model…';
+  }
+}
+
 export function DictationSheet({
   open,
   stage,
   elapsedMs,
-  inputMonitor,
   liveText,
   pendingSegments,
   errorCode,
@@ -148,6 +174,7 @@ export function DictationSheet({
 }: DictationSheetProps) {
   const baseId = useId();
   const titleId = `${baseId}-title`;
+  const safetyId = `${baseId}-safety`;
 
   const failure = dictationFailureCopy(errorCode);
   const title =
@@ -160,6 +187,7 @@ export function DictationSheet({
           : stage === 'empty'
             ? "Didn't catch that"
             : 'Opening microphone';
+  const status = stripStatus(stage, liveText, pendingSegments, errorMessage, failure);
 
   if (!open) return null;
 
@@ -169,6 +197,7 @@ export function DictationSheet({
       data-dictation-panel="non-modal"
       role="region"
       aria-labelledby={titleId}
+      aria-describedby={safetyId}
       onKeyDown={event => {
         // Local Escape only: the panel must never install a document-level
         // handler that intercepts keys while the reader is typing elsewhere.
@@ -177,287 +206,109 @@ export function DictationSheet({
         onDismiss();
       }}
       className={cn(
-        'fixed right-3 top-[calc(env(safe-area-inset-top,0px)+3.75rem)] z-50 max-h-[calc(var(--app-h,100dvh)-4.5rem)] w-[calc(100vw-1.5rem)] max-w-sm overflow-y-auto rounded-panel border border-l-heavy border-border bg-surface font-ui shadow-panel',
+        'absolute inset-x-0 bottom-[calc(100%+0.5rem)] z-50 overflow-hidden rounded-panel border border-l-heavy border-border bg-surface font-ui shadow-panel',
         stage === 'recording' && 'border-l-err',
         (stage === 'starting' || stage === 'transcribing') && 'border-l-accent',
         (stage === 'empty' || stage === 'error') && 'border-l-warn',
       )}
     >
-      <div className="flex w-full min-w-0 flex-col gap-sm p-3">
-        <div className="flex min-w-0 items-center gap-sm">
-          {stage === 'recording' ? (
-            <LiveDot />
-          ) : stage === 'transcribing' ? (
-            <Loader2
-              size={16}
-              aria-hidden="true"
-              className="shrink-0 animate-spin text-accent motion-reduce:animate-none"
-            />
-          ) : stage === 'error' ? (
-            <AlertCircle size={16} aria-hidden="true" className="shrink-0 text-warn" />
-          ) : (
-            <Mic size={16} aria-hidden="true" className="shrink-0 text-fg-soft" />
-          )}
-          <span
-            id={titleId}
-            className="min-w-0 flex-1 truncate font-display text-title font-semibold tracking-display text-fg"
-          >
-            {title}
+      <div className="flex min-h-[56px] w-full min-w-0 items-center gap-xs px-2 py-1.5">
+        {stage === 'recording' ? (
+          <LiveDot />
+        ) : stage === 'transcribing' ? (
+          <Loader2
+            size={16}
+            aria-hidden="true"
+            className="shrink-0 animate-spin text-accent motion-reduce:animate-none"
+          />
+        ) : stage === 'error' ? (
+          <AlertCircle size={16} aria-hidden="true" className="shrink-0 text-warn" />
+        ) : (
+          <Mic size={16} aria-hidden="true" className="shrink-0 text-fg-soft" />
+        )}
+        <span id={titleId} className="sr-only">
+          {title}
+        </span>
+        {stage === 'recording' && (
+          <span className="mono shrink-0 tabular-nums text-ui text-muted" aria-hidden="true">
+            {formatElapsed(elapsedMs)}
           </span>
-          {stage === 'recording' && (
-            <span className="mono shrink-0 tabular-nums text-ui text-muted" aria-hidden="true">
-              {formatElapsed(elapsedMs)}
-            </span>
-          )}
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="min-h-[44px] min-w-[44px] shrink-0 justify-center p-0"
-            aria-label="Hide dictation panel; recording continues"
-            title="Hide this panel — recording continues"
-            onClick={onDismiss}
-          >
-            <X size={15} aria-hidden="true" />
-          </Button>
-        </div>
-
-        {/* One polite live region carries stage changes. The caption itself is
-            not announced word-by-word: it rewrites several times a second and
-            would talk over the reader. */}
-        <span className="sr-only" aria-live="polite" aria-atomic="true">
-          {stage === 'recording'
-            ? 'Recording'
-            : stage === 'transcribing'
-              ? 'Finishing transcription on this device, then inserting it into your draft'
-              : stage === 'empty'
-                ? 'No speech was captured'
-                : stage === 'error'
-                  ? `Dictation failed: ${errorMessage ?? failure.title}`
-                  : 'Starting'}
+        )}
+        <span
+          data-live-transcript={liveText.trim() ? 'preview' : 'waiting'}
+          aria-label="Live dictation status"
+          title={status}
+          className="min-w-0 flex-1 truncate text-ui leading-base text-fg"
+        >
+          {status}
         </span>
 
-        {(stage === 'starting' || stage === 'recording') && (
-          <RecordingBody
-            stage={stage}
-            inputMonitor={inputMonitor}
-            liveText={liveText}
-            pendingSegments={pendingSegments}
-            onStop={onStop}
-            onCancel={onCancel}
-          />
+        {stage === 'recording' && (
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            className="min-h-[44px] min-w-[44px] shrink-0 justify-center p-0"
+            aria-label="Stop recording and add text to your draft"
+            title="Stop and add to draft"
+            onClick={onStop}
+          >
+            <Square size={15} aria-hidden="true" />
+          </Button>
         )}
-
-        {stage === 'transcribing' && <TranscribingBody liveText={liveText} onCancel={onCancel} />}
-
-        {stage === 'empty' && (
-          <MessageBody
-            body="No speech was captured. Speak, then tap Stop."
-            onRetry={onRetry}
-            retryLabel="Record again"
-            onCancel={onCancel}
-          />
+        {(stage === 'empty' || stage === 'error') && (
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            className="min-h-[44px] min-w-[44px] shrink-0 justify-center p-0"
+            aria-label={stage === 'empty' ? 'Record again' : 'Try again'}
+            title={stage === 'empty' ? 'Record again' : 'Try again'}
+            onClick={onRetry}
+          >
+            <RotateCcw size={15} aria-hidden="true" />
+          </Button>
         )}
-
-        {stage === 'error' && (
-          <ErrorBody
-            body={errorMessage ?? 'Dictation failed.'}
-            hint={failure.hint}
-            liveText={liveText}
-            onRetry={onRetry}
-            onCancel={onCancel}
-          />
-        )}
-      </div>
-    </section>
-  );
-}
-
-/** The read-only preview surface. It is deliberately NOT a textarea: the words
- *  here are a disposable live hypothesis, not the text that gets inserted, so
- *  nothing about it should invite editing. */
-function LiveCaption({ text, pendingSegments }: { text: string; pendingSegments: number }) {
-  const hasText = text.trim().length > 0;
-  if (!hasText && pendingSegments === 0) {
-    return (
-      <div
-        data-live-transcript="waiting"
-        className="rounded-control border border-dashed border-border bg-surface-2 px-3 py-2 text-meta leading-base text-faint"
-      >
-        Words will appear here as you speak. Audio stays on this device.
-      </div>
-    );
-  }
-  return (
-    <div
-      data-live-transcript="preview"
-      aria-label="Live dictation preview"
-      className="rounded-control border border-border bg-surface-2 px-3 py-2 text-ui leading-base text-fg"
-    >
-      {text}
-      {pendingSegments > 0 && <span className="text-faint">{text.trim().length > 0 ? ' …' : '…'}</span>}
-    </div>
-  );
-}
-
-function RecordingBody({
-  stage,
-  inputMonitor,
-  liveText,
-  pendingSegments,
-  onStop,
-  onCancel,
-}: {
-  stage: DictationStage;
-  inputMonitor: CaptureMonitor | null;
-  liveText: string;
-  pendingSegments: number;
-  onStop(): void;
-  onCancel(): void;
-}) {
-  const starting = stage === 'starting';
-  return (
-    <div className="flex flex-col gap-sm">
-      <p className="text-ui text-muted">
-        {starting
-          ? 'Opening the microphone and local speech model…'
-          : 'Words appear as you speak — you never have to pause. Everything stays on this device.'}
-      </p>
-      {!starting && <InputWaveform monitor={inputMonitor} />}
-      {!starting && <LiveCaption text={liveText} pendingSegments={pendingSegments} />}
-      <div className="flex gap-xs">
         <Button
-          variant="primary"
-          size="md"
-          className="min-h-[44px] min-w-0 flex-1 justify-center gap-sm text-ui"
-          disabled={starting}
-          aria-label="Stop recording and insert into your draft"
-          onClick={onStop}
-        >
-          <Square size={15} aria-hidden="true" />
-          Stop &amp; insert
-        </Button>
-        <Button
+          type="button"
           variant="ghost"
-          size="md"
-          className="min-h-[44px] shrink-0 justify-center gap-xs"
-          aria-label="Cancel dictation"
+          size="sm"
+          className="min-h-[44px] min-w-[44px] shrink-0 justify-center p-0"
+          aria-label={stage === 'empty' ? 'Close dictation' : 'Cancel dictation'}
+          title={stage === 'empty' ? 'Close dictation' : 'Cancel dictation'}
           onClick={onCancel}
         >
-          <X size={14} aria-hidden="true" />
-          Cancel
+          <X size={15} aria-hidden="true" />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="min-h-[44px] min-w-[44px] shrink-0 justify-center p-0"
+          aria-label="Hide dictation panel; recording continues"
+          title="Hide this panel — recording continues"
+          onClick={onDismiss}
+        >
+          <EyeOff size={15} aria-hidden="true" />
         </Button>
       </div>
-    </div>
-  );
-}
 
-function TranscribingBody({ liveText, onCancel }: { liveText: string; onCancel(): void }) {
-  return (
-    <div className="flex flex-col gap-sm">
-      <p className="text-ui text-muted">
-        Running a final on-device decode and enhancement, then inserting the result into your draft automatically.
-      </p>
-      <LiveCaption text={liveText} pendingSegments={0} />
-      {/* Indeterminate, MOVING bar: honest about "something is happening" without
-          claiming a percentage the engine never reports. */}
-      <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-2" aria-hidden="true">
-        <div className="kt-dictation-bar h-full w-2/5 rounded-full bg-accent motion-reduce:animate-none" />
-      </div>
-      <Button
-        variant="ghost"
-        size="md"
-        className="min-h-[44px] w-full justify-center gap-xs"
-        aria-label="Cancel dictation"
-        onClick={onCancel}
-      >
-        <X size={14} aria-hidden="true" />
-        Cancel
-      </Button>
-    </div>
-  );
-}
-
-function ErrorBody({
-  body,
-  hint,
-  liveText,
-  onRetry,
-  onCancel,
-}: {
-  body: string;
-  hint?: string;
-  liveText: string;
-  onRetry(): void;
-  onCancel(): void;
-}) {
-  const hasPreview = liveText.trim().length > 0;
-  return (
-    <div className="flex flex-col gap-sm">
-      <p className="text-ui text-fg">{body}</p>
-      {hint && <p className="text-meta leading-base text-muted">{hint}</p>}
-      {hasPreview && <LiveCaption text={liveText} pendingSegments={0} />}
-      <Button
-        variant="primary"
-        size="md"
-        className="min-h-[48px] w-full justify-center gap-sm text-ui"
-        aria-label="Try again"
-        onClick={onRetry}
-      >
-        <RotateCcw size={15} aria-hidden="true" />
-        Try again
-      </Button>
-      <Button
-        variant="ghost"
-        size="md"
-        className="min-h-[44px] w-full justify-center gap-xs"
-        aria-label="Discard dictation"
-        onClick={onCancel}
-      >
-        <X size={14} aria-hidden="true" />
-        Cancel
-      </Button>
-    </div>
-  );
-}
-
-function MessageBody({
-  body,
-  hint,
-  onRetry,
-  retryLabel,
-  onCancel,
-}: {
-  body: string;
-  hint?: string;
-  onRetry(): void;
-  retryLabel: string;
-  onCancel(): void;
-}) {
-  return (
-    <div className="flex flex-col gap-sm">
-      <p className="text-ui text-fg">{body}</p>
-      {hint && <p className="text-meta text-muted">{hint}</p>}
-      <Button
-        variant="primary"
-        size="md"
-        className="min-h-[48px] w-full justify-center gap-sm text-ui"
-        aria-label={retryLabel}
-        onClick={onRetry}
-      >
-        <RotateCcw size={15} aria-hidden="true" />
-        {retryLabel}
-      </Button>
-      <Button
-        variant="ghost"
-        size="md"
-        className="min-h-[44px] w-full justify-center gap-xs"
-        aria-label="Close dictation"
-        onClick={onCancel}
-      >
-        <X size={14} aria-hidden="true" />
-        Cancel
-      </Button>
-    </div>
+      {/* Announce stage changes, but never each provisional rewrite. */}
+      <span className="sr-only" aria-live="polite" aria-atomic="true">
+        {stage === 'recording'
+          ? 'Recording'
+          : stage === 'transcribing'
+            ? 'Finishing transcription on this device, then adding it to your draft'
+            : stage === 'empty'
+              ? 'No speech was captured'
+              : stage === 'error'
+                ? `Dictation failed: ${errorMessage ?? failure.title}`
+                : 'Starting'}
+      </span>
+      <span id={safetyId} className="sr-only">
+        Microphone audio and speech recognition stay on this device. Dictation only updates your draft and is never sent
+        automatically.
+      </span>
+    </section>
   );
 }

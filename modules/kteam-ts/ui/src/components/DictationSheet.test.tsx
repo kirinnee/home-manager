@@ -116,17 +116,20 @@ describe('DictationSheet rendering', () => {
     expect(html).toBe('');
   });
 
-  test('recording is a non-modal mini panel with a waveform, clock, read-only caption and Stop', () => {
+  test('recording is a composer-anchored 56px strip with a clock, caption and icon actions', () => {
     const html = render({ stage: 'recording', elapsedMs: 5000 });
     expect(html).toContain('0:05');
     expect(html).toContain('data-dictation-panel="non-modal"');
     expect(html).toContain('role="region"');
-    expect(html).toContain('<canvas');
-    // Stop now finishes AND inserts automatically — there is no separate Insert.
-    expect(html).toContain('Stop &amp; insert');
+    expect(html).toContain('absolute inset-x-0 bottom-[calc(100%+0.5rem)]');
+    expect(html).toContain('min-h-[56px]');
+    expect(html).toContain('truncate');
+    expect(html).not.toContain('<canvas');
+    expect(html).toContain('aria-label="Stop recording and add text to your draft"');
     expect(html).toContain('Audio stays on this device');
-    expect(html).toContain('Cancel');
+    expect(html).toContain('aria-label="Cancel dictation"');
     expect(html).toContain('Hide dictation panel; recording continues');
+    expect(html.match(/min-h-\[44px\]/g)).toHaveLength(3);
     // Non-modal, and read-only: no dialog, no scrim, and NO editable field.
     expect(html).not.toContain('role="dialog"');
     expect(html).not.toContain('aria-modal');
@@ -155,11 +158,11 @@ describe('DictationSheet rendering', () => {
     expect(html).not.toContain('aria-label="Provisional dictated text"');
   });
 
-  test('finishing says a final decode and enhancement run, then auto-insert into the draft', () => {
+  test('finishing keeps the final local decode and captured words in the one-line status', () => {
     const html = render({ stage: 'transcribing', liveText: 'nearly done' });
-    expect(html).toContain('final on-device decode and enhancement');
-    expect(html.toLowerCase()).toContain('inserting the result into your draft automatically');
-    // Still a read-only preview, still no Insert button.
+    expect(html.toLowerCase()).toContain('final on-device decode and enhancement');
+    expect(html).toContain('Last heard: nearly done');
+    // Still a read-only preview, still no manual Insert button.
     expect(html).toContain('nearly done');
     expect(html).not.toContain('<textarea');
     expect(html).not.toContain('Insert');
@@ -210,6 +213,8 @@ describe('DictationSheet rendering', () => {
       expect(html).not.toContain('sent to the daemon');
       expect(html).not.toContain('sent to google');
       expect(html).not.toContain('sent to apple');
+      expect(html).toContain('speech recognition stay on this device');
+      expect(html).toContain('never sent automatically');
     }
   });
 });
