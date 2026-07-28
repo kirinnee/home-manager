@@ -13,6 +13,7 @@ import {
   UnifiedBrowserSurface,
   type UnifiedBrowserDependencies,
 } from './UnifiedBrowserSurface';
+import type { RemoteBrowserStatus } from '../lib/remote-browser';
 
 afterEach(() => resetBrowserSurfaceSessions());
 
@@ -73,6 +74,23 @@ describe('browser address policy', () => {
       kind: 'error',
       message: 'Only HTTP and HTTPS addresses can be opened.',
     });
+  });
+
+  test('answers a half-typed scheme with encouragement instead of a scolding or a search', () => {
+    expect(resolveBrowserAddress('https://')).toEqual({
+      kind: 'error',
+      message: 'Keep typing—add a site after https://',
+    });
+    expect(resolveBrowserAddress('https:')).toEqual({
+      kind: 'error',
+      message: 'Keep typing—add a site after https://',
+    });
+    expect(resolveBrowserAddress('HTTP://')).toEqual({
+      kind: 'error',
+      message: 'Keep typing—add a site after http://',
+    });
+    // The friendlier copy must not swallow a real address that merely starts the same way.
+    expect(resolveBrowserAddress('https://example.test/').kind).toBe('url');
   });
 });
 
@@ -298,8 +316,6 @@ describe('unified browser chrome', () => {
     expect(html).toContain('aria-label="Browser engine"');
     expect(html).toContain('aria-pressed="true"');
     expect(html).toContain('URL or DuckDuckGo search');
-    expect(html).toContain('Preview tracks app-opened pages; in-page links may not update here.');
-    expect(html).toContain('Some sites block previews');
     expect(html).toContain('Open in real browser');
     expect(html).toContain('Open externally in a new tab');
     expect(html).toContain('min-h-[44px]');
@@ -307,6 +323,25 @@ describe('unified browser chrome', () => {
     expect(html).toContain('sandbox=');
     expect(html).not.toContain('autofocus');
     expect(html).not.toContain('aria-modal');
+  });
+
+  test('states the embedded-reader limit plainly without claiming refusal detection', () => {
+    const html = renderToStaticMarkup(
+      <UnifiedBrowserSurface
+        sessionId="session-a"
+        destination={destination}
+        presentation="pane"
+        titleId="browser-title"
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(html).toContain('Preview accepts the address');
+    expect(html).toContain('refuse to load in an embedded reader');
+    expect(html).toContain('this reader cannot tell when it does');
+    expect(html).toContain('Real is the full interactive browser');
+    // Preview owns no tab strip: the only Chrome tabs live inside the REAL engine.
+    expect(html).not.toContain('role="tablist"');
   });
 
   test('embeds the remote engine content-only and detaches its viewer while the retained surface is hidden', () => {
@@ -554,7 +589,7 @@ describe('unified browser chrome', () => {
       target: { value: 'github.com/openai' },
     });
     await flush();
-    let form = visit(harness.output, element => element.type === 'form')!;
+    const form = visit(harness.output, element => element.type === 'form')!;
     (form.props!.onSubmit as (event: { preventDefault: () => void }) => void)({ preventDefault: () => undefined });
     await flush();
 
@@ -572,6 +607,114 @@ describe('unified browser chrome', () => {
     await flush();
     input = visit(harness.output, element => element.type === 'input')!;
     expect(input.props!.value).toBe('https://github.com/openai');
+    harness.unmount();
+  });
+
+  test('submits the typed address even though tapping Go blurs the field first', async () => {
+    const harness = new HookHarness();
+    harness.render(() =>
+      UnifiedBrowserSurface({
+        sessionId: 'session-a',
+        destination,
+        presentation: 'pane',
+        titleId: 'browser-title',
+        onClose: () => undefined,
+      }),
+    );
+
+    let input = visit(harness.output, element => element.type === 'input')!;
+    (input.props!.onChange as (event: { target: { value: string } }) => void)({
+      target: { value: 'github.com/openai' },
+    });
+    await flush();
+
+    // Tapping Go blurs the address input before the form submits. The old
+    // onBlur handler restored the previous URL there, and the submit then
+    // navigated to the OLD address. The reset must not exist at all.
+    input = visit(harness.output, element => element.type === 'input')!;
+    const blur = input.props!.onBlur as (() => void) | undefined;
+    expect(blur).toBeUndefined();
+    blur?.();
+    await flush();
+
+    expect(visit(harness.output, element => element.type === 'input')!.props!.value).toBe('github.com/openai');
+    const form = visit(harness.output, element => element.type === 'form')!;
+    (form.props!.onSubmit as (event: { preventDefault: () => void }) => void)({ preventDefault: () => undefined });
+    await flush();
+
+    expect(
+      (visit(harness.output, element => element.type === InAppBrowserFrame)!.props!.destination as { href: string })
+        .href,
+    ).toBe('https://github.com/openai');
+    harness.unmount();
+  });
+
+  test('drives remote back/forward from the daemon history flags and shows page load state', async () => {
+    rememberBrowserEngine('session-a', 'remote');
+    const dependencies: UnifiedBrowserDependencies = {
+      remoteApi,
+      RemotePane: () => <div />,
+    };
+    const harness = new HookHarness();
+    harness.render(() =>
+      UnifiedBrowserSurface({
+        sessionId: 'session-a',
+        destination,
+        presentation: 'pane',
+        titleId: 'browser-title',
+        onClose: () => undefined,
+        dependencies,
+      }),
+    );
+    await flush();
+
+    const publish = (next: Partial<RemoteBrowserStatus>) => {
+      const pane = visit(harness.output, element => element.type === dependencies.RemotePane)!;
+      (pane.props!.onStatusChange as (status: RemoteBrowserStatus) => void)({ ...remoteStatus, ...next });
+    };
+    const control = (label: string) => visit(harness.output, element => element.props?.['aria-label'] === label)!;
+
+    publish({ canGoBack: false, canGoForward: true, pageState: 'ready' });
+    await flush();
+    expect(control('Back in real browser').props!.disabled).toBe(true);
+    expect(control('Forward in real browser').props!.disabled).toBe(false);
+
+    publish({ canGoBack: true, canGoForward: false, pageState: 'loading' });
+    await flush();
+    expect(control('Back in real browser').props!.disabled).toBe(false);
+    expect(control('Forward in real browser').props!.disabled).toBe(true);
+    expect(visit(harness.output, element => element.props?.children === 'Loading page…')).toBeDefined();
+
+    publish({ pageState: 'error', pageError: 'net::ERR_NAME_NOT_RESOLVED' });
+    await flush();
+    expect(
+      visit(
+        harness.output,
+        element => element.props?.role === 'alert' && element.props?.children === 'net::ERR_NAME_NOT_RESOLVED',
+      ),
+    ).toBeDefined();
+    harness.unmount();
+  });
+
+  test('leaves remote navigation enabled while the daemon has not reported history capability', async () => {
+    rememberBrowserEngine('session-a', 'remote');
+    const dependencies: UnifiedBrowserDependencies = { remoteApi, RemotePane: () => <div /> };
+    const harness = new HookHarness();
+    harness.render(() =>
+      UnifiedBrowserSurface({
+        sessionId: 'session-a',
+        destination,
+        presentation: 'pane',
+        titleId: 'browser-title',
+        onClose: () => undefined,
+        dependencies,
+      }),
+    );
+    await flush();
+
+    expect(
+      visit(harness.output, element => element.props?.['aria-label'] === 'Back in real browser')!.props!.disabled,
+    ).toBe(false);
     harness.unmount();
   });
 });

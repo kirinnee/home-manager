@@ -3,7 +3,14 @@ import { isSafeSessionId } from './pins-store';
 import type { KTeamEvent } from './types';
 import { BrowserStreamBridge, type BrowserStreamDownstream } from './browser-stream';
 import type { BrowserService } from './browser-service';
-import { BrowserError, isBrowserError, type BrowserAction, type BrowserActionResult } from './browser-types';
+import { normalizeBrowserUrl } from './browser-runtime';
+import {
+  BROWSER_MAX_PAGE_ID_LENGTH,
+  BrowserError,
+  isBrowserError,
+  type BrowserAction,
+  type BrowserActionResult,
+} from './browser-types';
 
 const BROWSER_PATH = /^\/v1\/sessions\/([^/]+)\/browser\/?$/;
 const BROWSER_STREAM_PATH = /^\/v1\/sessions\/([^/]+)\/browser\/stream\/?$/;
@@ -51,6 +58,11 @@ function requiredString(raw: Record<string, unknown>, key: string, maximum = MAX
   return value;
 }
 
+function optionalBrowserUrl(raw: Record<string, unknown>): string | undefined {
+  if (raw['url'] === undefined) return undefined;
+  return normalizeBrowserUrl(requiredString(raw, 'url'));
+}
+
 export function parseBrowserAction(value: unknown): BrowserAction {
   const raw = asObject(value);
   switch (raw['action']) {
@@ -61,6 +73,14 @@ export function parseBrowserAction(value: unknown): BrowserAction {
         action: 'open',
         ...(typeof raw['url'] === 'string' && raw['url'].trim() ? { url: raw['url'] } : {}),
       };
+    case 'new-page': {
+      const url = optionalBrowserUrl(raw);
+      return { action: 'new-page', ...(url ? { url } : {}) };
+    }
+    case 'activate-page':
+      return { action: 'activate-page', pageId: requiredString(raw, 'pageId', BROWSER_MAX_PAGE_ID_LENGTH) };
+    case 'close-page':
+      return { action: 'close-page', pageId: requiredString(raw, 'pageId', BROWSER_MAX_PAGE_ID_LENGTH) };
     case 'stop':
       return { action: 'stop' };
     case 'navigate':
@@ -105,7 +125,7 @@ export function parseBrowserAction(value: unknown): BrowserAction {
     default:
       throw new BrowserError(
         'bad_request',
-        'browser action must be start, open, stop, navigate, click, type, read, screenshot, back, forward, reload, resize, or human-activity',
+        'browser action must be start, open, stop, new-page, activate-page, close-page, navigate, click, type, read, screenshot, back, forward, reload, resize, or human-activity',
         400,
       );
   }

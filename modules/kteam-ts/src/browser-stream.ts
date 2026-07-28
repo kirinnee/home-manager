@@ -1,4 +1,5 @@
 import {
+  BROWSER_MAX_PAGE_ID_LENGTH,
   BrowserError,
   type BrowserInputEvent,
   type BrowserKeyInput,
@@ -12,12 +13,16 @@ const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const MAX_DOWNSTREAM_BUFFERED_BYTES = 4 * 1024 * 1024;
 const MAX_KEY_CHARS = 128;
 const MAX_INSERT_TEXT_CHARS = 200_000;
+const FRAME_ENVELOPE_MAGIC = Uint8Array.of(0x4b, 0x42, 0x52, 0x46); // "KBRF"
+const FRAME_ENVELOPE_VERSION = 1;
+const FRAME_ENVELOPE_HEADER_BYTES = 7;
 
 export type BrowserStreamChunk = string | ArrayBuffer | ArrayBufferView;
 
 export interface BrowserStreamDownstream {
-  /** Screencast output is decoded JPEG bytes; the wider BrowserStreamChunk
-   * union is accepted only in the client-to-daemon input direction. */
+  /** Screencast output is one versioned page-id/JPEG envelope; the wider
+   * BrowserStreamChunk union is accepted only in the client-to-daemon input
+   * direction. */
   send(chunk: Uint8Array): number | void;
   close(code?: number, reason?: string): void;
   getBufferedAmount?(): number;
@@ -101,8 +106,36 @@ function inputBytes(chunk: BrowserStreamChunk): Uint8Array {
   return new Uint8Array(chunk);
 }
 
-/** Authenticated browser stream: independent JPEG frames flow down, bounded
- * JSON CDP input flows up. Neither direction is logged or persisted. */
+/**
+ * Browser frame envelope v1 (one WebSocket binary message):
+ *
+ *   bytes 0..3   ASCII magic "KBRF"
+ *   byte  4      version 1
+ *   bytes 5..6   unsigned big-endian UTF-8 page-id byte length
+ *   next N bytes UTF-8 opaque page id
+ *   remainder    JPEG bytes
+ *
+ * The message boundary supplies the JPEG length. Identity and pixels can
+ * therefore never be reordered independently. Keep this description in sync
+ * with decodeRemoteBrowserFrame() in ui/src/lib/remote-browser.ts.
+ */
+export function encodeBrowserFrameEnvelope(pageId: string, jpegBytes: Uint8Array): Uint8Array | undefined {
+  if (pageId.length === 0 || pageId.length > BROWSER_MAX_PAGE_ID_LENGTH || jpegBytes.byteLength === 0) {
+    return undefined;
+  }
+  const pageIdBytes = new TextEncoder().encode(pageId);
+  if (pageIdBytes.byteLength === 0 || pageIdBytes.byteLength > 0xffff) return undefined;
+  const envelope = new Uint8Array(FRAME_ENVELOPE_HEADER_BYTES + pageIdBytes.byteLength + jpegBytes.byteLength);
+  envelope.set(FRAME_ENVELOPE_MAGIC, 0);
+  envelope[4] = FRAME_ENVELOPE_VERSION;
+  new DataView(envelope.buffer).setUint16(5, pageIdBytes.byteLength, false);
+  envelope.set(pageIdBytes, FRAME_ENVELOPE_HEADER_BYTES);
+  envelope.set(jpegBytes, FRAME_ENVELOPE_HEADER_BYTES + pageIdBytes.byteLength);
+  return envelope;
+}
+
+/** Authenticated browser stream: atomic page-id/JPEG envelopes flow down,
+ * bounded JSON CDP input flows up. Neither direction is logged or persisted. */
 export class BrowserStreamBridge {
   private closed = false;
   private queuedInputBytes = 0;
@@ -176,12 +209,23 @@ export class BrowserStreamBridge {
     if (this.closed) return;
     try {
       if ((this.downstream.getBufferedAmount?.() ?? 0) > MAX_DOWNSTREAM_BUFFERED_BYTES) return;
+      if (
+        typeof frame.pageId !== 'string' ||
+        frame.pageId.length === 0 ||
+        frame.pageId.length > BROWSER_MAX_PAGE_ID_LENGTH
+      ) {
+        // A frame with no trustworthy identity cannot be placed under a real
+        // active-page marker. Drop it without taking down a healthy viewer.
+        return;
+      }
       const bytes = Buffer.from(frame.dataBase64, 'base64');
       if (bytes.byteLength === 0 || bytes.byteLength > MAX_FRAME_BYTES) {
         this.finish(1009, 'browser frame exceeded');
         return;
       }
-      const sent = this.downstream.send(bytes);
+      const envelope = encodeBrowserFrameEnvelope(frame.pageId, bytes);
+      if (!envelope) return;
+      const sent = this.downstream.send(envelope);
       if (typeof sent === 'number' && sent < 0) this.finish(1013, 'browser viewer unavailable');
     } catch {
       this.finish(1011, 'browser display send failed');

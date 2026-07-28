@@ -2,7 +2,7 @@
 
 import { Command, Option } from 'commander';
 import { existsSync } from 'fs';
-import { readFile } from 'fs/promises';
+import { readFile, writeFile } from 'fs/promises';
 import path from 'path';
 import { ApiClient } from './api-client';
 import {
@@ -46,6 +46,14 @@ import { parseTaskCli, renderTaskCli, taskCliRequest } from './tasks-cli';
 import { parseAttentionCli, attentionCliRequest, renderAttentionCli } from './attention-cli';
 import { isAttentionError } from './attention-types';
 import { renderAnalytics } from './analytics-cli';
+import {
+  BROWSER_CLI_USAGE,
+  browserCliRequest,
+  browserScreenshotBytes,
+  parseBrowserCli,
+  renderBrowserCli,
+} from './browser-cli';
+import { isBrowserError } from './browser-types';
 
 const VERSION = KTEAM_VERSION;
 const paths = createPaths();
@@ -389,6 +397,39 @@ program
       process.stdout.write(renderAttentionCli(command, response));
     } catch (error) {
       if (isAttentionError(error)) {
+        process.stderr.write(`${error.message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
+  });
+
+program
+  .command('browser')
+  .description('control the shared session browser (defaults to this session)')
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .argument('[args...]')
+  .addHelpText('after', `\n${BROWSER_CLI_USAGE}\n`)
+  .action(async (argv: string[]) => {
+    try {
+      const command = parseBrowserCli(argv);
+      const requestSpec = browserCliRequest(command, process.env.KTEAM_SESSION_ID);
+      const response = await (
+        await client()
+      ).request<unknown>(requestSpec.path, {
+        method: requestSpec.method,
+        ...(requestSpec.body === undefined
+          ? {}
+          : { body: JSON.stringify(requestSpec.body), headers: { 'content-type': 'application/json' } }),
+      });
+      if (command.command === 'screenshot') {
+        await writeFile(command.output, browserScreenshotBytes(response), { mode: 0o600 });
+      }
+      process.stdout.write(renderBrowserCli(command, response));
+    } catch (error) {
+      if (isBrowserError(error)) {
         process.stderr.write(`${error.message}\n`);
         process.exitCode = 1;
         return;
