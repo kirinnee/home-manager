@@ -16,7 +16,9 @@ const MAX_INSERT_TEXT_CHARS = 200_000;
 export type BrowserStreamChunk = string | ArrayBuffer | ArrayBufferView;
 
 export interface BrowserStreamDownstream {
-  send(chunk: BrowserStreamChunk): number | void;
+  /** Screencast output is decoded JPEG bytes; the wider BrowserStreamChunk
+   * union is accepted only in the client-to-daemon input direction. */
+  send(chunk: Uint8Array): number | void;
   close(code?: number, reason?: string): void;
   getBufferedAmount?(): number;
 }

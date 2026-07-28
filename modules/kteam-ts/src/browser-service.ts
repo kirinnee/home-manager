@@ -153,7 +153,11 @@ export class BrowserService {
   }
 
   private activeCount(): number {
-    return this.entries.size + this.starting.size;
+    // A launch is present in `starting` until start()'s finally block runs, but
+    // its fulfilled runtime is inserted into `entries` before the response is
+    // rendered. Count session ids, not map slots, or one freshly started
+    // browser reports as two and makes the UI's fleet-capacity display lie.
+    return new Set([...this.entries.keys(), ...this.starting.keys()]).size;
   }
 
   async resolveSession(sessionRef: string): Promise<string> {

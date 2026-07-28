@@ -22,6 +22,15 @@ import type {
 } from './tasks';
 import { TerminalApi } from './terminal-api';
 import type { TerminalService } from './terminal-service';
+import { BrowserApi } from './browser-api';
+import { BrowserService, type ManagedBrowserRuntime } from './browser-service';
+import {
+  BrowserError,
+  type BrowserInputEvent,
+  type BrowserScreencastFrame,
+  type BrowserViewport,
+} from './browser-types';
+import { createPaths } from './paths';
 
 const view: SessionView = {
   directory: '/tmp/kteam/s1',
@@ -1356,6 +1365,204 @@ describe('web terminal API integration', () => {
     expect(received.join('')).toContain('stream-ready');
     expect(received.join('')).toContain('terminal-output:probe');
     expect(terminals.writes).toEqual(['probe\r']);
+  });
+});
+
+describe('remote browser API integration', () => {
+  class FakeBrowserRuntime implements ManagedBrowserRuntime {
+    viewport: BrowserViewport = { width: 1280, height: 800 };
+    inputs: BrowserInputEvent[] = [];
+    listener?: (frame: BrowserScreencastFrame) => void;
+
+    async resize(viewport: BrowserViewport) {
+      this.viewport = viewport;
+    }
+    async navigate(url: string) {
+      return { url, title: 'Browser fixture' };
+    }
+    async click() {
+      return { url: 'https://example.test/', title: 'Browser fixture' };
+    }
+    async type() {
+      return { url: 'https://example.test/', title: 'Browser fixture' };
+    }
+    async read() {
+      return { url: 'https://example.test/', title: 'Browser fixture', text: 'fixture page' };
+    }
+    async screenshot() {
+      return { url: 'https://example.test/', title: 'Browser fixture', screenshotBase64: 'cG5n' };
+    }
+    async back() {
+      return { url: 'https://example.test/back', title: 'Browser fixture' };
+    }
+    async forward() {
+      return { url: 'https://example.test/forward', title: 'Browser fixture' };
+    }
+    async reload() {
+      return { url: 'https://example.test/', title: 'Browser fixture' };
+    }
+    async location() {
+      return { url: 'about:blank', title: '' };
+    }
+    async startScreencast(listener: (frame: BrowserScreencastFrame) => void) {
+      this.listener = listener;
+      setTimeout(() => {
+        if (this.listener === listener) {
+          listener({
+            dataBase64: Buffer.from('browser-frame').toString('base64'),
+            width: this.viewport.width,
+            height: this.viewport.height,
+          });
+        }
+      }, 0);
+    }
+    async stopScreencast() {
+      this.listener = undefined;
+    }
+    async dispatchInput(input: BrowserInputEvent) {
+      this.inputs.push(input);
+    }
+    async close() {
+      this.listener = undefined;
+    }
+  }
+
+  const browserServices: BrowserService[] = [];
+  afterEach(async () => {
+    await Promise.allSettled(browserServices.splice(0).map(service => service.close()));
+  });
+
+  function browserServer(
+    options: {
+      runtime?: FakeBrowserRuntime;
+      wardenToken?: string;
+      launchFailure?: BrowserError;
+    } = {},
+  ) {
+    const runtime = options.runtime ?? new FakeBrowserRuntime();
+    const resolveCalls: string[] = [];
+    const browserService = new BrowserService(
+      createPaths('/tmp/kteam-browser-api-server-test'),
+      {
+        resolve: async ref => {
+          resolveCalls.push(ref);
+          return ref === 's1' ? 's1' : undefined;
+        },
+      },
+      {
+        runtimeFactory: async () => {
+          if (options.launchFailure) throw options.launchFailure;
+          return runtime;
+        },
+      },
+    );
+    browserServices.push(browserService);
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      ...(options.wardenToken ? { wardenToken: options.wardenToken } : {}),
+      service: new FakeService(),
+      browser: new BrowserApi(browserService),
+    });
+    servers.push(server);
+    return { server, base: `http://127.0.0.1:${server.port}`, runtime, resolveCalls };
+  }
+
+  test('mounts status/start before generic actions and uses only the resolved actor', async () => {
+    const { base, resolveCalls } = browserServer({ wardenToken: 'warden' });
+    const admin = { authorization: 'Bearer secret', 'content-type': 'application/json' };
+
+    const status = await fetch(`${base}/v1/sessions/s1/browser`, { headers: admin });
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({ sessionId: 's1', state: 'stopped' });
+
+    const started = await fetch(`${base}/v1/sessions/s1/browser`, {
+      method: 'POST',
+      headers: admin,
+      body: JSON.stringify({ action: 'start', actor: 'warden:spoofed' }),
+    });
+    expect(started.status).toBe(200);
+    expect(await started.json()).toMatchObject({
+      status: { sessionId: 's1', state: 'running', lastActor: { kind: 'human', action: 'start' } },
+    });
+
+    const owningPeer = await fetch(`${base}/v1/sessions/s1/browser`, {
+      headers: { ...admin, 'x-kteam-session-id': 's1' },
+    });
+    expect(owningPeer.status).toBe(200);
+    const otherPeer = await fetch(`${base}/v1/sessions/s1/browser`, {
+      headers: { ...admin, 'x-kteam-session-id': 'someone-else' },
+    });
+    expect(otherPeer.status).toBe(403);
+
+    for (const path of ['/v1/sessions/s1/browser', '/v1/sessions/s1/browser/stream']) {
+      const denied = await fetch(`${base}${path}`, { headers: { authorization: 'Bearer warden' } });
+      expect(denied.status).toBe(403);
+    }
+
+    const callsBeforeTraversal = resolveCalls.length;
+    const encodedSeparator = await fetch(`${base}/v1/sessions/..%2Fsecret/browser`, { headers: admin });
+    expect(encodedSeparator.status).toBe(404);
+    const normalizedEscape = await fetch(`${base}/v1/sessions/s1/browser/%2e%2e/send`, { headers: admin });
+    expect(normalizedEscape.status).toBe(404);
+    expect(resolveCalls).toHaveLength(callsBeforeTraversal);
+  });
+
+  test('carries screencast frames and human input over the mounted WebSocket', async () => {
+    const { server, base, runtime } = browserServer();
+    const started = await fetch(`${base}/v1/sessions/s1/browser`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'start' }),
+    });
+    expect(started.status).toBe(200);
+
+    const socket = new WebSocket(`ws://127.0.0.1:${server.port}/v1/sessions/s1/browser/stream?token=secret`);
+    socket.binaryType = 'arraybuffer';
+    const frame = await new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('browser websocket timeout')), 3000);
+      socket.onopen = () => {
+        socket.send(JSON.stringify({ kind: 'insertText', text: 'from-human' }));
+      };
+      socket.onmessage = message => {
+        clearTimeout(timeout);
+        resolve(Buffer.from(message.data as ArrayBuffer).toString('utf8'));
+      };
+      socket.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error('browser websocket error'));
+      };
+    });
+    expect(frame).toBe('browser-frame');
+
+    for (let attempt = 0; attempt < 20 && runtime.inputs.length === 0; attempt += 1) await Bun.sleep(10);
+    expect(runtime.inputs).toEqual([{ kind: 'insertText', text: 'from-human' }]);
+    socket.close();
+  });
+
+  test('preserves the real launch failure in the response and subsequent status', async () => {
+    const missingChrome = new BrowserError(
+      'launch_failed',
+      'Google Chrome was not found for linux; set KTEAM_CHROME_BIN to its executable',
+      503,
+    );
+    const { base } = browserServer({ launchFailure: missingChrome });
+    const headers = { authorization: 'Bearer secret', 'content-type': 'application/json' };
+    const start = await fetch(`${base}/v1/sessions/s1/browser`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ action: 'start' }),
+    });
+    expect(start.status).toBe(503);
+    expect(await start.json()).toEqual({
+      error: missingChrome.message,
+      code: 'launch_failed',
+    });
+
+    const status = await fetch(`${base}/v1/sessions/s1/browser`, { headers });
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({ state: 'error', error: missingChrome.message });
   });
 });
 
