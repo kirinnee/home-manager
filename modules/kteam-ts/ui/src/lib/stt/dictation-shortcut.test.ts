@@ -50,6 +50,22 @@ describe('capture, matching and defensive parse', () => {
     expect(matchesDictationShortcut(binding, key({ key: 'v', code: 'KeyV', shiftKey: false }))).toBe(false);
   });
 
+  test('matches a real-browser-shaped keyup whose key and code live on the prototype', () => {
+    const browserEvent = Object.create(
+      Object.defineProperties(
+        {},
+        {
+          key: { get: () => 'v' },
+          code: { get: () => 'KeyV' },
+        },
+      ),
+    ) as Pick<ShortcutKeyboardEvent, 'code' | 'key'>;
+    expect(Object.keys(browserEvent)).toEqual([]);
+    expect(sameDictationShortcutTrigger({ code: 'KeyV', key: 'v', modifiers: ['Alt', 'Shift'] }, browserEvent)).toBe(
+      true,
+    );
+  });
+
   test('a corrupt stored value degrades to the sane default', () => {
     expect(parseDictationShortcut({ code: '', key: '\u0000', modifiers: ['Telepathy'] })).toEqual({
       ...DEFAULT_DICTATION_SHORTCUT,

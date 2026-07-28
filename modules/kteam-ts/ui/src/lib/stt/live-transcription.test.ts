@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  LIVE_TRANSCRIPTION_FIRST_LOOK_MS,
+  LIVE_TRANSCRIPTION_INTERVAL_MS,
   LocalAgreementTranscriber,
   completeTranscriptText,
   emptyLiveTranscript,
@@ -133,6 +135,66 @@ describe('audio helpers', () => {
 });
 
 describe('LocalAgreementTranscriber', () => {
+  test('cuts the deterministic first-visible schedule from 2.9s to 2.15s, then widens the cadence', async () => {
+    const updates: LiveTranscriptSnapshot[] = [];
+    let calls = 0;
+    const processingMs = 1_400;
+    const stream = new LocalAgreementTranscriber({
+      sampleRate: 1_000,
+      paddingMs: 0,
+      minAudioMs: 100,
+      minPeakRms: 0.001,
+      transcribe: async () => {
+        calls += 1;
+        return hypothesis(['first', 'words'], processingMs);
+      },
+      onUpdate: update => updates.push(update),
+    });
+
+    stream.push(tone(LIVE_TRANSCRIPTION_FIRST_LOOK_MS - 1));
+    await tick();
+    expect(calls).toBe(0);
+    stream.push(tone(1));
+    await tick();
+
+    const first = updates.at(-1)!;
+    const releaseScheduleMs = LIVE_TRANSCRIPTION_INTERVAL_MS + processingMs;
+    const firstLookScheduleMs = first.stats.firstVisibleAudioMs! + first.stats.firstVisibleProcessingMs!;
+    expect({ releaseScheduleMs, firstLookScheduleMs }).toEqual({
+      releaseScheduleMs: 2_900,
+      firstLookScheduleMs: 2_150,
+    });
+
+    stream.push(tone(LIVE_TRANSCRIPTION_INTERVAL_MS - 1));
+    await tick();
+    expect(calls).toBe(1);
+    stream.push(tone(1));
+    await tick();
+    expect(calls).toBe(2);
+    stream.cancel();
+  });
+
+  test('never schedules a no-op first look below the minimum decodable audio', async () => {
+    const updates: LiveTranscriptSnapshot[] = [];
+    let calls = 0;
+    const stream = make(
+      async () => {
+        calls += 1;
+        return hypothesis(['enough', 'audio']);
+      },
+      updates,
+      { intervalMs: 1_500, firstLookMs: 100, minAudioMs: 450 },
+    );
+
+    stream.push(tone(449));
+    await tick();
+    expect(calls).toBe(0);
+    stream.push(tone(1));
+    await tick();
+    expect(calls).toBe(1);
+    stream.cancel();
+  });
+
   test('publishes while speech is continuous; no pause or VAD endpoint is involved', async () => {
     const updates: LiveTranscriptSnapshot[] = [];
     const stream = make(async () => hypothesis(['hello', 'world']), updates);
