@@ -260,6 +260,9 @@ export interface SessionState {
    *  real work from a wedged hook that both render as "Working". */
   lastToolStartedAt?: string;
   quota?: {
+    /** Exact kfleet billing evidence: true means a subscription/usage-window
+     * account; false means an untracked raw API account. Missing is unknown. */
+    usageBased?: boolean;
     atLimit?: boolean;
     authOk?: boolean;
     /** Usage provider from the kfleet feed (anthropic/codex = OAuth,
@@ -415,9 +418,10 @@ export interface SendRequest {
 }
 
 /** What actually happened to a send: injected into the live turn, queued for
- *  the next prompt-ready boundary, or delivered by reviving a finished
- *  session as its next turn. Additive — absent on older daemons. */
-export type SendDisposition = 'delivered' | 'queued' | 'revived';
+ *  the next prompt-ready boundary, delivered by reviving a finished session,
+ *  or retained durably until an explicit revive can recover it. Additive —
+ *  absent on older daemons. */
+export type SendDisposition = 'delivered' | 'queued' | 'revived' | 'queued-for-revive';
 
 /** Teammate-driven lifecycle signals. `done`/`help` are the original pair;
  *  `waiting`/`working` declare and end a deliberate park (see SessionState.waiting).
