@@ -109,8 +109,17 @@ describe('the timestamp gutter', () => {
     expect(unprefixed(ASSISTANT_LAYOUT.gutter)).toEqual([]);
   });
 
-  test('retains the established desktop measure', () => {
-    expect(ASSISTANT_LAYOUT.gutter).toContain('sm:pr-[54px]');
+  // The clock and the pin button BOTH sit in this corner and BOTH reveal on the
+  // same hover, so the reserve has to clear the pair. Asserting the arithmetic
+  // rather than a magic number is what catches the regression where one element
+  // is moved and the reserve is not: the pin used to sit on top of the clock.
+  test('reserves room for the clock beside the pin, not under it', () => {
+    const px = (value: string): number => Number(/\[(\d+)px\]/.exec(value)?.[1] ?? NaN);
+    const reserve = px(ASSISTANT_LAYOUT.gutter);
+    const stampWidth = px(/w-\[\d+px\]/.exec(ASSISTANT_LAYOUT.stamp)?.[0] ?? '');
+    const stampOffset = px(/right-\[\d+px\]/.exec(ASSISTANT_LAYOUT.stamp)?.[0] ?? '');
+    expect(stampOffset).toBeGreaterThan(0);
+    expect(reserve).toBeGreaterThanOrEqual(stampOffset + stampWidth);
   });
 });
 

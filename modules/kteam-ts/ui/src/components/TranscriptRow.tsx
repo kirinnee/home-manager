@@ -634,11 +634,14 @@ function TurnBoundary({ block }: { block: Extract<TranscriptBlock, { kind: 'turn
 export const ASSISTANT_LAYOUT = {
   /** No horizontal padding/margin of any kind: prose starts at the content edge. */
   wrap: 'group relative min-w-0',
-  /** Desktop-only stamp column. 54px retains the established desktop measure. */
-  gutter: 'sm:pr-[54px]',
-  /** Hover-revealed clock, mounted for layout only at `sm+`. */
+  /** Desktop-only right column: 50px clock + 4px gap + the 28px pin button that
+   *  shares this corner, plus its 4px gap. Both reveal on the SAME hover, so the
+   *  clock is offset left of the pin rather than under it. */
+  gutter: 'sm:pr-[86px]',
+  /** Hover-revealed clock, mounted for layout only at `sm+`. Offset by the pin's
+   *  28px + 4px so the two never overlap — they appear together on hover. */
   stamp:
-    'pointer-events-none absolute right-0 top-0.5 hidden w-[50px] text-right mono text-2xs tabular-nums text-faint opacity-0 transition-opacity sm:block group-hover:opacity-100',
+    'pointer-events-none absolute right-[32px] top-0.5 hidden w-[50px] text-right mono text-2xs tabular-nums text-faint opacity-0 transition-opacity sm:block group-hover:opacity-100',
 } as const;
 
 function AssistantMessage({ text, ts, sessionId }: { text: string; ts?: string; source: string; sessionId?: string }) {
