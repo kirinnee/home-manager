@@ -104,8 +104,14 @@ describe('capability probe', () => {
     expect(readFsProbe('ms1-offline').error).toBe('could not reach the daemon');
   });
 
-  test('the probe doubles as the Changes payload — one request, both readers', async () => {
-    const seen = stubFetch(() => json({ repo: true, branch: 'main', changes: [{ path: 'a.ts', status: ' M' }] }));
+  test('the probe doubles as the inline marker payload — one request, all rows', async () => {
+    const seen = stubFetch(() =>
+      json({
+        repo: true,
+        branch: 'main',
+        changes: [{ path: 'a.ts', status: ' M', additions: 7, deletions: 2 }],
+      }),
+    );
     await loadFsChanges('ms1-ok');
     // A redundant call while the record is loaded is not a second request…
     await loadFsChanges('ms1-ok');
@@ -114,6 +120,7 @@ describe('capability probe', () => {
     expect(probe.state).toBe('ready');
     expect(probe.changes?.branch).toBe('main');
     expect(probe.changes?.changes).toHaveLength(1);
+    expect(probe.changes?.changes[0]).toMatchObject({ additions: 7, deletions: 2 });
     // …but an explicit refresh is.
     await loadFsChanges('ms1-ok', true);
     expect(seen).toHaveLength(2);

@@ -1,5 +1,5 @@
 /* ============================================================================
-   Files tab — the read-only working-tree viewer (Changes / Browse / diff / file).
+   Files tab — a direct directory / rendered file / raw / diff viewer.
 
    OWNED BY THIS FEATURE. It is a separate stylesheet imported by `FilesTab.tsx`
    rather than more lines in `index.css`, so it rides the same lazy chunk as the
@@ -11,9 +11,9 @@
    (WCAG 2.5.8, and it must hold on a coarse pointer of ANY width) and the diff
    gutter width in `ch` (it is text metrics, not palette).
 
-   Non-colour cues everywhere: an added line carries `+`, a removed line `-`,
-   and a status chip carries its letter. The tint is reinforcement — a
-   monochrome or colour-blind reading loses nothing.
+   Non-colour cues everywhere: additions carry `+`, removals carry `−`, and the
+   change dot's full status is repeated in the row's accessible name. Tint is
+   reinforcement — a monochrome or colour-blind reading loses nothing.
    ============================================================================ */
 
 .kt-fs {
@@ -26,87 +26,146 @@
 }
 
 /* ---- top bar -------------------------------------------------------------
-   Wraps rather than scrolls: at 360px the switcher and the refresh control take
-   the first line and the path takes the second, which is readable. A nowrap bar
-   would push the path off-screen exactly when it is longest. */
+   One dense rail, including at 390px. Icon actions keep their 44px targets;
+   the path is the only flexible item and ellipsises with its full value in the
+   title attribute. */
 .kt-fs-bar {
   display: flex;
-  flex-wrap: wrap;
+  min-height: 44px;
   align-items: center;
-  gap: var(--gap-sm);
-  padding: var(--gap-sm) var(--pad-cell-x);
+  gap: 2px;
+  padding-inline: 2px;
   border-bottom: var(--stroke) solid var(--border-soft);
   background: var(--surface-2);
 }
 
 .kt-fs-title {
-  display: flex;
   min-width: 0;
-  flex: 1 1 12ch;
-  flex-direction: column;
-  gap: 1px;
-}
-
-/* PHONE: THE PATH GETS ITS OWN ROW.
-   Sharing line 1 with the switcher and the actions left the title ~140px of a
-   360px pane, and a single long directory name then wrapped over FIVE lines
-   before any content. Dropping it below (the controls stay on line 1, where
-   they were going to wrap to anyway) gives it the full 344px and costs nothing:
-   measured, the same header is shorter overall. */
-@media (max-width: 640px) {
-  .kt-fs-title {
-    order: 3;
-    flex: 1 1 100%;
-  }
-
-  .kt-fs-actions {
-    order: 2;
-  }
+  flex: 1 1 auto;
 }
 
 .kt-fs-title-path {
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  display: block;
+  overflow: hidden;
+  padding-inline: var(--gap-sm);
   color: var(--fg);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   line-height: var(--leading-tight);
-}
-
-.kt-fs-title-meta {
-  color: var(--muted);
-  font-size: var(--text-2xs);
-  line-height: var(--leading-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .kt-fs-actions {
   display: flex;
-  min-width: 0;
-  max-width: 100%;
-  flex: 0 1 auto;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
   align-items: center;
-  gap: var(--gap-xs);
   margin-inline-start: auto;
 }
 
-/* THE BRANCH CHIP MUST NOT PUSH THE REFRESH CONTROL OFF THE PANE.
-   Measured at 390px with a real branch name
-   (`feat/filesystem-viewer-changes-first`): `.kt-badge` is `nowrap`, so the
-   chip grew to 394px, carried the actions group to x=459 against a 382px pane
-   edge, and `overflow:hidden` then CLIPPED the Refresh button entirely. The
-   branch is context, not a control — it truncates, and the full name stays in
-   the chip's `title`. */
-.kt-fs-branch {
-  min-width: 0;
-  max-width: min(44vw, 18ch);
+.kt-fs-icon-button {
+  display: inline-flex;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--muted);
 }
 
-.kt-fs-branch > span {
+.kt-fs-icon-button:hover {
+  background: var(--surface-3);
+  color: var(--fg);
+}
+
+.kt-fs-icon-button[data-active='true'] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Error recovery is a Files-pane action too. The shared small button is
+   intentionally compact elsewhere, so enforce this feature's 44px floor only
+   here instead of changing every `kt-btn--sm` consumer. */
+.kt-fs-retry {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* ---- open files ----------------------------------------------------------
+   Tabs are instance-local to FilesTab; the pane host remains untouched. Each
+   activation and close control independently keeps the 44px target floor, and
+   the rail scrolls inside itself instead of widening a 390px pane. */
+.kt-fs-tabs {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 0 auto;
+  overflow-x: auto;
+  border-bottom: var(--stroke) solid var(--border-soft);
+  background: var(--surface);
+  overscroll-behavior-x: contain;
+}
+
+.kt-fs-tab {
+  display: inline-flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: stretch;
+  border-inline-end: var(--stroke) solid var(--border-soft);
+}
+
+.kt-fs-tab[data-active='true'] {
+  box-shadow: inset 0 -2px 0 var(--accent);
+  background: var(--surface-2);
+}
+
+.kt-fs-tab-open,
+.kt-fs-tab-close {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.kt-fs-tab-open {
+  min-width: 44px;
+  max-width: 18ch;
+  gap: var(--gap-xs);
+  padding-inline: var(--gap-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.kt-fs-tab-open > span {
   overflow: hidden;
   min-width: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.kt-fs-tab-close {
+  width: 44px;
+  min-width: 44px;
+  padding: 0;
+}
+
+.kt-fs-tab[data-active='true'] .kt-fs-tab-open,
+.kt-fs-tab-open:hover,
+.kt-fs-tab-close:hover {
+  color: var(--fg);
+}
+
+.kt-fs-tab-open:hover,
+.kt-fs-tab-close:hover {
+  background: var(--surface-3);
 }
 
 /* ---- breadcrumbs ---------------------------------------------------------
@@ -130,6 +189,7 @@
 
 .kt-fs-crumb {
   display: inline-flex;
+  min-width: 44px;
   min-height: 44px;
   flex: 0 0 auto;
   align-items: center;
@@ -220,6 +280,58 @@ button.kt-fs-row:active {
   line-height: var(--leading-tight);
 }
 
+.kt-fs-name-line {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--gap-xs);
+}
+
+/* Status is attached to the NAME, not parked in a separate Changes view. */
+.kt-fs-change {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-strong);
+  white-space: nowrap;
+}
+
+.kt-fs-change-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.kt-fs-change-dot[data-tone='ok'] {
+  background: var(--ok);
+}
+
+.kt-fs-change-dot[data-tone='warn'] {
+  background: var(--warn);
+}
+
+.kt-fs-change-dot[data-tone='err'] {
+  background: var(--err);
+}
+
+.kt-fs-change-dot[data-tone='neutral'] {
+  background: var(--muted);
+}
+
+.kt-fs-change-count[data-kind='add'] {
+  color: var(--ok);
+}
+
+.kt-fs-change-count[data-kind='del'] {
+  color: var(--err);
+}
+
 .kt-fs-dim {
   color: var(--muted);
 }
@@ -258,19 +370,6 @@ button.kt-fs-row:active {
   border-inline-start: 2px solid var(--warn);
   background: var(--warn-bg);
   color: var(--warn);
-}
-
-.kt-fs-section-label {
-  display: flex;
-  align-items: center;
-  gap: var(--gap-xs);
-  padding: var(--gap-sm) var(--pad-cell-x) 2px;
-  color: var(--muted);
-  font-family: var(--font-display);
-  font-size: var(--label-size);
-  font-weight: var(--label-weight);
-  letter-spacing: var(--tracking-label);
-  text-transform: var(--label-transform);
 }
 
 /* ---- code + diff ---------------------------------------------------------
@@ -413,19 +512,4 @@ button.kt-fs-row:active {
     height: var(--target-floor);
     transform: translate(-50%, -50%);
   }
-}
-
-/* ---- toolbar chips ------------------------------------------------------- */
-.kt-fs-chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--gap-xs);
-  padding: var(--gap-sm) var(--pad-cell-x);
-  border-bottom: var(--stroke) solid var(--border-soft);
-}
-
-.kt-fs-count {
-  color: var(--muted);
-  font-size: var(--text-2xs);
 }
