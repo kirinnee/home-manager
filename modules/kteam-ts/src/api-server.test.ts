@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { Server } from 'bun';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { RecentRequestIds, startApiServer } from './api-server';
 import { currentActor } from './actor-context';
 import type { AttachmentView, KTeamService, SessionView } from './service';
-import type { KTeamEvent, RuntimeControlRequest, SendRequest, StartSessionRequest } from './types';
+import type { KTeamEvent, RuntimeControlRequest, SendRecord, SendRequest, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
 import { FsError, type FsDiffView, type FsFileView, type FsListing } from './fs';
 import { GitError, type GitChangesView } from './git';
@@ -67,7 +70,7 @@ class FakeService implements KTeamService {
     this.lastActor = currentActor();
     return { ...view, disposition: 'delivered' as const };
   };
-  listSends = async () => [];
+  listSends = async (_id: string, _options?: { all?: boolean }): Promise<SendRecord[]> => [];
   runtime = async (_id: string, _input: RuntimeControlRequest) => view;
   answer = async (_id: string, _toolUseId: string, _labels: string[], _other?: string, _responses?: string[]) => view;
   interrupt = async (_id: string, _expectedToolUseId?: string) => view;
@@ -679,6 +682,237 @@ describe('STT API integration', () => {
     const apiResponse = await fetch(`${base}/v1/stt/status`, { headers: { authorization: 'Bearer secret' } });
     expect(apiResponse.status).toBe(404);
     expect(((await apiResponse.json()) as { code?: string }).code).toBe('unknown_route');
+  });
+});
+
+describe('send ledger API routes', () => {
+  const authenticatedHeaders = (requestId?: string): Record<string, string> => ({
+    authorization: 'Bearer secret',
+    'content-type': 'application/json',
+    ...(requestId !== undefined ? { 'x-kteam-request-id': requestId } : {}),
+  });
+
+  const sendRecord = (sendId: string, overrides: Partial<SendRecord> = {}): SendRecord => ({
+    v: 1,
+    sendId,
+    acceptedAt: '2026-01-01T00:00:00.000Z',
+    acceptedTurn: 1,
+    path: 'direct',
+    message: `message for ${sendId}`,
+    attachmentIds: [],
+    fate: 'accepted',
+    ...overrides,
+  });
+
+  test('wraps the send ledger response in the exact { sends } envelope', async () => {
+    const service = new FakeService();
+    const expected = sendRecord('send-envelope');
+    const calls: Array<{ id: string; all?: boolean }> = [];
+    service.listSends = async (id, options) => {
+      calls.push({ id, all: options?.all });
+      return [expected];
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/sends`, {
+      headers: authenticatedHeaders(),
+    });
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as unknown;
+    expect(payload).toEqual({ sends: [expected] });
+    expect(Object.keys(payload as Record<string, unknown>)).toEqual(['sends']);
+    expect(calls).toEqual([{ id: 's1', all: false }]);
+  });
+
+  test('uses the bounded default send projection and requests full history only for all=1', async () => {
+    const service = new FakeService();
+    const open = sendRecord('open-send');
+    const withdrawn = sendRecord('withdrawn-tombstone', { withdrawn: true });
+    const recent = sendRecord('recent-delivered', {
+      acceptedAt: '2026-01-01T00:03:00.000Z',
+      fate: 'delivered',
+      fateAt: '2026-01-01T00:04:00.000Z',
+    });
+    const auditOnly = sendRecord('older-audit-row', {
+      acceptedAt: '2025-12-01T00:00:00.000Z',
+      fate: 'delivered',
+      fateAt: '2025-12-01T00:01:00.000Z',
+    });
+    const defaultProjection = [open, withdrawn, recent];
+    const fullProjection = [...defaultProjection, auditOnly];
+    const calls: Array<{ id: string; all?: boolean }> = [];
+    service.listSends = async (id, options) => {
+      calls.push({ id, all: options?.all });
+      return options?.all ? fullProjection : defaultProjection;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}/v1/sessions/s1/sends`;
+
+    const defaultResponse = await fetch(base, { headers: authenticatedHeaders() });
+    const allResponse = await fetch(`${base}?all=1`, { headers: authenticatedHeaders() });
+    expect(defaultResponse.status).toBe(200);
+    expect(allResponse.status).toBe(200);
+    const defaultPayload = (await defaultResponse.json()) as { sends: SendRecord[] };
+    const allPayload = (await allResponse.json()) as { sends: SendRecord[] };
+
+    expect(defaultPayload).toEqual({ sends: defaultProjection });
+    expect(allPayload).toEqual({ sends: fullProjection });
+    expect(defaultPayload).not.toEqual(allPayload);
+    expect(defaultPayload.sends.map(record => record.sendId)).toEqual([
+      'open-send',
+      'withdrawn-tombstone',
+      'recent-delivered',
+    ]);
+    expect(allPayload.sends.map(record => record.sendId)).toEqual([
+      'open-send',
+      'withdrawn-tombstone',
+      'recent-delivered',
+      'older-audit-row',
+    ]);
+    expect(calls).toEqual([
+      { id: 's1', all: false },
+      { id: 's1', all: true },
+    ]);
+  });
+
+  test('propagates a valid request-id header as the recorded send identity', async () => {
+    const service = new FakeService();
+    const recorded: SendRecord[] = [];
+    const forwarded: Array<{ id: string; input: SendRequest }> = [];
+    service.send = async (id, input) => {
+      forwarded.push({ id, input: { ...input, attachmentIds: [...(input.attachmentIds ?? [])] } });
+      recorded.push(
+        sendRecord(input.requestId ?? 'server-generated-fallback', {
+          message: input.message,
+          attachmentIds: [...(input.attachmentIds ?? [])],
+        }),
+      );
+      return { ...view, disposition: 'delivered' as const };
+    };
+    service.listSends = async () => [...recorded];
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}/v1/sessions/s1`;
+    const requestId = 'browser_REQ-123_-';
+
+    const response = await fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authenticatedHeaders(requestId),
+      body: JSON.stringify({ message: 'record this identity', attachmentIds: ['att_x'], now: true }),
+    });
+    expect(response.status).toBe(200);
+    expect(forwarded).toEqual([
+      {
+        id: 's1',
+        input: { message: 'record this identity', attachmentIds: ['att_x'], now: true, requestId },
+      },
+    ]);
+
+    const ledgerResponse = await fetch(`${base}/sends`, { headers: authenticatedHeaders() });
+    expect(ledgerResponse.status).toBe(200);
+    expect(await ledgerResponse.json()).toEqual({
+      sends: [
+        sendRecord(requestId, {
+          message: 'record this identity',
+          attachmentIds: ['att_x'],
+        }),
+      ],
+    });
+  });
+
+  test('ignores body requestId and falls back safely for absent or invalid headers', async () => {
+    const service = new FakeService();
+    const observed: Array<{ forwardedId: string | undefined; recordedId: string }> = [];
+    let fallback = 0;
+    service.send = async (_id, input) => {
+      const recordedId = input.requestId ?? `server_generated_${++fallback}`;
+      observed.push({ forwardedId: input.requestId, recordedId });
+      return { ...view, disposition: 'delivered' as const };
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const url = `http://127.0.0.1:${server.port}/v1/sessions/s1/send`;
+    const attempts = [
+      { header: 'trusted_header', bodyId: 'body_override_1' },
+      { header: undefined, bodyId: 'body_only_2' },
+      { header: 'malformed.header', bodyId: 'body_override_3' },
+      { header: 'x'.repeat(129), bodyId: 'body_override_4' },
+      { header: '', bodyId: 'body_override_5' },
+    ];
+
+    for (const [index, attempt] of attempts.entries()) {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: authenticatedHeaders(attempt.header),
+        body: JSON.stringify({ message: `attempt ${index}`, requestId: attempt.bodyId }),
+      });
+      expect(response.status).toBe(200);
+    }
+
+    expect(observed).toEqual([
+      { forwardedId: 'trusted_header', recordedId: 'trusted_header' },
+      { forwardedId: undefined, recordedId: 'server_generated_1' },
+      { forwardedId: undefined, recordedId: 'server_generated_2' },
+      { forwardedId: undefined, recordedId: 'server_generated_3' },
+      { forwardedId: undefined, recordedId: 'server_generated_4' },
+    ]);
+    expect(observed.map(send => send.recordedId)).not.toContain('body_override_1');
+    expect(observed.map(send => send.recordedId)).not.toContain('body_only_2');
+    expect(observed.map(send => send.recordedId)).not.toContain('body_override_3');
+    expect(observed.map(send => send.recordedId)).not.toContain('body_override_4');
+    expect(observed.map(send => send.recordedId)).not.toContain('body_override_5');
+  });
+
+  test('rejects traversal-shaped request-id headers without writing outside channel/', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'kteam-api-send-traversal-'));
+    try {
+      const sessionDirectory = join(scratch, 'session');
+      const channelDirectory = join(sessionDirectory, 'channel');
+      const service = new FakeService();
+      const forwardedIds: Array<string | undefined> = [];
+      let fallback = 0;
+      service.send = async (_id, input) => {
+        forwardedIds.push(input.requestId);
+        const safeId = input.requestId ?? `fallback_${++fallback}`;
+        const queuedFile = join(channelDirectory, `queued-${safeId}.md`);
+        await mkdir(dirname(queuedFile), { recursive: true });
+        await Bun.write(queuedFile, input.message);
+        return { ...view, disposition: 'delivered' as const };
+      };
+      const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+      servers.push(server);
+      const url = `http://127.0.0.1:${server.port}/v1/sessions/s1/send`;
+      const traversalHeaders = [
+        '../../../escaped-session',
+        '../../../../escaped-root',
+        '../nested/escape',
+        '%2e%2e%2f%2e%2e%2fencoded-escape',
+        '%252e%252e%252fdouble-encoded-escape',
+        '..\\..\\windows-escape',
+      ];
+
+      for (const [index, requestId] of traversalHeaders.entries()) {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: authenticatedHeaders(requestId),
+          body: JSON.stringify({ message: `traversal probe ${index}`, requestId: `../../../../body-escape-${index}` }),
+        });
+        expect(response.status).toBe(200);
+      }
+
+      expect((await readdir(scratch)).sort()).toEqual(['session']);
+      expect((await readdir(sessionDirectory)).sort()).toEqual(['channel']);
+      expect((await readdir(channelDirectory)).sort()).toEqual(
+        traversalHeaders.map((_, index) => `queued-fallback_${index + 1}.md`).sort(),
+      );
+      expect(await Bun.file(join(sessionDirectory, 'escaped-session.md')).exists()).toBe(false);
+      expect(await Bun.file(join(scratch, 'escaped-root.md')).exists()).toBe(false);
+      expect(forwardedIds).toEqual(traversalHeaders.map(() => undefined));
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
   });
 });
 
