@@ -7,8 +7,10 @@ import type { BrowserScreencastFrame } from './browser-types';
 
 const VIEWPORT = { width: 1_280, height: 800 } as const;
 const CANVAS_DOWNSCALE = 2.5;
+const DELAYED_HISTORY_BODY_MS = 750;
 const BUTTON = { left: 250, top: 125, width: 200, height: 60 } as const;
 const FIELD = { left: 250, top: 250, width: 240, height: 40 } as const;
+const delayedHistoryRequests = { A: 0, B: 0 };
 
 const chromeExecutable = (() => {
   try {
@@ -27,16 +29,54 @@ beforeAll(() => {
     port: 0,
     fetch(request) {
       const url = new URL(request.url);
+      const delayedHistoryPage = url.pathname === '/delayed-a' ? 'A' : url.pathname === '/delayed-b' ? 'B' : undefined;
+      if (delayedHistoryPage) {
+        delayedHistoryRequests[delayedHistoryPage] += 1;
+        const encoder = new TextEncoder();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(
+                '<!doctype html><html><head><script>window.addEventListener("unload", () => {});</script>',
+              ),
+            );
+            timer = setTimeout(() => {
+              controller.enqueue(
+                encoder.encode(
+                  `<title>Delayed History ${delayedHistoryPage}</title></head><body><output id="page">Delayed ${delayedHistoryPage}</output></body></html>`,
+                ),
+              );
+              controller.close();
+            }, DELAYED_HISTORY_BODY_MS);
+          },
+          cancel() {
+            if (timer) clearTimeout(timer);
+          },
+        });
+        return new Response(body, {
+          headers: {
+            'cache-control': 'no-store',
+            'content-type': 'text/html; charset=utf-8',
+          },
+        });
+      }
+      if (url.pathname === '/redirect') {
+        return Response.redirect(new URL('/b', url), 302);
+      }
+      const historyPage = url.pathname === '/a' ? 'A' : url.pathname === '/b' ? 'B' : undefined;
       return new Response(
         `<!doctype html>
         <html>
           <head>
             <title>${
-              url.pathname === '/second'
-                ? 'Second fixture'
-                : url.pathname === '/popup'
-                  ? 'Popup fixture'
-                  : 'Input fixture'
+              historyPage
+                ? `KTeam Browser ${historyPage}`
+                : url.pathname === '/second'
+                  ? 'Second fixture'
+                  : url.pathname === '/popup'
+                    ? 'Popup fixture'
+                    : 'Input fixture'
             }</title>
             <style>
               html, body { margin: 0; width: 100%; height: 100%; }
@@ -55,6 +95,7 @@ beforeAll(() => {
             <input id="field" aria-label="Known field" />
             <output id="log">idle</output>
             <output id="value"></output>
+            <output id="page">${historyPage ?? 'input'}</output>
             <script>
               document.querySelector('#hit').addEventListener('click', () => {
                 document.querySelector('#log').textContent = 'clicked';
@@ -134,7 +175,203 @@ async function clickAt(runtime: BrowserRuntime, x: number, y: number): Promise<v
   });
 }
 
+function startNoStoreHistoryServer(): ReturnType<typeof Bun.serve> {
+  return Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+      const page = url.pathname === '/a' ? 'A' : 'B';
+      return new Response(
+        `<!doctype html><html><head><title>Uncommitted ${page}</title><script>window.addEventListener('unload', () => {});</script></head><body>${page}</body></html>`,
+        {
+          headers: {
+            'cache-control': 'no-store',
+            'content-type': 'text/html; charset=utf-8',
+          },
+        },
+      );
+    },
+  });
+}
+
 describe.skipIf(!chromeExecutable)('real Chrome browser input and page identity', () => {
+  test('returns coherent ready snapshots promptly across redirect-backed history traversal', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'kteam-browser-history-'));
+    let runtime: BrowserRuntime | undefined;
+    try {
+      runtime = await BrowserRuntime.launch('browser-history-integration', root, VIEWPORT, {
+        chromeExecutable: chromeExecutable!,
+      });
+      const pageA = await runtime.navigate(`${fixtureUrl}/a`);
+      expect(pageA).toMatchObject({
+        url: `${fixtureUrl}/a`,
+        title: 'KTeam Browser A',
+        pageState: 'ready',
+      });
+
+      const frames: BrowserScreencastFrame[] = [];
+      await firstFrame(runtime, frame => frames.push(frame));
+
+      const pageB = await runtime.navigate(`${fixtureUrl}/redirect`);
+      expect(pageB).toMatchObject({
+        url: `${fixtureUrl}/b`,
+        title: 'KTeam Browser B',
+        activePageId: pageA.activePageId,
+        actedPageId: pageA.activePageId,
+        pageState: 'ready',
+      });
+
+      frames.length = 0;
+      const backStartedAt = Date.now();
+      const back = await runtime.back();
+      expect(Date.now() - backStartedAt).toBeLessThan(10_000);
+      expect(back).toMatchObject({
+        url: `${fixtureUrl}/a`,
+        title: 'KTeam Browser A',
+        activePageId: pageA.activePageId,
+        actedPageId: pageA.activePageId,
+        pageState: 'ready',
+        canGoBack: true,
+        canGoForward: true,
+      });
+      expect(back.pageError).toBeUndefined();
+      expect(back.pages.find(page => page.id === back.activePageId)).toMatchObject({
+        url: back.url,
+        title: back.title,
+      });
+      expect((await runtime.read('#page')).text).toBe('A');
+      expect((await waitForPageFrame(frames, back.activePageId)).pageId).toBe(back.activePageId);
+
+      frames.length = 0;
+      const forwardStartedAt = Date.now();
+      const forward = await runtime.forward();
+      expect(Date.now() - forwardStartedAt).toBeLessThan(10_000);
+      expect(forward).toMatchObject({
+        url: `${fixtureUrl}/b`,
+        title: 'KTeam Browser B',
+        activePageId: pageA.activePageId,
+        actedPageId: pageA.activePageId,
+        pageState: 'ready',
+        canGoBack: true,
+        canGoForward: false,
+      });
+      expect(forward.pageError).toBeUndefined();
+      expect(forward.pages.find(page => page.id === forward.activePageId)).toMatchObject({
+        url: forward.url,
+        title: forward.title,
+      });
+      expect((await runtime.read('#page')).text).toBe('B');
+      expect((await waitForPageFrame(frames, forward.activePageId)).pageId).toBe(forward.activePageId);
+
+      await expect(runtime.navigate('http://127.0.0.1:1/uncommitted')).rejects.toThrow();
+      const failed = await runtime.location();
+      expect(failed.pageState).toBe('error');
+      expect(failed.pageError).toBeTruthy();
+      expect(failed.pageError!.length).toBeLessThanOrEqual(200);
+      expect(failed.pageError).not.toContain('\n');
+    } finally {
+      await runtime?.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 75_000);
+
+  test('waits for delayed no-store history documents before publishing ready metadata', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'kteam-browser-delayed-history-'));
+    let runtime: BrowserRuntime | undefined;
+    try {
+      delayedHistoryRequests.A = 0;
+      delayedHistoryRequests.B = 0;
+      runtime = await BrowserRuntime.launch('browser-delayed-history-integration', root, VIEWPORT, {
+        chromeExecutable: chromeExecutable!,
+      });
+      const pageA = await runtime.navigate(`${fixtureUrl}/delayed-a`);
+      const pageB = await runtime.navigate(`${fixtureUrl}/delayed-b`);
+      expect(pageB.activePageId).toBe(pageA.activePageId);
+
+      const backStartedAt = Date.now();
+      const back = await runtime.back();
+      const backElapsed = Date.now() - backStartedAt;
+      expect(backElapsed).toBeGreaterThanOrEqual(500);
+      expect(backElapsed).toBeLessThan(10_000);
+      expect(back).toMatchObject({
+        url: `${fixtureUrl}/delayed-a`,
+        title: 'Delayed History A',
+        activePageId: pageA.activePageId,
+        actedPageId: pageA.activePageId,
+        pageState: 'ready',
+        canGoBack: true,
+        canGoForward: true,
+      });
+      expect(back.pageError).toBeUndefined();
+      expect(back.pages.find(page => page.id === back.activePageId)).toMatchObject({
+        url: back.url,
+        title: back.title,
+      });
+      expect((await runtime.read('#page')).text).toBe('Delayed A');
+      expect(delayedHistoryRequests.A).toBeGreaterThanOrEqual(2);
+
+      const forwardStartedAt = Date.now();
+      const forward = await runtime.forward();
+      const forwardElapsed = Date.now() - forwardStartedAt;
+      expect(forwardElapsed).toBeGreaterThanOrEqual(500);
+      expect(forwardElapsed).toBeLessThan(10_000);
+      expect(forward).toMatchObject({
+        url: `${fixtureUrl}/delayed-b`,
+        title: 'Delayed History B',
+        activePageId: pageA.activePageId,
+        actedPageId: pageA.activePageId,
+        pageState: 'ready',
+        canGoBack: true,
+        canGoForward: false,
+      });
+      expect(forward.pageError).toBeUndefined();
+      expect(forward.pages.find(page => page.id === forward.activePageId)).toMatchObject({
+        url: forward.url,
+        title: forward.title,
+      });
+      expect((await runtime.read('#page')).text).toBe('Delayed B');
+      expect(delayedHistoryRequests.B).toBeGreaterThanOrEqual(2);
+    } finally {
+      await runtime?.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test('rejects Back and Forward traversals that cannot commit with bounded page errors', async () => {
+    for (const direction of ['back', 'forward'] as const) {
+      const root = await mkdtemp(path.join(tmpdir(), `kteam-browser-${direction}-failure-`));
+      const unavailable = startNoStoreHistoryServer();
+      let runtime: BrowserRuntime | undefined;
+      let serverRunning = true;
+      try {
+        const origin = `http://127.0.0.1:${unavailable.port}`;
+        runtime = await BrowserRuntime.launch(`browser-${direction}-failure-integration`, root, VIEWPORT, {
+          chromeExecutable: chromeExecutable!,
+        });
+        await runtime.navigate(`${origin}/a`);
+        await runtime.navigate(`${origin}/b`);
+        if (direction === 'forward') await runtime.back();
+
+        unavailable.stop(true);
+        serverRunning = false;
+        const startedAt = Date.now();
+        await expect(direction === 'back' ? runtime.back() : runtime.forward()).rejects.toThrow();
+        expect(Date.now() - startedAt).toBeLessThan(10_000);
+
+        const failed = await runtime.location();
+        expect(failed.pageState).toBe('error');
+        expect(failed.pageError).toBeTruthy();
+        expect(failed.pageError!.length).toBeLessThanOrEqual(200);
+        expect(failed.pageError).not.toContain('\n');
+      } finally {
+        if (serverRunning) unavailable.stop(true);
+        await runtime?.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  }, 60_000);
+
   test('keeps viewport, scaled input, typing, and real page lifecycle coherent', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'kteam-browser-input-'));
     let runtime: BrowserRuntime | undefined;

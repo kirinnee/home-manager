@@ -155,10 +155,14 @@ export class BrowserStreamBridge {
     downstream: BrowserStreamDownstream,
   ): Promise<BrowserStreamBridge> {
     let bridge: BrowserStreamBridge | undefined;
+    let pendingFrame: BrowserScreencastFrame | undefined;
     let pendingTerminal: BrowserViewerTerminal | undefined;
     const attachment = await service.attachViewer(
       sessionId,
-      frame => bridge?.fromFrame(frame),
+      frame => {
+        if (bridge) bridge.fromFrame(frame);
+        else pendingFrame = frame;
+      },
       terminal => {
         if (bridge) bridge.fromTerminal(terminal);
         else pendingTerminal = terminal;
@@ -166,6 +170,7 @@ export class BrowserStreamBridge {
     );
     bridge = new BrowserStreamBridge(service, sessionId, downstream, attachment);
     if (pendingTerminal) bridge.fromTerminal(pendingTerminal);
+    else if (pendingFrame) bridge.fromFrame(pendingFrame);
     return bridge;
   }
 

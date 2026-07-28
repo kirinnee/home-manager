@@ -10,6 +10,8 @@ const MAX_TITLE = 500;
 const MAX_ERROR = 200;
 const CLICK_SETTLE_MS = 250;
 const CLICK_LOAD_TIMEOUT_MS = 5_000;
+const HISTORY_DOCUMENT_READY_TIMEOUT_MS = 5_000;
+const DOCUMENT_READY_POLL_MS = 50;
 
 const write = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const safeError = error => {
@@ -375,7 +377,29 @@ async function dispatchInput(input) {
   await session.send('Input.insertText', { text: input.text });
 }
 
-async function navigateActive(operation) {
+/**
+ * A commit-level history wait avoids the BFCache false timeout, but commit is
+ * earlier than DOM readiness for a normal network restoration. Poll the target
+ * document boundedly: BFCache, same-document, and no-history cases are already
+ * interactive/complete and return immediately; a genuinely slow document may
+ * still return as truthful `loading` after the bound instead of false `ready`.
+ */
+async function waitForDocumentReady(page) {
+  const deadline = Date.now() + HISTORY_DOCUMENT_READY_TIMEOUT_MS;
+  while (!page.isClosed()) {
+    try {
+      if (await page.evaluate(() => document.readyState !== 'loading')) return true;
+    } catch {
+      // A commit can replace the execution context between polls.
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await sleep(Math.min(DOCUMENT_READY_POLL_MS, remaining));
+  }
+  return false;
+}
+
+async function navigateActive(operation, waitForReadyDocument = false) {
   const page = await activePageOrRecover();
   setPageState(page, 'loading');
   try {
@@ -386,8 +410,9 @@ async function navigateActive(operation) {
   }
   // A no-history back/forward, or a same-document navigation, resolves without
   // ever firing DOMContentLoaded, so `loading` would stick forever. The awaited
-  // operation succeeding is itself the ready signal.
-  markReadyUnlessError(page);
+  // operation plus an already-ready document is the ready signal. Normal
+  // navigate/reload operations already wait for DOMContentLoaded themselves.
+  if (!waitForReadyDocument || (await waitForDocumentReady(page))) markReadyUnlessError(page);
   await refreshScreencast();
   return await actionSnapshot(page);
 }
@@ -475,9 +500,13 @@ async function run(message) {
       return await actionSnapshot(page, { screenshotBase64: bytes.toString('base64') });
     }
     case 'back':
-      return await navigateActive(page => page.goBack({ waitUntil: 'domcontentloaded', timeout: 30_000 }));
+      // BFCache/history restores commit without firing a fresh DOMContentLoaded.
+      // Waiting for that event reports a timeout after Chrome already moved.
+      // Commit still fails closed when traversal never starts or commits;
+      // navigateActive then waits boundedly for real document readiness.
+      return await navigateActive(page => page.goBack({ waitUntil: 'commit', timeout: 30_000 }), true);
     case 'forward':
-      return await navigateActive(page => page.goForward({ waitUntil: 'domcontentloaded', timeout: 30_000 }));
+      return await navigateActive(page => page.goForward({ waitUntil: 'commit', timeout: 30_000 }), true);
     case 'reload':
       return await navigateActive(page => page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 }));
     case 'location':
