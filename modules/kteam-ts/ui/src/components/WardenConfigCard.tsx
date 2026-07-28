@@ -29,6 +29,17 @@ export function editableAccounts(view: WardenConfigView | null): WardenAccountCo
   return view.accounts.map(account => ({ ...account }));
 }
 
+/** Installed auto wrappers whose harness has completed the warden loop. */
+export function pickableWardenWrappers(
+  wrappers: readonly WrapperInfo[],
+  accounts: readonly WardenAccountConfig[],
+): string[] {
+  return wrappers
+    .filter(item => (item.harness === 'claude' || item.harness === 'codex') && item.mode === 'auto' && item.launchable)
+    .map(item => item.name)
+    .filter(name => !accounts.some(account => account.wrapper === name));
+}
+
 /** One account's health line, joined from the status failover block. */
 export function accountHealthLabel(
   wrapper: string,
@@ -100,16 +111,10 @@ export function WardenConfigCard() {
     };
   }, [adopt]);
 
-  // Only launchable claude auto wrappers are offered: every warden so far has
-  // been claude, and nothing pins codex viability (see design CANNOT-TELL #1).
-  const pickable = useMemo(
-    () =>
-      wrappers
-        .filter(item => item.harness === 'claude' && item.mode === 'auto' && item.launchable)
-        .map(item => item.name)
-        .filter(name => !accounts.some(account => account.wrapper === name)),
-    [wrappers, accounts],
-  );
+  // Codex completed the same live sweep → report → scoped done → reap loop as
+  // Claude. Keep the picker narrower than arbitrary future harnesses: each one
+  // must prove that supervision loop before it is offered here.
+  const pickable = useMemo(() => pickableWardenWrappers(wrappers, accounts), [wrappers, accounts]);
 
   const mutate = (updater: (previous: WardenAccountConfig[]) => WardenAccountConfig[]) => {
     setAccounts(previous => updater(previous));

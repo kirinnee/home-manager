@@ -1,14 +1,11 @@
 // SESSION TASKS — the task surface for ONE session, hosted in the unified side
 // pane (SidePane.tsx).
 //
-// This is deliberately NOT the fleet Tasks page shrunk down. The daemon now
-// keeps task records per session (GET /v1/sessions/:id/tasks — agreed with the
-// teammate building that side; /v1/tasks stays the fleet-wide aggregate), and
-// this surface answers one question: "what has THIS session declared it is
-// doing". So: no repo/assignee filters, no status grouping ceremony — a short
-// list, and one tap into the full brief. The row and detail renderers are the
-// Tasks page's own (TaskRow / TaskDetail), re-hosted so declared-status
-// presentation can never drift between the two surfaces.
+// The daemon keeps task records per session (GET /v1/sessions/:id/tasks;
+// /v1/tasks remains the CLI/analytics aggregate), and this surface answers one
+// question: "what has THIS session declared it is doing". There are no filters
+// or collapsed sections: every returned task is grouped by its declared status,
+// including built, live, blocked, and dropped work, then opens into its brief.
 //
 // The pane is 320–680px wide, so list and detail are a two-level stack (list →
 // detail with a Back button), the same navigation shape FilesTab settled on,
@@ -29,11 +26,13 @@ import { ArrowLeft, ListTodo, Loader2, RefreshCw } from 'lucide-react';
 import { api, ApiError } from '../lib/api';
 import { useSessionEvents } from '../lib/store';
 import { isUnknownRoute } from './files-api';
-import { TaskDetail, TaskRow } from '../pages/TasksPage';
+import { TaskDetail, TaskRow } from './TaskPresentation';
 import {
+  groupTasks,
   parseTaskActivity,
   parseTaskListResponse,
   parseTaskRecord,
+  TASK_STATUS_META,
   type TaskActivity,
   type TaskRecord,
   type TaskSummary,
@@ -43,7 +42,7 @@ import {
 export function sessionTasksEmptyCopy(state: 'absent' | 'error' | 'empty', error?: string | null): string {
   switch (state) {
     case 'absent':
-      return 'This daemon does not serve per-session tasks yet. The fleet-wide Tasks page still works.';
+      return "This daemon does not serve per-session tasks yet. Update it to view this session's task records here.";
     case 'error':
       return error ? `Couldn't load tasks: ${error}` : "Couldn't load tasks.";
     case 'empty':
@@ -52,6 +51,32 @@ export function sessionTasksEmptyCopy(state: 'absent' | 'error' | 'empty', error
 }
 
 type LoadState = 'loading' | 'ready' | 'absent' | 'error';
+
+/** Every task appears exactly once. Status groups follow the daemon's canonical
+ * board order; explicit rank and id order the rows inside each group. */
+export function SessionTaskList({ tasks, onOpen }: { tasks: TaskSummary[]; onOpen: (id: string) => void }) {
+  return (
+    <div className="space-y-3">
+      {groupTasks(tasks).map(group => (
+        <section
+          key={group.status}
+          data-task-status={group.status}
+          aria-label={`${TASK_STATUS_META[group.status].label} tasks`}
+        >
+          <div className="mb-1 flex items-center gap-2">
+            <h3 className="kt-label m-0">{TASK_STATUS_META[group.status].label}</h3>
+            <span className="text-xs text-muted">{group.tasks.length}</span>
+          </div>
+          <div className="divide-y divide-border-soft rounded-md border border-border-soft bg-surface">
+            {group.tasks.map(task => (
+              <TaskRow key={task.id} task={task} onOpen={onOpen} />
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
 
 export function SessionTasksSurface({ sessionId }: { sessionId: string }) {
   const [state, setState] = useState<LoadState>('loading');
@@ -223,13 +248,7 @@ export function SessionTasksSurface({ sessionId }: { sessionId: string }) {
             </p>
           </div>
         )}
-        {state === 'ready' && tasks.length > 0 && (
-          <div className="divide-y divide-border-soft rounded-md border border-border-soft bg-surface">
-            {tasks.map(task => (
-              <TaskRow key={task.id} task={task} onOpen={id => void openDetail(id)} />
-            ))}
-          </div>
-        )}
+        {state === 'ready' && tasks.length > 0 && <SessionTaskList tasks={tasks} onOpen={id => void openDetail(id)} />}
       </div>
     </div>
   );

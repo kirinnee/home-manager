@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { WardenConfigCard, accountHealthLabel, editableAccounts } from './WardenConfigCard';
-import type { WardenConfigView, WardenFailoverStatus } from '../types';
+import { WardenConfigCard, accountHealthLabel, editableAccounts, pickableWardenWrappers } from './WardenConfigCard';
+import type { WardenConfigView, WardenFailoverStatus, WrapperInfo } from '../types';
 
 const view: WardenConfigView = {
   config: {
@@ -39,6 +39,43 @@ describe('editableAccounts', () => {
     expect(accounts).toEqual([{ wrapper: 'claude-auto-a' }, { wrapper: 'claude-auto-b', model: 'opus' }]);
     // A copy, not the same references — editing must not mutate the fetched view.
     expect(accounts[0]).not.toBe(view.accounts[0]);
+  });
+});
+
+describe('pickableWardenWrappers', () => {
+  test('offers launchable Claude and Codex auto wrappers only once', () => {
+    const wrappers: WrapperInfo[] = [
+      {
+        name: 'claude-auto-a',
+        harness: 'claude',
+        mode: 'auto',
+        launchable: true,
+        modelHint: 'claude',
+      },
+      {
+        name: 'codex-auto-a',
+        harness: 'codex',
+        mode: 'auto',
+        launchable: true,
+        modelHint: 'codex',
+      },
+      {
+        name: 'codex-a',
+        harness: 'codex',
+        mode: 'interactive',
+        launchable: true,
+        modelHint: 'codex',
+      },
+      {
+        name: 'codex-auto-unavailable',
+        harness: 'codex',
+        mode: 'auto',
+        launchable: false,
+        modelHint: 'codex',
+      },
+    ];
+
+    expect(pickableWardenWrappers(wrappers, [{ wrapper: 'claude-auto-a' }])).toEqual(['codex-auto-a']);
   });
 });
 
