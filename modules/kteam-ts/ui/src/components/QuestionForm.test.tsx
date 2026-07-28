@@ -1,9 +1,12 @@
 import { describe, expect, test } from 'bun:test';
+import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { ChatRecord } from '../types';
 import { ApiError } from '../lib/api';
 import {
   QuestionForm,
+  QuestionErrorBoundary,
+  QuestionRecoverySurface,
   QuestionSubmitControl,
   QuestionNav,
   type PFQuestion,
@@ -20,6 +23,12 @@ import {
   shouldFocusOtherTextarea,
   resolveRequestId,
   interruptPendingQuestion,
+  parseQuestionRecord,
+  rawQuestionText,
+  questionDismissalKey,
+  isQuestionSuppressed,
+  shouldClearQuestionSuppression,
+  mintQuestionRequestId,
   submitAnswers,
 } from './QuestionForm';
 
@@ -54,6 +63,28 @@ function buttonWithText(html: string, text: string): string | undefined {
 }
 function isTouchTarget(button: string): boolean {
   return button.includes('min-h-[44px]') && button.includes('min-w-[44px]');
+}
+
+function* walk(node: ReactNode): Generator<ReactElement> {
+  if (Array.isArray(node)) {
+    for (const child of node) yield* walk(child);
+    return;
+  }
+  if (!isValidElement(node)) return;
+  yield node;
+  yield* walk((node.props as { children?: ReactNode }).children);
+}
+
+function find(node: ReactNode, match: (element: ReactElement) => boolean): ReactElement | null {
+  for (const element of walk(node)) if (match(element)) return element;
+  return null;
+}
+
+function textOf(node: ReactNode): string {
+  if (typeof node === 'string') return node;
+  if (Array.isArray(node)) return node.map(textOf).join('');
+  if (isValidElement(node)) return textOf((node.props as { children?: ReactNode }).children);
+  return '';
 }
 
 // ---- 1. payload parity ------------------------------------------------------
@@ -175,9 +206,9 @@ describe('resolveRequestId', () => {
 describe('interruptPendingQuestion', () => {
   test('retries abandon for one question with the same nonempty request id and the same bound tool id', async () => {
     const requestIdRef: { current: { id: string; key: string | undefined } | null } = { current: null };
-    const calls: Array<{ requestId: string; toolUseId: string }> = [];
+    const calls: Array<{ requestId: string; toolUseId?: string }> = [];
     let n = 0;
-    const interrupt = async (requestId: string, toolUseId: string) => {
+    const interrupt = async (requestId: string, toolUseId?: string) => {
       calls.push({ requestId, toolUseId });
       throw new ApiError(503, 'response lost');
     };
@@ -198,9 +229,9 @@ describe('interruptPendingQuestion', () => {
 
   test('a different pending question mints a new request id and binds to its own tool id', async () => {
     const requestIdRef: { current: { id: string; key: string | undefined } | null } = { current: null };
-    const calls: Array<{ requestId: string; toolUseId: string }> = [];
+    const calls: Array<{ requestId: string; toolUseId?: string }> = [];
     let n = 0;
-    const interrupt = async (requestId: string, toolUseId: string) => {
+    const interrupt = async (requestId: string, toolUseId?: string) => {
       calls.push({ requestId, toolUseId });
     };
 
@@ -420,5 +451,288 @@ describe('option input types match the wire', () => {
       <QuestionForm sessionId="s" question={record(SINGLE_MULTI)} onSubmit={() => {}} />,
     );
     expect(html).toContain('type="checkbox"');
+  });
+});
+
+// ---- payload validation + the always-available escape surface --------------
+
+describe('real and malformed question payloads', () => {
+  test('accepts the live preview shape without treating multiline preview text as an option label', () => {
+    const live = {
+      source: 'claude',
+      type: 'interaction.question',
+      data: {
+        toolUseId: 'tool-preview',
+        questions: [
+          {
+            header: 'Task trigger',
+            question: 'Which key should open the task picker?',
+            multiSelect: false,
+            options: [
+              {
+                label: '& — recommended',
+                description: 'Rare in prose.',
+                preview: 'Type: &\n┌─────────┐\n│ Tasks   │\n└─────────┘',
+              },
+            ],
+          },
+        ],
+      },
+    } as ChatRecord;
+
+    expect(parseQuestionRecord(live)).toEqual({
+      toolUseId: 'tool-preview',
+      questions: [
+        {
+          header: 'Task trigger',
+          question: 'Which key should open the task picker?',
+          multiSelect: false,
+          options: [
+            {
+              label: '& — recommended',
+              description: 'Rare in prose.',
+              preview: 'Type: &\n┌─────────┐\n│ Tasks   │\n└─────────┘',
+            },
+          ],
+        },
+      ],
+    });
+    const html = renderToStaticMarkup(<QuestionForm sessionId="s" question={live} onSubmit={() => {}} />);
+    expect(html).toContain('Which key should open the task picker?');
+    expect(html).toContain('&amp; — recommended');
+  });
+
+  test('zero options degrades to raw recovery instead of offering an answer the daemon cannot drive', () => {
+    const html = renderToStaticMarkup(
+      <QuestionForm
+        sessionId="s"
+        question={record([{ header: 'Empty', question: 'No choices were supplied.', options: [] }])}
+        onSubmit={() => {}}
+      />,
+    );
+    expect(html).toContain('No choices were supplied.');
+    expect(html).toContain('has no usable options');
+    expect(html).toContain('Decline question');
+  });
+
+  test('an empty question list renders raw recovery and Esc instructions, never a blank/null trap', () => {
+    const empty = record([]);
+    const html = renderToStaticMarkup(<QuestionForm sessionId="s" question={empty} onSubmit={() => {}} />);
+    expect(html).toContain('The question list is empty.');
+    expect(html).toContain('Press Esc to decline it');
+    expect(html).toContain('Decline question');
+  });
+
+  test('an option that React could not render degrades to the raw question text', () => {
+    const malformed = {
+      source: 'claude',
+      type: 'interaction.question',
+      data: {
+        toolUseId: 'tool-bad-option',
+        questions: [
+          {
+            question: 'Can you still read this prompt?',
+            options: [{ label: 'Yes', description: { nested: 'not text' } }],
+          },
+        ],
+      },
+    } as ChatRecord;
+    const parsed = parseQuestionRecord(malformed);
+    expect(parsed.malformed).toContain('malformed description');
+    const html = renderToStaticMarkup(<QuestionForm sessionId="s" question={malformed} onSubmit={() => {}} />);
+    expect(html).toContain('Can you still read this prompt?');
+    expect(html).toContain('Press Esc to decline it');
+  });
+
+  test('raw text extraction supports a legacy single-question field', () => {
+    const legacy = {
+      source: 'claude',
+      type: 'interaction.question',
+      data: { question: 'Which framework?' },
+    } as ChatRecord;
+    expect(rawQuestionText(legacy)).toBe('Which framework?');
+  });
+});
+
+describe('dismissal is scoped to exactly one ask', () => {
+  test('uses toolUseId when present and never suppresses a newer tool id', () => {
+    const first = questionDismissalKey(record(SINGLE, 'tool-A'));
+    const second = questionDismissalKey(record(SINGLE, 'tool-B'));
+    expect(first).toBe('tool:tool-A');
+    expect(isQuestionSuppressed(first, first)).toBe(true);
+    expect(isQuestionSuppressed(second, first)).toBe(false);
+  });
+
+  test('malformed records without a tool id still get a stable, prompt-bound key', () => {
+    const malformed = {
+      source: 'claude',
+      timestamp: '2026-07-28T00:00:00Z',
+      type: 'interaction.question',
+      data: { question: 'Can I escape?' },
+    } as ChatRecord;
+    expect(questionDismissalKey(malformed)).toBe(questionDismissalKey(malformed));
+    expect(questionDismissalKey(malformed)).toContain('Can I escape?');
+  });
+
+  test('a transiently absent store record cannot release suppression for the same ask', () => {
+    expect(shouldClearQuestionSuppression(undefined, 'tool:tool-A')).toBe(false);
+    expect(shouldClearQuestionSuppression('tool:tool-A', 'tool:tool-A')).toBe(false);
+    expect(shouldClearQuestionSuppression('tool:tool-B', 'tool:tool-A')).toBe(true);
+  });
+});
+
+describe('question request ids', () => {
+  test('uses randomUUID when available', () => {
+    expect(mintQuestionRequestId(() => 'uuid-1')).toBe('uuid-1');
+  });
+
+  test('falls back safely when randomUUID is absent or throws', () => {
+    expect(
+      mintQuestionRequestId(
+        null,
+        () => 123,
+        () => 0.5,
+      ),
+    ).toBe('question-3f-i');
+    expect(
+      mintQuestionRequestId(
+        () => {
+          throw new Error('insecure origin');
+        },
+        () => 123,
+        () => 0.5,
+      ),
+    ).toBe('question-3f-i');
+  });
+});
+
+describe('QuestionErrorBoundary', () => {
+  const child = <div data-testid="healthy-question">healthy</div>;
+
+  function boundary(active = true) {
+    const dismissals: number[] = [];
+    const props = {
+      active,
+      rawText: 'Which path should we take?',
+      resetKey: 'tool:tool-A',
+      onDismiss: () => void dismissals.push(1),
+      children: child,
+    };
+    const instance = new QuestionErrorBoundary(props);
+    (instance as unknown as { props: typeof props }).props = props;
+    return { instance, props, dismissals };
+  }
+
+  function escape(instance: QuestionErrorBoundary, key = 'Escape') {
+    const prevented: number[] = [];
+    const stopped: number[] = [];
+    instance.handleKeyDown({
+      key,
+      preventDefault: () => void prevented.push(1),
+      stopPropagation: () => void stopped.push(1),
+    } as unknown as KeyboardEvent);
+    return { prevented, stopped };
+  }
+
+  function recoveryTree(instance: QuestionErrorBoundary): ReactNode {
+    const rendered = instance.render();
+    if (isValidElement(rendered) && rendered.type === QuestionRecoverySurface) {
+      return QuestionRecoverySurface(rendered.props as { rawText: string; reason?: string; onDismiss(): void });
+    }
+    return rendered;
+  }
+
+  test('is transparent while the form is healthy', () => {
+    expect(boundary().instance.render()).toBe(child);
+  });
+
+  test('a thrown child is replaced by raw question text and an explicit decline control', () => {
+    const { instance } = boundary();
+    const error = new TypeError('options.map is not a function');
+    const warnings: unknown[][] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args);
+    try {
+      instance.state = QuestionErrorBoundary.getDerivedStateFromError();
+      instance.componentDidCatch(error, { componentStack: '\n    at QuestionFormBody' });
+    } finally {
+      console.warn = realWarn;
+    }
+    const rendered = recoveryTree(instance);
+    expect(
+      find(rendered, element => (element.props as { 'data-testid'?: string })['data-testid'] === 'healthy-question'),
+    ).toBeNull();
+    expect(textOf(rendered)).toContain('Something went wrong while rendering this question.');
+    expect(textOf(rendered)).toContain('Which path should we take?');
+    expect(find(rendered, element => element.type === 'button')).not.toBeNull();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(error);
+  });
+
+  test('Escape still dismisses after the child has thrown', () => {
+    const b = boundary();
+    b.instance.state = QuestionErrorBoundary.getDerivedStateFromError();
+    const event = escape(b.instance);
+    expect(b.dismissals).toHaveLength(1);
+    expect(event.prevented).toHaveLength(1);
+    expect(event.stopped).toHaveLength(1);
+  });
+
+  test('mounts the Escape listener in capture phase outside the throwing child and removes it', () => {
+    const b = boundary();
+    const added: unknown[][] = [];
+    const removed: unknown[][] = [];
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: {
+        addEventListener: (...args: unknown[]) => void added.push(args),
+        removeEventListener: (...args: unknown[]) => void removed.push(args),
+      },
+    });
+    try {
+      b.instance.componentDidMount();
+      b.instance.componentWillUnmount();
+    } finally {
+      if (original) Object.defineProperty(globalThis, 'window', original);
+      else delete (globalThis as { window?: unknown }).window;
+    }
+
+    expect(added).toEqual([['keydown', b.instance.handleKeyDown, true]]);
+    expect(removed).toEqual([['keydown', b.instance.handleKeyDown, true]]);
+  });
+
+  test('an inactive retained pane cannot consume Escape for a hidden question', () => {
+    const b = boundary(false);
+    const event = escape(b.instance);
+    expect(b.dismissals).toHaveLength(0);
+    expect(event.prevented).toHaveLength(0);
+    expect(event.stopped).toHaveLength(0);
+  });
+
+  test('unrelated keys pass through untouched', () => {
+    const b = boundary();
+    const event = escape(b.instance, 'Enter');
+    expect(b.dismissals).toHaveLength(0);
+    expect(event.prevented).toHaveLength(0);
+  });
+
+  test('the fallback button uses the same dismissal callback as Escape', () => {
+    const b = boundary();
+    b.instance.state = QuestionErrorBoundary.getDerivedStateFromError();
+    const button = find(recoveryTree(b.instance), element => element.type === 'button');
+    expect((button?.props as { onClick?: unknown }).onClick).toBe(b.props.onDismiss);
+  });
+});
+
+describe('QuestionRecoverySurface', () => {
+  test('announces malformed data and preserves the raw prompt', () => {
+    const html = renderToStaticMarkup(
+      <QuestionRecoverySurface rawText="Raw question text" reason="Malformed payload." onDismiss={() => {}} />,
+    );
+    expect(html).toContain('role="alert"');
+    expect(html).toContain('Malformed payload.');
+    expect(html).toContain('Raw question text');
+    expect(html).toContain('Decline question');
   });
 });

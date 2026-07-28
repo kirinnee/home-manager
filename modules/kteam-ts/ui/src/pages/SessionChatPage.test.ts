@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { ChatRecord, KTeamEvent, PendingQuestion, SessionStatus, SessionView } from '../types';
 import { buildSendIndex, buildTranscript } from '../lib/transcript';
-import { blockConfirmsPending, hasOpenQuestion, recordConfirmsPending } from './SessionChatPage';
+import { blockConfirmsPending, hasOpenQuestion, questionSurfaceRecord, recordConfirmsPending } from './SessionChatPage';
 import type { TranscriptBlock } from '../lib/transcript';
 
 const SENT_AT = Date.parse('2026-07-25T12:00:00.000Z');
@@ -187,7 +187,21 @@ describe('hasOpenQuestion — the authoritative show/hide predicate', () => {
   });
 
   test('awaiting_question status alone opens the form', () => {
-    expect(hasOpenQuestion(viewWith('awaiting_question'))).toBe(true);
+    const view = viewWith('awaiting_question');
+    expect(hasOpenQuestion(view)).toBe(true);
+    expect(questionSurfaceRecord(view, undefined)?.data).toEqual({
+      question: 'Question details have not loaded yet.',
+    });
+  });
+
+  test('the real pending record wins over the status-only recovery record', () => {
+    const record = {
+      source: 'claude',
+      type: 'interaction.question',
+      data: { toolUseId: 'toolu_open', questions: question.questions },
+    } as ChatRecord;
+    expect(questionSurfaceRecord(viewWith('awaiting_question'), record)).toBe(record);
+    expect(questionSurfaceRecord(viewWith('running'), undefined)).toBeUndefined();
   });
 
   test('a pendingQuestion on a still-running session opens the form before status propagates', () => {
