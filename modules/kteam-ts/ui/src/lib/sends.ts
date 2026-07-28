@@ -46,6 +46,69 @@ import { sameAttachmentIds } from './attachments';
  *  the browser's. Same constant and same rationale as the transcript reaper. */
 export const RECORD_CLOCK_SLACK_MS = 5_000;
 
+/** Has the durable row outlived the backend's final live-view deadline?
+ *
+ * This is presentation retirement only. The append-only ledger remains intact
+ * and `GET /sends?all=1` can still expose the row for audit. Missing or malformed
+ * deadlines stay visible: version skew must degrade toward showing uncertainty,
+ * never toward silently hiding it. Delivered and deliberately-held rows are not
+ * stale unconfirmed attempts, so their deadline is not a live-view expiry. */
+export function hasLedgerHardExpired(record: SendRecord, nowMs = Date.now()): boolean {
+  if (record.withdrawn === true || record.held === true || record.fate === 'delivered') return false;
+  const deadline = Date.parse(record.hardDeadline ?? '');
+  return Number.isFinite(deadline) && deadline <= nowMs;
+}
+
+/** The backend may not have run its timeout sweep at the exact deadline. Once
+ * `unaccountedDeadline` passes, an ACCEPTED row belongs with the honest
+ * unconfirmed rows instead of pretending something is still happening now. */
+export function isLedgerUnconfirmed(record: SendRecord, nowMs = Date.now()): boolean {
+  if (record.withdrawn === true || record.held === true || record.fate === 'delivered') return false;
+  if (record.fate === 'unaccounted') return true;
+  const deadline = Date.parse(record.unaccountedDeadline ?? '');
+  return Number.isFinite(deadline) && deadline <= nowMs;
+}
+
+/** Only rows describing a current acceptance belong at the transcript tail.
+ * Everything else is a durable historical fact and must render in time order. */
+export function isLedgerInFlight(record: SendRecord, nowMs = Date.now()): boolean {
+  return record.fate === 'accepted' && !isLedgerUnconfirmed(record, nowMs);
+}
+
+export interface LedgerChipPartition {
+  /** Current accepted/held attempts; these may share the optimistic footer. */
+  inFlight: SendRecord[];
+  /** Unconfirmed and exceptional delivered chips; place these in transcript time. */
+  chronological: SendRecord[];
+}
+
+export function partitionLedgerChips(records: readonly SendRecord[], nowMs = Date.now()): LedgerChipPartition {
+  const inFlight: SendRecord[] = [];
+  const chronological: SendRecord[] = [];
+  for (const record of records) {
+    (isLedgerInFlight(record, nowMs) ? inFlight : chronological).push(record);
+  }
+  return { inFlight, chronological };
+}
+
+/** The next instant at which this page's classification can change without a
+ * socket event: ACCEPTED becomes unconfirmed, or an open row reaches its hard
+ * live-view cap. SessionChatPage schedules one timeout for this value instead of
+ * polling. */
+export function nextLedgerViewDeadline(records: readonly SendRecord[], nowMs = Date.now()): number | undefined {
+  let next = Number.POSITIVE_INFINITY;
+  for (const record of records) {
+    if (record.withdrawn === true || record.held === true || record.fate === 'delivered') continue;
+    const candidates =
+      record.fate === 'accepted' ? [record.unaccountedDeadline, record.hardDeadline] : [record.hardDeadline];
+    for (const value of candidates) {
+      const at = Date.parse(value ?? '');
+      if (Number.isFinite(at) && at > nowMs && at < next) next = at;
+    }
+  }
+  return Number.isFinite(next) ? next : undefined;
+}
+
 /** Journal events that mean "the ledger changed, re-read it".
  *
  *  Refresh is triggered by these rather than the row being REBUILT from them, so
@@ -419,9 +482,11 @@ export function reconcileLocalSends<T extends LocalSend>(
 export function selectLedgerChips(
   durable: readonly SendRecord[],
   blocks: readonly VisibleUserRow[] = [],
+  nowMs = Date.now(),
 ): SendRecord[] {
-  const delivered = durable.filter(record => record.withdrawn !== true && record.fate === 'delivered');
-  const open = durable.filter(record => record.withdrawn !== true && record.fate !== 'delivered');
+  const live = durable.filter(record => !hasLedgerHardExpired(record, nowMs));
+  const delivered = live.filter(record => record.withdrawn !== true && record.fate === 'delivered');
+  const open = live.filter(record => record.withdrawn !== true && record.fate !== 'delivered');
   if (delivered.length === 0) return sortNewestFirst(open);
 
   const takenRow = new Set<number>();
@@ -579,8 +644,8 @@ const UNACCOUNTED_COPY: Record<SendUnaccountedReason | 'unknown', string> = {
 /** The chip for a durable row. Labels stay short (they sit inside a row of
  *  metadata); the sentence lives in `detail`, which the page hangs off `title`
  *  and off the screen-reader text, so the tone is never carried by colour alone. */
-export function sendBadge(record: SendRecord): SendBadge {
-  if (record.fate === 'unaccounted') {
+export function sendBadge(record: SendRecord, nowMs = Date.now()): SendBadge {
+  if (isLedgerUnconfirmed(record, nowMs)) {
     const detail = UNACCOUNTED_COPY[record.unaccountedReason ?? 'unknown'];
     return { label: 'unconfirmed', tone: UNACCOUNTED_TONE, detail };
   }
