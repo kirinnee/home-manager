@@ -93,7 +93,7 @@ import { useDialogFocus } from '../hooks/useDialogFocus';
 import { useInputModality } from '../hooks/useInputModality';
 import { usePullToSearch } from '../hooks/usePullToSearch';
 import { requestSearchFocus, subscribeSearchFocus } from '../lib/search-focus';
-import { useNeedsYouCount } from '../hooks/useNeedsYou';
+import { useAttentionCount } from '../hooks/useAttention';
 
 /** Expanded width. Wide enough for a task line and a teammate name, narrow
  *  enough that the transcript beside it still reads comfortably at 1280px. */
@@ -525,7 +525,7 @@ export function SidebarRow({
     .split(',')
     .map(s => s.trim())
     .filter(Boolean);
-  const needsYouCount = useNeedsYouCount(cfg.id);
+  const attentionCount = useAttentionCount(cfg.id);
 
   return (
     <li>
@@ -561,14 +561,14 @@ export function SidebarRow({
               size="sm"
               className={cn('min-w-0 flex-1', active && 'text-accent')}
             />
-            {needsYouCount > 0 && (
+            {attentionCount > 0 && (
               <span
-                aria-label={`${needsYouCount} unresolved needs-you ${needsYouCount === 1 ? 'item' : 'items'}`}
-                title={`${needsYouCount} unresolved needs-you ${needsYouCount === 1 ? 'item' : 'items'}`}
+                aria-label={`${attentionCount} unresolved attention ${attentionCount === 1 ? 'item' : 'items'}`}
+                title={`${attentionCount} unresolved attention ${attentionCount === 1 ? 'item' : 'items'}`}
                 className="mono inline-flex shrink-0 items-center gap-[3px] rounded-full border border-warn/40 bg-warn/10 px-1.5 text-2xs font-semibold text-warn"
               >
                 <CircleAlert size={10} aria-hidden="true" />
-                <span aria-hidden="true">{needsYouCount > 99 ? '99+' : needsYouCount}</span>
+                <span aria-hidden="true">{attentionCount > 99 ? '99+' : attentionCount}</span>
               </span>
             )}
           </div>

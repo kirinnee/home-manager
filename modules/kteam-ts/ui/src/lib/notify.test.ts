@@ -83,12 +83,18 @@ describe('parseNotifyPrefs', () => {
     expect(parsed.onlyWhenHidden).toBe(false); // valid → kept
     expect(parsed.events.failed).toBe(false); // valid → kept
     expect(parsed.events.question).toBe(true); // malformed → default
-    expect(parsed.events.needsYou).toBe(true); // absent → default
+    expect(parsed.events.attention).toBe(true); // absent → default
   });
 
   test('unknown fields are ignored', () => {
     const parsed = parseNotifyPrefs(JSON.stringify({ enabled: true, futureThing: 1 }));
     expect(parsed.enabled).toBe(true);
+  });
+
+  test('legacy stored event preference migrates to attention without changing its value', () => {
+    const parsed = parseNotifyPrefs(JSON.stringify({ events: { needsYou: false } }));
+    expect(parsed.events.attention).toBe(false);
+    expect(Object.hasOwn(parsed.events, 'needsYou')).toBe(false);
   });
 });
 
@@ -99,7 +105,7 @@ describe('prefs store', () => {
     setNotifyPrefs({ events: { ...getNotifyPrefs().events, completed: false } });
     const prefs = getNotifyPrefs();
     expect(prefs.events.completed).toBe(false);
-    expect(prefs.events.needsYou).toBe(true);
+    expect(prefs.events.attention).toBe(true);
   });
 
   test('subscribers hear a write and can unsubscribe', () => {
@@ -124,7 +130,7 @@ describe('classifyTransition', () => {
   });
 
   test('the four notifying transitions map to their kinds', () => {
-    expect(classifyTransition('running', 'awaiting_user')).toBe('needsYou');
+    expect(classifyTransition('running', 'awaiting_user')).toBe('attention');
     expect(classifyTransition('running', 'awaiting_question')).toBe('question');
     expect(classifyTransition('running', 'failed')).toBe('failed');
     expect(classifyTransition('running', 'stalled')).toBe('failed');
@@ -146,16 +152,16 @@ describe('classifyTransition', () => {
 describe('NotifyLedger', () => {
   test('same (session, kind) inside the cooldown is one firing', () => {
     const ledger = new NotifyLedger();
-    expect(ledger.shouldFire('s1', 'needsYou', 1_000)).toBe(true);
-    expect(ledger.shouldFire('s1', 'needsYou', 11_000)).toBe(false); // the brief's 10s case
-    expect(ledger.shouldFire('s1', 'needsYou', 1_000 + NOTIFY_COOLDOWN_MS)).toBe(true);
+    expect(ledger.shouldFire('s1', 'attention', 1_000)).toBe(true);
+    expect(ledger.shouldFire('s1', 'attention', 11_000)).toBe(false); // the brief's 10s case
+    expect(ledger.shouldFire('s1', 'attention', 1_000 + NOTIFY_COOLDOWN_MS)).toBe(true);
   });
 
   test('a genuinely new event key may update the session inside the cooldown', () => {
     const ledger = new NotifyLedger();
-    expect(ledger.shouldFire('s1', 'needsYou', 1_000, 'turn-1')).toBe(true);
-    expect(ledger.shouldFire('s1', 'needsYou', 2_000, 'turn-2')).toBe(true);
-    expect(ledger.shouldFire('s1', 'needsYou', 3_000, 'turn-2')).toBe(false);
+    expect(ledger.shouldFire('s1', 'attention', 1_000, 'turn-1')).toBe(true);
+    expect(ledger.shouldFire('s1', 'attention', 2_000, 'turn-2')).toBe(true);
+    expect(ledger.shouldFire('s1', 'attention', 3_000, 'turn-2')).toBe(false);
   });
 
   test('group count rolls within the window and resets after quiet', () => {
@@ -167,31 +173,31 @@ describe('NotifyLedger', () => {
 
   test('different kinds and different sessions do not share a cooldown', () => {
     const ledger = new NotifyLedger();
-    expect(ledger.shouldFire('s1', 'needsYou', 1_000)).toBe(true);
+    expect(ledger.shouldFire('s1', 'attention', 1_000)).toBe(true);
     expect(ledger.shouldFire('s1', 'question', 1_000)).toBe(true);
-    expect(ledger.shouldFire('s2', 'needsYou', 1_000)).toBe(true);
+    expect(ledger.shouldFire('s2', 'attention', 1_000)).toBe(true);
   });
 
   test('prune drops sessions that left the fleet', () => {
     const ledger = new NotifyLedger();
     ledger.setStatus('gone', 'running');
-    ledger.shouldFire('gone', 'needsYou', 1_000);
+    ledger.shouldFire('gone', 'attention', 1_000);
     ledger.prune(new Set(['other']));
     expect(ledger.status('gone')).toBeUndefined();
     // The cooldown entry was dropped too — a same-id future session starts clean.
-    expect(ledger.shouldFire('gone', 'needsYou', 1_001)).toBe(true);
+    expect(ledger.shouldFire('gone', 'attention', 1_001)).toBe(true);
   });
 });
 
 describe('buildNotification', () => {
   test('deep-link, tag, and title come from the session', () => {
-    const spec = buildNotification(view('ms1abc-12', 'awaiting_user', { teammate: 'zelda' }), 'needsYou');
+    const spec = buildNotification(view('ms1abc-12', 'awaiting_user', { teammate: 'zelda' }), 'attention');
     expect(spec.url).toBe('/session/ms1abc-12');
     expect(spec.tag).toBe('kteam-ms1abc-12');
     expect(spec.title).toBe('[Zelda] Task ms1abc-12');
     expect(spec.body).toBe('Waiting for you at the prompt.');
     expect(spec.eventKey).toBe(
-      notificationEventKey(view('ms1abc-12', 'awaiting_user', { teammate: 'zelda' }), 'needsYou'),
+      notificationEventKey(view('ms1abc-12', 'awaiting_user', { teammate: 'zelda' }), 'attention'),
     );
   });
 
@@ -230,7 +236,7 @@ describe('planNotifications', () => {
     expect(planNotifications([view('s1', 'running')], ledger, enabledPrefs, 2_000)).toHaveLength(0);
     const fired = planNotifications([view('s1', 'awaiting_user')], ledger, enabledPrefs, 3_000);
     expect(fired).toHaveLength(1);
-    expect(fired[0]!.kind).toBe('needsYou');
+    expect(fired[0]!.kind).toBe('attention');
   });
 
   test('disabled master switch or a disabled kind is silent but still advances the baseline', () => {
@@ -297,9 +303,9 @@ describe('planNotifications', () => {
   });
 
   test('fleet summary identity is stable across ordering and transport implementations', () => {
-    const keys = ['s1:needsYou:awaiting_user:1:', 's2:failed:failed:2:'];
-    expect(fleetNotificationEventKey(keys)).toBe('fleet:3a8fc189');
-    expect(fleetNotificationEventKey([...keys].reverse())).toBe('fleet:3a8fc189');
+    const keys = ['s1:attention:awaiting_user:1:', 's2:failed:failed:2:'];
+    expect(fleetNotificationEventKey(keys)).toBe('fleet:dc9a97bd');
+    expect(fleetNotificationEventKey([...keys].reverse())).toBe('fleet:dc9a97bd');
   });
 
   test('every notify kind is coverable by prefs toggles', () => {

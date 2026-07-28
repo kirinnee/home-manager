@@ -25,9 +25,9 @@ import { displayCallsign } from './callsign';
 // ---------------------------------------------------------------------------
 
 /** The four event classes the brief names. Keys double as pref toggles. */
-export type NotifyKind = 'needsYou' | 'question' | 'failed' | 'completed';
+export type NotifyKind = 'attention' | 'question' | 'failed' | 'completed';
 
-export const NOTIFY_KINDS: readonly NotifyKind[] = ['needsYou', 'question', 'failed', 'completed'];
+export const NOTIFY_KINDS: readonly NotifyKind[] = ['attention', 'question', 'failed', 'completed'];
 
 export interface NotifyPrefs {
   /** Master switch. FALSE by default: quiet until the human explicitly turns
@@ -47,7 +47,7 @@ export interface NotifyPrefs {
 
 export const DEFAULT_NOTIFY_PREFS: NotifyPrefs = {
   enabled: false,
-  events: { needsYou: true, question: true, failed: true, completed: true },
+  events: { attention: true, question: true, failed: true, completed: true },
   onlyWhenHidden: true,
   interactiveOnly: false,
 };
@@ -60,10 +60,14 @@ export const NOTIFY_PREFS_KEY = 'kteam-ui-notify-v1';
 export function parseNotifyPrefs(raw: string | null): NotifyPrefs {
   if (!raw) return DEFAULT_NOTIFY_PREFS;
   try {
-    const parsed = JSON.parse(raw) as Partial<NotifyPrefs> & { events?: Partial<Record<NotifyKind, boolean>> };
+    const parsed = JSON.parse(raw) as Partial<NotifyPrefs> & { events?: Record<string, unknown> };
     const events = {} as Record<NotifyKind, boolean>;
     for (const kind of NOTIFY_KINDS) {
-      const value = parsed.events?.[kind];
+      const current = parsed.events?.[kind];
+      // Decode-only migration for preferences written before the Attention
+      // vocabulary landed. Every new write uses `attention`.
+      const value =
+        typeof current === 'boolean' ? current : kind === 'attention' ? parsed.events?.['needsYou'] : current;
       events[kind] = typeof value === 'boolean' ? value : DEFAULT_NOTIFY_PREFS.events[kind];
     }
     return {
@@ -152,7 +156,7 @@ const FAILED_STATUSES: ReadonlySet<string> = new Set(['failed', 'stalled', 'kill
 export function classifyTransition(prev: SessionStatus | undefined, next: SessionStatus): NotifyKind | null {
   if (prev === undefined || prev === next) return null;
   if (next === 'awaiting_question') return 'question';
-  if (next === 'awaiting_user') return 'needsYou';
+  if (next === 'awaiting_user') return 'attention';
   if (FAILED_STATUSES.has(next)) return 'failed';
   if (next === 'completed') return 'completed';
   return null;
@@ -256,7 +260,7 @@ function bodyFor(view: SessionView, kind: NotifyKind): string {
         return question.length > QUESTION_PREVIEW_LEN ? `${question.slice(0, QUESTION_PREVIEW_LEN - 1)}…` : question;
       return 'Asked you a question.';
     }
-    case 'needsYou':
+    case 'attention':
       return 'Waiting for you at the prompt.';
     case 'failed': {
       const status = view.state.status;

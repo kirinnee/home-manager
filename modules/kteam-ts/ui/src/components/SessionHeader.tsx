@@ -78,6 +78,8 @@ import type { Quota } from '../lib/usage';
 import { useStore } from '../lib/store';
 import { PinSheet, PinsTrigger } from './PinSheet';
 import { usePinCount, useDeclareForeground } from '../hooks/usePins';
+import { AttentionSheet, AttentionTrigger } from './AttentionPanel';
+import { useAttentionCount } from '../hooks/useAttention';
 import { SidePaneTrigger, useSidePane } from './SidePane';
 import { fsTabAvailable, useFsProbe } from './files-api';
 
@@ -234,11 +236,15 @@ export const SessionHeader = memo(function SessionHeader({
   const [renameOpen, setRenameOpen] = useState(false);
   const [migrateOpen, setMigrateOpen] = useState(false);
   const [pinsOpen, setPinsOpen] = useState(false);
+  const [attentionOpen, setAttentionOpen] = useState(false);
   const detailsId = useId();
   const panelId = `${detailsId}-panel`;
   const pinsTriggerId = `${detailsId}-pins`;
   const pinsPanelId = `${detailsId}-pins-panel`;
+  const attentionTriggerId = `${detailsId}-attention`;
+  const attentionPanelId = `${detailsId}-attention-panel`;
   const pinCount = usePinCount(config.id);
+  const attentionCount = useAttentionCount(config.id);
   // Declare THIS session as the foreground one while active, so the Pins sheet
   // reads the right session and transcript-row pins land on it. Only the active
   // pane ever wins (see lib/pin-bridge.ts).
@@ -265,6 +271,18 @@ export const SessionHeader = memo(function SessionHeader({
       controls={sidePane ? (sidePane.surface === 'pins' ? sidePane.paneId : undefined) : pinsPanelId}
     />
   );
+  const attentionTrigger = (
+    <AttentionTrigger
+      id={attentionTriggerId}
+      count={attentionCount}
+      onClick={opener => {
+        if (sidePane) sidePane.toggle('attention', opener);
+        else setAttentionOpen(open => !open);
+      }}
+      expanded={sidePane ? sidePane.surface === 'attention' : attentionOpen}
+      controls={sidePane ? (sidePane.surface === 'attention' ? sidePane.paneId : undefined) : attentionPanelId}
+    />
+  );
   const surfaceTriggers = sidePane && (
     <>
       {filesAvailable && (
@@ -287,6 +305,7 @@ export const SessionHeader = memo(function SessionHeader({
       setRenameOpen(false);
       setMigrateOpen(false);
       setPinsOpen(false);
+      setAttentionOpen(false);
     }
   }, [active]);
 
@@ -458,6 +477,15 @@ export const SessionHeader = memo(function SessionHeader({
           labelledBy={pinsTriggerId}
         />
       )}
+      {!sidePane && (
+        <AttentionSheet
+          id={attentionPanelId}
+          sessionId={config.id}
+          open={attentionOpen}
+          onClose={() => setAttentionOpen(false)}
+          labelledBy={attentionTriggerId}
+        />
+      )}
     </>
   );
 
@@ -538,6 +566,7 @@ export const SessionHeader = memo(function SessionHeader({
             </span>
           </Link>
 
+          {attentionTrigger}
           {pinsTrigger}
 
           <Button
@@ -611,6 +640,7 @@ export const SessionHeader = memo(function SessionHeader({
       <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-sm">
         {tabs}
         {surfaceTriggers}
+        {attentionTrigger}
         {pinsTrigger}
         <ActionGroup>
           {actions}

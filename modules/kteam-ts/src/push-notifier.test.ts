@@ -130,20 +130,20 @@ async function notifierHarness(devices = [device()]) {
 describe('push payload contract', () => {
   test('uses Telegram-style title, one tag per session, and a deterministic transport dedup key', () => {
     const session = view('s1', 'awaiting_user');
-    const payload = buildPushNotification(session, 'needsYou');
+    const payload = buildPushNotification(session, 'attention');
     expect(payload.title).toBe('[Noel] Diene Exec');
     expect(payload.tag).toBe('kteam-s1');
     expect(payload.url).toBe('/session/s1');
-    expect(payload.eventKey).toBe(pushNotificationEventKey(session, 'needsYou'));
+    expect(payload.eventKey).toBe(pushNotificationEventKey(session, 'attention'));
   });
 
   test('fleet summary identity matches the browser transport implementation', () => {
     const first = {
-      ...buildPushNotification(view('s1', 'awaiting_user'), 'needsYou'),
-      eventKey: 's1:needsYou:awaiting_user:1:',
+      ...buildPushNotification(view('s1', 'awaiting_user'), 'attention'),
+      eventKey: 's1:attention:awaiting_user:1:',
     };
     const second = { ...buildPushNotification(view('s2', 'failed'), 'failed'), eventKey: 's2:failed:failed:2:' };
-    expect(summaryPushNotification([second, first]).eventKey).toBe('fleet:3a8fc189');
+    expect(summaryPushNotification([second, first]).eventKey).toBe('fleet:dc9a97bd');
   });
 });
 
@@ -155,7 +155,7 @@ describe('PushNotifier', () => {
     h.sessions.emit('s1', 'awaiting_user');
     await h.notifier.close();
     expect(h.sender.deliveries).toHaveLength(1);
-    expect(h.sender.deliveries[0]!.payload).toMatchObject({ title: '[Noel] Diene Exec', kind: 'needsYou', count: 1 });
+    expect(h.sender.deliveries[0]!.payload).toMatchObject({ title: '[Noel] Diene Exec', kind: 'attention', count: 1 });
   });
 
   test('sequential events in one session keep the latest line and a collapsed count', async () => {

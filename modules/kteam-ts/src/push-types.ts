@@ -1,8 +1,13 @@
 import type { InteractionMode, SessionStatus } from './types';
 
-export type PushNotificationKind = 'needsYou' | 'question' | 'failed' | 'completed';
+export type PushNotificationKind = 'attention' | 'question' | 'failed' | 'completed';
 
-export const PUSH_NOTIFICATION_KINDS: readonly PushNotificationKind[] = ['needsYou', 'question', 'failed', 'completed'];
+export const PUSH_NOTIFICATION_KINDS: readonly PushNotificationKind[] = [
+  'attention',
+  'question',
+  'failed',
+  'completed',
+];
 
 export interface PushPreferences {
   events: Record<PushNotificationKind, boolean>;
@@ -10,7 +15,7 @@ export interface PushPreferences {
 }
 
 export const DEFAULT_PUSH_PREFERENCES: PushPreferences = {
-  events: { needsYou: true, question: true, failed: true, completed: true },
+  events: { attention: true, question: true, failed: true, completed: true },
   interactiveOnly: false,
 };
 
@@ -114,7 +119,10 @@ export function parsePushPreferences(value: unknown): PushPreferences {
   const rawEvents = object(raw['events']);
   const events = {} as Record<PushNotificationKind, boolean>;
   for (const kind of PUSH_NOTIFICATION_KINDS) {
-    const enabled = rawEvents[kind];
+    const current = rawEvents[kind];
+    // Stored devices from the pre-Attention build retain their setting instead
+    // of making the daemon treat the whole mode-0600 store as corrupt.
+    const enabled = typeof current === 'boolean' ? current : kind === 'attention' ? rawEvents['needsYou'] : current;
     if (typeof enabled !== 'boolean') throw new PushError('invalid', `prefs.events.${kind} must be boolean`);
     events[kind] = enabled;
   }
@@ -194,7 +202,7 @@ export function pushDeviceView(record: PushDeviceRecord): PushDeviceView {
 
 export function pushKindForStatus(status: SessionStatus): PushNotificationKind | null {
   if (status === 'awaiting_question') return 'question';
-  if (status === 'awaiting_user') return 'needsYou';
+  if (status === 'awaiting_user') return 'attention';
   if (status === 'failed' || status === 'stalled' || status === 'kill_failed') return 'failed';
   if (status === 'completed') return 'completed';
   return null;

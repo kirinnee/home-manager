@@ -54,6 +54,7 @@ describe('parseAttentionCli', () => {
   test('empty and incomplete done are refused', () => {
     expect(() => parseAttentionCli([])).toThrow(AttentionError);
     expect(() => parseAttentionCli(['done'])).toThrow(/attention reference/);
+    expect(() => parseAttentionCli(['done', 'A01'])).toThrow(/attention reference/);
     expect(() => parseAttentionCli(['ls', '--session'])).toThrow(/session id/);
   });
 });
@@ -126,7 +127,11 @@ describe('rendering', () => {
 
   test('parse errors are explicit and mutation confirmations keep count', () => {
     expect(renderAttentionList({ ...snapshot(), parseErrors: 1 })).toContain('before trusting');
-    expect(renderAttentionCli(parseAttentionCli(['Need approval']), snapshot())).toContain('1 unresolved');
+    const addResponse = snapshot();
+    addResponse.items[0] = { ...addResponse.items[0]!, source: 'agent-raised' };
+    const recorded = renderAttentionCli(parseAttentionCli(['Choose release?']), addResponse);
+    expect(recorded).toContain('?A3');
+    expect(recorded).toContain('1 unresolved');
     expect(renderAttentionCli({ command: 'done', id: 'A1' }, { ...snapshot(), items: [], count: 0 })).toContain(
       '0 unresolved',
     );

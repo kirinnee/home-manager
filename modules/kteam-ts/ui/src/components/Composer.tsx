@@ -48,6 +48,7 @@ import { useDebouncedEffect } from '../hooks/useDebounce';
 import { clearDraft, loadDraft, saveDraft } from '../lib/drafts';
 import { readInputModality, useInputModality } from '../hooks/useInputModality';
 import { useDictationBundle } from './DictationControl';
+import { useDictationShortcut } from '../lib/stt/use-dictation-shortcut';
 import { ComposerAutocompletePopover } from './ComposerAutocomplete';
 import { useComposerAutocomplete, type ComposerAutocompleteController } from './composer-autocomplete-engine';
 import { createComposerAutocompleteProviders } from './composer-autocomplete-providers';
@@ -448,6 +449,12 @@ export function Composer({
       pendingDictationSelection.current = result;
       onDraftChange(result.text);
     },
+  });
+  useDictationShortcut({
+    binding: dictation.shortcut,
+    handle: dictation.handle,
+    composerRef: ref,
+    disabled: disabled || sending,
   });
   // The growth cap is a property of the box the reader can see, so it follows
   // the viewport rather than the device. Desktop is unchanged at 148px.

@@ -8,6 +8,7 @@ import {
   isAttentionError,
   parseAttentionId,
   type AttentionActor,
+  type AttentionId,
   type AttentionSnapshot,
   type AttentionSource,
 } from './attention-types';
@@ -118,7 +119,7 @@ const object = (value: unknown): Record<string, unknown> =>
 
 const optionalString = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
 
-const id = (value: unknown): import('./attention-types').AttentionId => {
+const id = (value: unknown): AttentionId => {
   const parsed = parseAttentionId(value);
   if (parsed === null) throw new AttentionError('invalid', 'an attention id like A3 or ?A3 is required');
   return parsed;

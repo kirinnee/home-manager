@@ -25,7 +25,7 @@ export interface ClientLike {
   navigate?(url: string): Promise<unknown>;
 }
 
-export type PushNotifyKind = 'needsYou' | 'question' | 'failed' | 'completed';
+export type PushNotifyKind = 'attention' | 'question' | 'failed' | 'completed';
 
 /** Runtime-validated wire payload from the daemon. It intentionally mirrors
     the app's NotificationSpec without importing DOM-bound app code into the
@@ -43,7 +43,7 @@ export interface PushNotificationPayload {
   kind?: PushNotifyKind;
 }
 
-const PUSH_KINDS = new Set<PushNotifyKind>(['needsYou', 'question', 'failed', 'completed']);
+const PUSH_KINDS = new Set<PushNotifyKind>(['attention', 'question', 'failed', 'completed']);
 
 /** Treat push-service bytes as hostile input even though the daemon authored
     them: a malformed payload must not become an arbitrary title, URL, or tag. */
@@ -65,7 +65,10 @@ export function parsePushPayload(value: unknown): PushNotificationPayload | null
   if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 1 || count > 100) return null;
   const sessionId = raw['sessionId'];
   if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId || sessionId.length > 160)) return null;
-  const kind = raw['kind'];
+  const wireKind = raw['kind'];
+  // A push already queued by the pre-Attention daemon may arrive after the
+  // worker update. Normalize it at the boundary; new payloads never emit this.
+  const kind = wireKind === 'needsYou' ? 'attention' : wireKind;
   if (kind !== undefined && (typeof kind !== 'string' || !PUSH_KINDS.has(kind as PushNotifyKind))) return null;
   return {
     version: 1,
