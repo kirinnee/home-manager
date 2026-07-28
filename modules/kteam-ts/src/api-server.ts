@@ -197,6 +197,21 @@ const unknownRoute = (method: string, path: string) => ({
  *  message/turn. */
 const DEDUPED_ACTIONS = new Set(['send', 'answer', 'interrupt', 'signal', 'resume', 'migrate', 'rename', 'runtime']);
 
+/** A request id that is safe to PERSIST and to embed in a filename.
+ *
+ *  `x-kteam-request-id` is chosen by the client, and the send path promotes it to
+ *  the durable send id — which the native-file queue path embeds in a path
+ *  (`channel/queued-<id>.md`). The charset therefore admits no `/`, `\` or `.` at
+ *  all, which makes `..` and absolute paths UNREPRESENTABLE rather than merely
+ *  filtered, and the 128 cap keeps the resulting filename bounded. A browser's
+ *  `crypto.randomUUID()` satisfies it unchanged.
+ *
+ *  Dedupe is deliberately NOT gated on this: an id that fails the predicate is
+ *  still a perfectly good idempotency token, so it keeps working for `applyOnce`
+ *  and only loses its promotion to a durable identity. SessionManager enforces the
+ *  same rule independently — it is reachable from the CLI without passing here. */
+const SAFE_REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
 /** Per-session LRU of recently APPLIED request ids. Ids are recorded only after
  *  the mutation succeeds: a failed attempt stays retryable, while a retry of a
  *  success (whose response the client never saw) returns the current session
@@ -687,7 +702,61 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           }
           if (action === 'send' && request.method === 'POST') {
             const input = await body<SendRequest>(request);
-            return await applyOnce(() => options.service.send(id, input));
+            // THE REQUEST ID IS AN IDENTITY, NOT JUST A DEDUPE TOKEN.
+            //
+            // `x-kteam-request-id` already gates `applyOnce`. Passing it through
+            // makes it the send's DURABLE ledger id as well, which is what lets an
+            // optimistic browser row join its durable row by IDENTITY instead of
+            // falling back to content+time matching — and content matching cannot
+            // tell two identical messages apart, which is precisely the ambiguity
+            // this change exists to remove.
+            //
+            // The header is the ONLY accepted source, and it is written
+            // UNCONDITIONALLY — including to `undefined`. A body-supplied
+            // `requestId` is never merged and never survives: `applyOnce` deduped
+            // on the header, so a body value that disagreed would split one logical
+            // send across two ids (one for idempotency, another for the ledger),
+            // and a caller could otherwise pick an id to collide with an existing
+            // record. Overwriting rather than conditionally spreading is what makes
+            // that true for every code path, including the absent-header one.
+            //
+            // VALIDATED FIRST, because this value is client-chosen and the backend
+            // uses it as the durable send id — which the native-file path embeds in
+            // a filename (`channel/queued-<id>.md`). The charset admits no `/`,
+            // `\` or `.` at all, so traversal and absolute paths are
+            // unrepresentable rather than merely filtered, and the length cap keeps
+            // the filename bounded. The daemon enforces the same rule on its side;
+            // this is the outer layer, not the only one.
+            //
+            // An id that FAILS the predicate still dedupes exactly as before — only
+            // the identity propagation is dropped — so an older client with a
+            // different id format keeps working and simply falls back to the
+            // browser's content+time reconciliation.
+            const identity = requestId !== undefined && SAFE_REQUEST_ID.test(requestId) ? requestId : undefined;
+            return await applyOnce(() => options.service.send(id, { ...input, requestId: identity }));
+          }
+          // THE SEND LEDGER — durable existence and fate of every message sent to
+          // this session. Read-only.
+          //
+          // ORDERING. Kept immediately below `'send'` on purpose: the two action
+          // names differ by one character, and this dispatcher matches `action` by
+          // EXACT string equality, so keeping the pair adjacent is what makes a
+          // future `startsWith`/prefix refactor visibly wrong at review time. It
+          // also sits well above every generic and catch-all branch further down,
+          // so nothing can swallow it.
+          //
+          // No `applyOnce`: a GET has nothing to apply once, and `'sends'` is
+          // deliberately absent from DEDUPED_ACTIONS, so `dedupe` is false here by
+          // construction rather than by accident.
+          //
+          // Bounds live in the service: the default is everything still open plus
+          // the newest settled rows, and `all=1` asks for the full ledger under the
+          // service's own cap. The route deliberately does no slicing of its own, so
+          // there is exactly one place that decides how much history is served.
+          if (action === 'sends' && request.method === 'GET') {
+            return json({
+              sends: await options.service.listSends(id, { all: url.searchParams.get('all') === '1' }),
+            });
           }
           if (action === 'runtime' && request.method === 'POST') {
             const input = await body<RuntimeControlRequest>(request);
