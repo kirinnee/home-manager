@@ -69,32 +69,10 @@ export function isLedgerUnconfirmed(record: SendRecord, nowMs = Date.now()): boo
   return Number.isFinite(deadline) && deadline <= nowMs;
 }
 
-/** Only rows describing a current acceptance belong at the transcript tail.
- * Everything else is a durable historical fact and must render in time order. */
-export function isLedgerInFlight(record: SendRecord, nowMs = Date.now()): boolean {
-  return record.fate === 'accepted' && !isLedgerUnconfirmed(record, nowMs);
-}
-
-export interface LedgerChipPartition {
-  /** Current accepted/held attempts; these may share the optimistic footer. */
-  inFlight: SendRecord[];
-  /** Unconfirmed and exceptional delivered chips; place these in transcript time. */
-  chronological: SendRecord[];
-}
-
-export function partitionLedgerChips(records: readonly SendRecord[], nowMs = Date.now()): LedgerChipPartition {
-  const inFlight: SendRecord[] = [];
-  const chronological: SendRecord[] = [];
-  for (const record of records) {
-    (isLedgerInFlight(record, nowMs) ? inFlight : chronological).push(record);
-  }
-  return { inFlight, chronological };
-}
-
-/** The next instant at which this page's classification can change without a
- * socket event: ACCEPTED becomes unconfirmed, or an open row reaches its hard
- * live-view cap. SessionChatPage schedules one timeout for this value instead of
- * polling. */
+/** The next instant at which this page's durable-row presentation can change
+ * without a socket event: an ACCEPTED badge becomes unconfirmed, or an open row
+ * reaches its hard live-view cap. Placement itself is always chronological and
+ * fate-independent. SessionChatPage schedules one timeout instead of polling. */
 export function nextLedgerViewDeadline(records: readonly SendRecord[], nowMs = Date.now()): number | undefined {
   let next = Number.POSITIVE_INFINITY;
   for (const record of records) {
