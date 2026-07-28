@@ -12,10 +12,12 @@ export const BROWSER_MIN_WIDTH = 320;
 export const BROWSER_MIN_HEIGHT = 240;
 export const BROWSER_MAX_WIDTH = 1_920;
 export const BROWSER_MAX_HEIGHT = 1_200;
+export const BROWSER_MAX_PAGE_ID_LENGTH = 128;
 export const BROWSER_DEFAULT_VIEWPORT = { width: 1_280, height: 800 } as const;
 
 export type BrowserLifecycle = 'stopped' | 'starting' | 'running' | 'stopping' | 'error';
 export type BrowserActorKind = 'agent' | 'human';
+export type BrowserPageState = 'loading' | 'ready' | 'error';
 export type BrowserActivity =
   | 'start'
   | 'stop'
@@ -27,6 +29,9 @@ export type BrowserActivity =
   | 'back'
   | 'forward'
   | 'reload'
+  | 'new-page'
+  | 'activate-page'
+  | 'close-page'
   | 'resize'
   | 'pointer'
   | 'keyboard'
@@ -42,6 +47,8 @@ export interface BrowserScreencastFrame {
   dataBase64: string;
   width: number;
   height: number;
+  /** Worker-lifetime id of the page whose CDP session emitted this frame. */
+  pageId?: string;
 }
 
 export type BrowserMouseInput = {
@@ -79,6 +86,40 @@ export interface BrowserLastActor {
   action: BrowserActivity;
 }
 
+/** Transient metadata for one real Playwright page. Page ids are opaque and
+ * stable only for the lifetime of the worker that issued them. */
+export interface BrowserPageSummary {
+  id: string;
+  url: string;
+  title: string;
+}
+
+/** A coherent sample of the worker's explicit active page and its context. */
+export interface BrowserPageSnapshot {
+  url: string;
+  title: string;
+  pages: BrowserPageSummary[];
+  activePageId: string;
+  pageState: BrowserPageState;
+  pageError?: string;
+  canGoBack: boolean;
+  canGoForward: boolean;
+}
+
+/** Result of one worker-serialized page action. `actedPageId` names the exact
+ * Page object targeted by the action; `activePageId` is the shared target after
+ * the action and may differ when a click opens a popup or a page is closed. */
+export interface BrowserPageActionSnapshot extends BrowserPageSnapshot {
+  actedPageId: string;
+}
+
+export interface BrowserAgentPage {
+  pageId: string;
+  kind: 'agent';
+  action: BrowserActivity;
+  at: string;
+}
+
 export interface BrowserCapacityView {
   running: number;
   maximum: number;
@@ -96,6 +137,16 @@ export interface BrowserStatusView {
   /** Current page identity, sampled transiently from the shared browser. */
   url?: string;
   title?: string;
+  /** Real Playwright pages only. Empty while the browser is not running. */
+  pages: BrowserPageSummary[];
+  activePageId?: string;
+  pageState?: BrowserPageState;
+  /** Coarse, bounded active-document failure only. */
+  pageError?: string;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  /** Last page used by an API-resolved agent. Human activity never rewrites it. */
+  agentPage?: BrowserAgentPage;
   lastActor?: BrowserLastActor;
   capacity: BrowserCapacityView;
   /** A coarse launch/runtime failure only. Never page text, a screenshot, or a
@@ -115,6 +166,9 @@ export type BrowserAction =
   | { action: 'back' }
   | { action: 'forward' }
   | { action: 'reload' }
+  | { action: 'new-page'; url?: string }
+  | { action: 'activate-page'; pageId: string }
+  | { action: 'close-page'; pageId: string }
   | { action: 'resize'; width: number; height: number }
   | { action: 'human-activity'; kind: 'pointer' | 'keyboard' | 'paste' };
 
@@ -124,6 +178,13 @@ export interface BrowserActionResult {
   result?: {
     url?: string;
     title?: string;
+    pages?: BrowserPageSummary[];
+    activePageId?: string;
+    actedPageId?: string;
+    pageState?: BrowserPageState;
+    pageError?: string;
+    canGoBack?: boolean;
+    canGoForward?: boolean;
     text?: string;
     /** PNG bytes encoded only for the explicit screenshot response. */
     screenshotBase64?: string;

@@ -4,7 +4,10 @@ export const BROWSER_CLI_USAGE = `kteam browser <command>
 
   open [url]                 start or reuse this session's browser; optionally navigate
   start                      start without navigating
-  status                     show lifecycle, viewport, viewers, and last actor
+  status                     show lifecycle, tabs, viewport, viewers, and last actor
+  new-page [url]             create and activate a browser tab; optionally navigate
+  activate-page <id>         make a browser tab active
+  close-page <id>            close a browser tab
   navigate <url>             navigate the shared browser (alias: goto)
   click <selector>           Playwright click (shell-quote selectors containing spaces)
   type <selector> <text...>  Playwright fill; text is not logged
@@ -27,6 +30,9 @@ export type BrowserCliCommand =
   | { command: 'status'; session?: string }
   | { command: 'start'; session?: string }
   | { command: 'open'; url?: string; session?: string }
+  | { command: 'new-page'; url?: string; session?: string }
+  | { command: 'activate-page'; pageId: string; session?: string }
+  | { command: 'close-page'; pageId: string; session?: string }
   | { command: 'stop'; session?: string }
   | { command: 'navigate'; url: string; session?: string }
   | { command: 'click'; selector: string; session?: string }
@@ -83,6 +89,14 @@ export function parseBrowserCli(argv: readonly string[]): BrowserCliCommand {
       const url = positional[1]?.trim();
       return withSession({ command: 'open' as const, ...(url ? { url } : {}) }, session);
     }
+    case 'new-page': {
+      const url = positional[1]?.trim();
+      return withSession({ command: 'new-page' as const, ...(url ? { url } : {}) }, session);
+    }
+    case 'activate-page':
+      return withSession({ command: 'activate-page' as const, pageId: requireText(positional[1], 'page id') }, session);
+    case 'close-page':
+      return withSession({ command: 'close-page' as const, pageId: requireText(positional[1], 'page id') }, session);
     case 'stop':
     case 'close':
       return withSession({ command: 'stop' as const }, session);
@@ -147,6 +161,12 @@ export function browserCliRequest(command: BrowserCliCommand, selfSessionId: str
       return { method: 'POST', path, body: { action: 'start' } };
     case 'open':
       return { method: 'POST', path, body: { action: 'open', ...(command.url ? { url: command.url } : {}) } };
+    case 'new-page':
+      return { method: 'POST', path, body: { action: 'new-page', ...(command.url ? { url: command.url } : {}) } };
+    case 'activate-page':
+      return { method: 'POST', path, body: { action: 'activate-page', pageId: command.pageId } };
+    case 'close-page':
+      return { method: 'POST', path, body: { action: 'close-page', pageId: command.pageId } };
     case 'stop':
       return { method: 'POST', path, body: { action: 'stop' } };
     case 'navigate':
@@ -181,6 +201,23 @@ function renderStatus(status: BrowserStatusView): string {
   ];
   if (status.lastActor)
     lines.push(`last ${status.lastActor.kind}: ${status.lastActor.action} at ${status.lastActor.at}`);
+  if (status.agentPage)
+    lines.push(`agent page ${status.agentPage.pageId}: ${status.agentPage.action} at ${status.agentPage.at}`);
+  if (status.pages) {
+    lines.push(
+      ...status.pages.map(
+        page => `${page.id === status.activePageId ? '*' : ' '} ${page.id}  ${page.title || '(untitled)'}  ${page.url}`,
+      ),
+    );
+  }
+  if (status.pageState) {
+    const history =
+      status.canGoBack === undefined && status.canGoForward === undefined
+        ? ''
+        : ` · back ${status.canGoBack ? 'yes' : 'no'} · forward ${status.canGoForward ? 'yes' : 'no'}`;
+    lines.push(`page ${status.pageState}${history}`);
+  }
+  if (status.pageError) lines.push(`page error: ${status.pageError}`);
   if (status.error) lines.push(`error: ${status.error}`);
   return `${lines.join('\n')}\n`;
 }

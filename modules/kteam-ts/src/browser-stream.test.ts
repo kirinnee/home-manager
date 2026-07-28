@@ -1,49 +1,107 @@
 import { describe, expect, test } from 'bun:test';
 import {
   BrowserStreamBridge,
+  encodeBrowserFrameEnvelope,
   parseBrowserInput,
-  type BrowserStreamChunk,
   type BrowserStreamDownstream,
 } from './browser-stream';
 import { BrowserService, type ManagedBrowserRuntime } from './browser-service';
 import { createPaths } from './paths';
-import type { BrowserInputEvent, BrowserScreencastFrame, BrowserViewport } from './browser-types';
+import {
+  BROWSER_MAX_PAGE_ID_LENGTH,
+  type BrowserInputEvent,
+  type BrowserScreencastFrame,
+  type BrowserViewport,
+} from './browser-types';
 
 const SID = 'ms3moxcz-352c6078';
+
+function decodeFrameEnvelope(chunk: Uint8Array): { version: number; pageId: string; jpeg: string } {
+  if (Buffer.from(chunk.subarray(0, 4)).toString() !== 'KBRF') throw new Error('missing frame envelope magic');
+  const pageIdLength = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength).getUint16(5, false);
+  const jpegOffset = 7 + pageIdLength;
+  return {
+    version: chunk[4]!,
+    pageId: new TextDecoder().decode(chunk.subarray(7, jpegOffset)),
+    jpeg: Buffer.from(chunk.subarray(jpegOffset)).toString(),
+  };
+}
 
 class Runtime implements ManagedBrowserRuntime {
   viewport: BrowserViewport = { width: 1280, height: 800 };
   inputs: BrowserInputEvent[] = [];
   listener?: (frame: BrowserScreencastFrame) => void;
+  private pages = [{ id: 'page-1', url: 'about:blank', title: '' }];
+  private activePageId = 'page-1';
+
+  private snapshot() {
+    const active = this.pages.find(page => page.id === this.activePageId)!;
+    return {
+      url: active.url,
+      title: active.title,
+      pages: this.pages.map(page => ({ ...page })),
+      activePageId: active.id,
+      pageState: 'ready' as const,
+      canGoBack: false,
+      canGoForward: false,
+    };
+  }
+
+  private actionSnapshot(actedPageId = this.activePageId) {
+    return { ...this.snapshot(), actedPageId };
+  }
+
   async resize(viewport: BrowserViewport) {
     this.viewport = viewport;
+    return this.actionSnapshot();
   }
   async navigate(url: string) {
-    return { url, title: '' };
+    const active = this.pages.find(page => page.id === this.activePageId)!;
+    active.url = url;
+    return this.actionSnapshot();
   }
   async click() {
-    return { url: '', title: '' };
+    return this.actionSnapshot();
   }
   async type() {
-    return { url: '', title: '' };
+    return this.actionSnapshot();
   }
   async read() {
-    return { url: '', title: '', text: '' };
+    return { ...this.actionSnapshot(), text: '' };
   }
   async screenshot() {
-    return { url: '', title: '', screenshotBase64: '' };
+    return { ...this.actionSnapshot(), screenshotBase64: '' };
   }
   async back() {
-    return { url: '', title: '' };
+    return this.actionSnapshot();
   }
   async forward() {
-    return { url: '', title: '' };
+    return this.actionSnapshot();
   }
   async reload() {
-    return { url: '', title: '' };
+    return this.actionSnapshot();
   }
   async location() {
-    return { url: '', title: '' };
+    return this.snapshot();
+  }
+  async newPage(url = 'about:blank') {
+    const id = `page-${this.pages.length + 1}`;
+    this.pages.push({ id, url, title: '' });
+    this.activePageId = id;
+    return this.actionSnapshot(id);
+  }
+  async activatePage(pageId: string) {
+    if (!this.pages.some(page => page.id === pageId)) throw new Error('page not found');
+    this.activePageId = pageId;
+    return this.actionSnapshot(pageId);
+  }
+  async closePage(pageId: string) {
+    const index = this.pages.findIndex(page => page.id === pageId);
+    if (index < 0) throw new Error('page not found');
+    this.pages.splice(index, 1);
+    if (this.pages.length === 0) this.pages.push({ id: 'page-replacement', url: 'about:blank', title: '' });
+    if (this.activePageId === pageId) this.activePageId = this.pages[Math.min(index, this.pages.length - 1)]!.id;
+    return this.actionSnapshot(pageId);
   }
   async startScreencast(listener: (frame: BrowserScreencastFrame) => void) {
     this.listener = listener;
@@ -58,10 +116,10 @@ class Runtime implements ManagedBrowserRuntime {
 }
 
 class Downstream implements BrowserStreamDownstream {
-  sent: BrowserStreamChunk[] = [];
+  sent: Uint8Array[] = [];
   closed: Array<{ code?: number; reason?: string }> = [];
   buffered = 0;
-  send(chunk: BrowserStreamChunk) {
+  send(chunk: Uint8Array) {
     this.sent.push(chunk);
   }
   close(code?: number, reason?: string) {
@@ -73,7 +131,7 @@ class Downstream implements BrowserStreamDownstream {
 }
 
 class ThrowingDownstream extends Downstream {
-  override send(_chunk: BrowserStreamChunk) {
+  override send(_chunk: Uint8Array) {
     throw new Error('socket is gone');
   }
 }
@@ -109,12 +167,26 @@ describe('browser stream input validation', () => {
 });
 
 describe('browser JPEG stream bridge', () => {
+  test('encodes page identity and JPEG bytes in one bounded versioned message', () => {
+    const jpeg = Buffer.from('jpeg');
+    const encoded = encodeBrowserFrameEnvelope('page-1', jpeg)!;
+    expect(decodeFrameEnvelope(encoded)).toEqual({ version: 1, pageId: 'page-1', jpeg: 'jpeg' });
+    expect(encodeBrowserFrameEnvelope('', jpeg)).toBeUndefined();
+    expect(encodeBrowserFrameEnvelope('x'.repeat(BROWSER_MAX_PAGE_ID_LENGTH + 1), jpeg)).toBeUndefined();
+    expect(encodeBrowserFrameEnvelope('page-1', new Uint8Array())).toBeUndefined();
+  });
+
   test('relays transient binary frames and ordered human input', async () => {
     const { runtime, service } = await harness();
     const downstream = new Downstream();
     const bridge = await BrowserStreamBridge.connect(service, SID, downstream);
-    runtime.listener?.({ dataBase64: Buffer.from('jpeg').toString('base64'), width: 1280, height: 800 });
-    expect(Buffer.from(downstream.sent[0] as Uint8Array).toString()).toBe('jpeg');
+    runtime.listener?.({
+      dataBase64: Buffer.from('jpeg').toString('base64'),
+      width: 1280,
+      height: 800,
+      pageId: 'page-1',
+    });
+    expect(decodeFrameEnvelope(downstream.sent[0]!)).toEqual({ version: 1, pageId: 'page-1', jpeg: 'jpeg' });
     bridge.fromClient(JSON.stringify({ kind: 'key', type: 'keyDown', key: 'a', code: 'KeyA', text: 'a' }));
     await Bun.sleep(0);
     expect(runtime.inputs[0]).toMatchObject({ kind: 'key', key: 'a' });
@@ -131,8 +203,33 @@ describe('browser JPEG stream bridge', () => {
     const downstream = new Downstream();
     await BrowserStreamBridge.connect(service, SID, downstream);
     downstream.buffered = 5 * 1024 * 1024;
-    runtime.listener?.({ dataBase64: Buffer.from('frame').toString('base64'), width: 1280, height: 800 });
+    runtime.listener?.({
+      dataBase64: Buffer.from('frame').toString('base64'),
+      width: 1280,
+      height: 800,
+      pageId: 'page-1',
+    });
     expect(downstream.sent).toHaveLength(0);
+    expect((await service.status(SID)).viewers).toBe(1);
+    await service.close();
+  });
+
+  test('drops frames whose page identity is missing or invalid without closing the viewer', async () => {
+    const { runtime, service } = await harness();
+    const downstream = new Downstream();
+    await BrowserStreamBridge.connect(service, SID, downstream);
+    const dataBase64 = Buffer.from('frame').toString('base64');
+
+    runtime.listener?.({ dataBase64, width: 1280, height: 800 });
+    runtime.listener?.({ dataBase64, width: 1280, height: 800, pageId: '' });
+    runtime.listener?.({
+      dataBase64,
+      width: 1280,
+      height: 800,
+      pageId: 'x'.repeat(BROWSER_MAX_PAGE_ID_LENGTH + 1),
+    });
+    expect(downstream.sent).toHaveLength(0);
+    expect(downstream.closed).toHaveLength(0);
     expect((await service.status(SID)).viewers).toBe(1);
     await service.close();
   });
@@ -144,16 +241,26 @@ describe('browser JPEG stream bridge', () => {
     await BrowserStreamBridge.connect(service, SID, failed);
     const healthyBridge = await BrowserStreamBridge.connect(service, SID, healthy);
 
-    runtime.listener?.({ dataBase64: Buffer.from('frame-one').toString('base64'), width: 1280, height: 800 });
+    runtime.listener?.({
+      dataBase64: Buffer.from('frame-one').toString('base64'),
+      width: 1280,
+      height: 800,
+      pageId: 'page-1',
+    });
     expect(failed.closed).toEqual([{ code: 1011, reason: 'browser display send failed' }]);
-    expect(Buffer.from(healthy.sent[0] as Uint8Array).toString()).toBe('frame-one');
+    expect(decodeFrameEnvelope(healthy.sent[0]!)).toEqual({ version: 1, pageId: 'page-1', jpeg: 'frame-one' });
     expect((await service.status(SID)).viewers).toBe(1);
 
     healthyBridge.fromClient(JSON.stringify({ kind: 'key', type: 'keyDown', key: 'b', code: 'KeyB', text: 'b' }));
     await Bun.sleep(0);
     expect(runtime.inputs.at(-1)).toMatchObject({ kind: 'key', key: 'b' });
-    runtime.listener?.({ dataBase64: Buffer.from('frame-two').toString('base64'), width: 1280, height: 800 });
-    expect(Buffer.from(healthy.sent[1] as Uint8Array).toString()).toBe('frame-two');
+    runtime.listener?.({
+      dataBase64: Buffer.from('frame-two').toString('base64'),
+      width: 1280,
+      height: 800,
+      pageId: 'page-1',
+    });
+    expect(decodeFrameEnvelope(healthy.sent[1]!)).toEqual({ version: 1, pageId: 'page-1', jpeg: 'frame-two' });
     await service.close();
   });
 

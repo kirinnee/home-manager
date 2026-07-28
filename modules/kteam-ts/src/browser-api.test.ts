@@ -9,47 +9,79 @@ import {
 } from './browser-api';
 import { BrowserService, type ManagedBrowserRuntime } from './browser-service';
 import { createPaths } from './paths';
-import type { BrowserInputEvent, BrowserScreencastFrame, BrowserViewport } from './browser-types';
+import type {
+  BrowserInputEvent,
+  BrowserPageActionSnapshot,
+  BrowserPageSnapshot,
+  BrowserScreencastFrame,
+  BrowserViewport,
+} from './browser-types';
 
 const SID = 'ms3moxcz-352c6078';
+
+function pageSnapshot(url: string, title: string): BrowserPageSnapshot {
+  return {
+    url,
+    title,
+    pages: [{ id: 'page_1', url, title }],
+    activePageId: 'page_1',
+    pageState: 'ready',
+    canGoBack: false,
+    canGoForward: false,
+  };
+}
+
+function pageActionSnapshot(url: string, title: string): BrowserPageActionSnapshot {
+  return { ...pageSnapshot(url, title), actedPageId: 'page_1' };
+}
 
 class Runtime implements ManagedBrowserRuntime {
   viewport: BrowserViewport = { width: 1280, height: 800 };
   calls: string[] = [];
   async resize(viewport: BrowserViewport) {
     this.viewport = viewport;
+    return pageActionSnapshot('about:blank', '');
   }
   async navigate(url: string) {
     this.calls.push(`navigate:${url}`);
-    return { url, title: 'title' };
+    return pageActionSnapshot(url, 'title');
   }
   async click(selector: string) {
     this.calls.push(`click:${selector}`);
-    return { url: 'https://example.test/', title: 'title' };
+    return pageActionSnapshot('https://example.test/', 'title');
   }
   async type(selector: string, text: string) {
     this.calls.push(`type:${selector}:${text}`);
-    return { url: 'https://example.test/', title: 'title' };
+    return pageActionSnapshot('https://example.test/', 'title');
   }
   async read() {
-    return { url: 'https://example.test/', title: 'title', text: 'page' };
+    return { ...pageActionSnapshot('https://example.test/', 'title'), text: 'page' };
   }
   async screenshot() {
-    return { url: 'https://example.test/', title: 'title', screenshotBase64: 'cG5n' };
+    return { ...pageActionSnapshot('https://example.test/', 'title'), screenshotBase64: 'cG5n' };
   }
   async back() {
-    return { url: 'https://example.test/old', title: 'old' };
+    return pageActionSnapshot('https://example.test/old', 'old');
   }
   async forward() {
     this.calls.push('forward');
-    return { url: 'https://example.test/new', title: 'new' };
+    return pageActionSnapshot('https://example.test/new', 'new');
   }
   async reload() {
     this.calls.push('reload');
-    return { url: 'https://example.test/reloaded', title: 'reloaded' };
+    return pageActionSnapshot('https://example.test/reloaded', 'reloaded');
+  }
+  async newPage(url?: string) {
+    return pageActionSnapshot(url ?? 'about:blank', '');
+  }
+  async activatePage(_pageId: string) {
+    return pageActionSnapshot('https://example.test/', 'title');
+  }
+  async closePage(_pageId: string) {
+    return pageActionSnapshot('https://example.test/', 'title');
   }
   async location() {
-    return { url: 'about:blank', title: '' };
+    return pageSnapshot('about:blank', '');
   }
   async startScreencast(_listener: (frame: BrowserScreencastFrame) => void) {}
   async stopScreencast() {}
@@ -113,12 +145,30 @@ describe('action parsing', () => {
     });
     expect(parseBrowserAction({ action: 'forward' })).toEqual({ action: 'forward' });
     expect(parseBrowserAction({ action: 'reload' })).toEqual({ action: 'reload' });
+    expect(parseBrowserAction({ action: 'new-page', url: 'example.test/docs' })).toEqual({
+      action: 'new-page',
+      url: 'https://example.test/docs',
+    });
+    expect(parseBrowserAction({ action: 'new-page' })).toEqual({ action: 'new-page' });
+    expect(parseBrowserAction({ action: 'activate-page', pageId: 'page_123' })).toEqual({
+      action: 'activate-page',
+      pageId: 'page_123',
+    });
+    expect(parseBrowserAction({ action: 'close-page', pageId: 'page_123' })).toEqual({
+      action: 'close-page',
+      pageId: 'page_123',
+    });
   });
 
   test('rejects malformed actions and oversized selectors', () => {
     expect(() => parseBrowserAction({ action: 'click' })).toThrow(/selector/);
     expect(() => parseBrowserAction({ action: 'click', selector: 'x'.repeat(5_000) })).toThrow(/too long/);
     expect(() => parseBrowserAction({ action: 'human-activity', kind: 'text' })).toThrow(/pointer/);
+    expect(() => parseBrowserAction({ action: 'new-page', url: 'file:///tmp/private' })).toThrow(/HTTP\(S\)/);
+    expect(() => parseBrowserAction({ action: 'new-page', url: 'x'.repeat(200_001) })).toThrow(/too long/);
+    expect(() => parseBrowserAction({ action: 'activate-page', pageId: '' })).toThrow(/pageId/);
+    expect(() => parseBrowserAction({ action: 'activate-page', pageId: 123 })).toThrow(/pageId/);
+    expect(() => parseBrowserAction({ action: 'close-page', pageId: 'x'.repeat(129) })).toThrow(/too long/);
   });
 });
 

@@ -25,6 +25,7 @@ import type { TerminalService } from './terminal-service';
 import { BrowserApi } from './browser-api';
 import { BrowserService, type ManagedBrowserRuntime } from './browser-service';
 import {
+  BROWSER_MAX_PAGE_ID_LENGTH,
   BrowserError,
   type BrowserInputEvent,
   type BrowserScreencastFrame,
@@ -1689,21 +1690,30 @@ describe('remote browser API integration', () => {
 
     const socket = new WebSocket(`ws://127.0.0.1:${server.port}/v1/sessions/s1/browser/stream?token=secret`);
     socket.binaryType = 'arraybuffer';
-    const frame = await new Promise<string>((resolve, reject) => {
+    const frame = await new Promise<ArrayBuffer>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('browser websocket timeout')), 3000);
       socket.onopen = () => {
         socket.send(JSON.stringify({ kind: 'insertText', text: 'from-human' }));
       };
       socket.onmessage = message => {
         clearTimeout(timeout);
-        resolve(Buffer.from(message.data as ArrayBuffer).toString('utf8'));
+        resolve(message.data as ArrayBuffer);
       };
       socket.onerror = () => {
         clearTimeout(timeout);
         reject(new Error('browser websocket error'));
       };
     });
-    expect(frame).toBe('browser-frame');
+    const frameBytes = new Uint8Array(frame);
+    expect(Buffer.from(frameBytes.subarray(0, 4)).toString('ascii')).toBe('KBRF');
+    expect(frameBytes[4]).toBe(1);
+    const pageIdLength = new DataView(frame).getUint16(5, false);
+    expect(pageIdLength).toBeGreaterThan(0);
+    expect(pageIdLength).toBeLessThanOrEqual(BROWSER_MAX_PAGE_ID_LENGTH * 4);
+    const jpegOffset = 7 + pageIdLength;
+    expect(jpegOffset).toBeLessThan(frameBytes.byteLength);
+    expect(new TextDecoder('utf-8', { fatal: true }).decode(frameBytes.subarray(7, jpegOffset))).toBe('page-1');
+    expect(Buffer.from(frameBytes.subarray(jpegOffset)).toString('utf8')).toBe('browser-frame');
 
     for (let attempt = 0; attempt < 20 && runtime.inputs.length === 0; attempt += 1) await Bun.sleep(10);
     expect(runtime.inputs).toEqual([{ kind: 'insertText', text: 'from-human' }]);

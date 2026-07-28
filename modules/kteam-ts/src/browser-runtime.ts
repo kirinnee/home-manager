@@ -8,6 +8,8 @@ import {
   BROWSER_DEFAULT_VIEWPORT,
   BrowserError,
   type BrowserInputEvent,
+  type BrowserPageActionSnapshot,
+  type BrowserPageSnapshot,
   type BrowserScreencastFrame,
   type BrowserViewport,
 } from './browser-types';
@@ -319,10 +321,11 @@ export class BrowserRuntime {
     if (this.closed) throw new BrowserError('not_running', 'the remote browser is not running', 409);
   }
 
-  async resize(viewport: BrowserViewport): Promise<void> {
+  async resize(viewport: BrowserViewport): Promise<BrowserPageActionSnapshot> {
     this.assertOpen();
-    await this.automation.resize(viewport);
+    const snapshot = await this.automation.resize(viewport);
     this.viewportValue = viewport;
+    return snapshot;
   }
 
   async startScreencast(listener: (frame: BrowserScreencastFrame) => void): Promise<void> {
@@ -340,47 +343,62 @@ export class BrowserRuntime {
     await this.automation.dispatchInput(input);
   }
 
-  async navigate(input: string): Promise<{ url: string; title: string }> {
+  async navigate(input: string): Promise<BrowserPageActionSnapshot> {
     this.assertOpen();
     return await this.automation.navigate(normalizeBrowserUrl(input));
   }
 
-  async click(selector: string): Promise<{ url: string; title: string }> {
+  async click(selector: string): Promise<BrowserPageActionSnapshot> {
     this.assertOpen();
     return await this.automation.click(selector);
   }
 
-  async type(selector: string, text: string): Promise<{ url: string; title: string }> {
+  async type(selector: string, text: string): Promise<BrowserPageActionSnapshot> {
     this.assertOpen();
     return await this.automation.type(selector, text);
   }
 
-  async read(selector?: string): Promise<{ url: string; title: string; text: string }> {
+  async read(selector?: string): Promise<BrowserPageActionSnapshot & { text: string }> {
     this.assertOpen();
     return await this.automation.read(selector);
   }
 
-  async screenshot(): Promise<{ url: string; title: string; screenshotBase64: string }> {
+  async screenshot(): Promise<BrowserPageActionSnapshot & { screenshotBase64: string }> {
     this.assertOpen();
     return await this.automation.screenshot();
   }
 
-  async back(): Promise<{ url: string; title: string }> {
+  async back(): Promise<BrowserPageActionSnapshot> {
     this.assertOpen();
     return await this.automation.back();
   }
 
-  async forward(): Promise<{ url: string; title: string }> {
+  async forward(): Promise<BrowserPageActionSnapshot> {
     this.assertOpen();
     return await this.automation.forward();
   }
 
-  async reload(): Promise<{ url: string; title: string }> {
+  async reload(): Promise<BrowserPageActionSnapshot> {
     this.assertOpen();
     return await this.automation.reload();
   }
 
-  async location(): Promise<{ url: string; title: string }> {
+  async newPage(input?: string): Promise<BrowserPageActionSnapshot> {
+    this.assertOpen();
+    return await this.automation.newPage(input === undefined ? undefined : normalizeBrowserUrl(input));
+  }
+
+  async activatePage(pageId: string): Promise<BrowserPageActionSnapshot> {
+    this.assertOpen();
+    return await this.automation.activatePage(pageId);
+  }
+
+  async closePage(pageId: string): Promise<BrowserPageActionSnapshot> {
+    this.assertOpen();
+    return await this.automation.closePage(pageId);
+  }
+
+  async location(): Promise<BrowserPageSnapshot> {
     this.assertOpen();
     return await this.automation.location();
   }

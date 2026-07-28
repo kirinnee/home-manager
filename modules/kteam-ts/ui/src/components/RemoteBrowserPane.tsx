@@ -12,22 +12,32 @@ import {
 } from 'react';
 import {
   ArrowLeft,
+  ArrowRight,
   Bot,
   ClipboardPaste,
   Expand,
   Globe2,
   Monitor,
+  Plus,
   Power,
   PowerOff,
   Scan,
   UserRound,
+  X,
 } from 'lucide-react';
 import { Badge, Button } from './Primitives';
 import {
+  decodeRemoteBrowserFrame,
+  isLocalPasteChord,
+  nextRemoteClickRun,
   remoteBrowserApi,
   remoteBrowserStreamUrl,
+  remoteCanvasPoint,
   remoteViewportForContainer,
+  type RemoteBrowserPage,
+  type RemoteBrowserFrame,
   type RemoteBrowserStatus,
+  type RemoteClickRun,
   type RemoteViewportMode,
 } from '../lib/remote-browser';
 
@@ -39,6 +49,9 @@ export interface RemoteBrowserPaneProps {
   showNavigation?: boolean;
   /** Transient page identity for a shared address/history UI; never persisted. */
   onLocationChange?: (location: { url: string; title: string }) => void;
+  /** The whole committed snapshot, so a parent toolbar can use the daemon's real
+   *  history flags and page state instead of guessing. */
+  onStatusChange?: (status: RemoteBrowserStatus) => void;
   /** Narrow test seam; production always uses the same-origin defaults. */
   dependencies?: RemoteBrowserDependencies;
 }
@@ -47,6 +60,8 @@ export interface RemoteBrowserDependencies {
   api: typeof remoteBrowserApi;
   streamUrl: typeof remoteBrowserStreamUrl;
   viewportForContainer: typeof remoteViewportForContainer;
+  /** Injectable clock for the multi-click window. */
+  now?: () => number;
 }
 
 const DEFAULT_DEPENDENCIES: RemoteBrowserDependencies = {
@@ -74,15 +89,29 @@ const pointerButton = (button: number): 'none' | 'left' | 'middle' | 'right' | '
 const modifiers = (event: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }): number =>
   (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0);
 
+/** Tab copy comes from the real page, never from a client-side guess. */
+export function remotePageLabel(page: RemoteBrowserPage): string {
+  const title = page.title?.trim();
+  if (title) return title;
+  if (!page.url || page.url === 'about:blank') return 'New tab';
+  try {
+    return new URL(page.url).hostname || page.url;
+  } catch {
+    return page.url;
+  }
+}
+
 /** Cross-platform CDP screencast surface for SidePaneWorkspace. */
 export function RemoteBrowserPane({
   sessionId,
   isActive = true,
   showNavigation = true,
   onLocationChange,
+  onStatusChange,
   dependencies = DEFAULT_DEPENDENCIES,
 }: RemoteBrowserPaneProps) {
   const { api, streamUrl, viewportForContainer } = dependencies;
+  const now = dependencies.now ?? Date.now;
   const screenRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -96,11 +125,17 @@ export function RemoteBrowserPane({
   const statusMutationsRef = useRef(0);
   const busyMutationsRef = useRef(0);
   const pressedKeysRef = useRef(new Map<string, StreamInput>());
+  const clickRunRef = useRef<RemoteClickRun | null>(null);
   const composingTextRef = useRef(false);
+  const activePageIdRef = useRef<string | undefined>(undefined);
+  const paintedPageIdRef = useRef<string | undefined>(undefined);
+  const hasPaintedFrameRef = useRef(false);
   const lastViewportRef = useRef('');
   const lastLocationNotificationRef = useRef('');
   const onLocationChangeRef = useRef(onLocationChange);
+  const onStatusChangeRef = useRef(onStatusChange);
   onLocationChangeRef.current = onLocationChange;
+  onStatusChangeRef.current = onStatusChange;
   const [status, setStatus] = useState<RemoteBrowserStatus | null>(null);
   const [connection, setConnection] = useState<ViewerConnection>('detached');
   const [error, setError] = useState<string | null>(null);
@@ -128,12 +163,30 @@ export function RemoteBrowserPane({
     }
   }, [sendInput]);
 
-  const commitStatus = useCallback((request: number, next: RemoteBrowserStatus): boolean => {
-    if (request !== statusRequestGenerationRef.current) return false;
-    setStatus(next);
-    if (next.error) setError(next.error);
-    return true;
+  const clearCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (canvas) canvas.getContext('2d', { alpha: false })?.clearRect(0, 0, canvas.width, canvas.height);
+    paintedPageIdRef.current = undefined;
+    hasPaintedFrameRef.current = false;
   }, []);
+
+  const commitStatus = useCallback(
+    (request: number, next: RemoteBrowserStatus): boolean => {
+      if (request !== statusRequestGenerationRef.current) return false;
+      const activeChanged = activePageIdRef.current !== next.activePageId;
+      activePageIdRef.current = next.activePageId;
+      // A blank canvas is the only truthful slow-network state after a tab
+      // switch. Never leave page A visible under page B's committed marker.
+      if (activeChanged && hasPaintedFrameRef.current && paintedPageIdRef.current !== next.activePageId) {
+        clearCanvas();
+      }
+      setStatus(next);
+      if (next.error) setError(next.error);
+      onStatusChangeRef.current?.(next);
+      return true;
+    },
+    [clearCanvas],
+  );
 
   const refreshStatus = useCallback(async () => {
     // A mutation result is the authoritative newer snapshot. Polling resumes
@@ -203,6 +256,9 @@ export function RemoteBrowserPane({
     notify({ url: status.url, title });
   }, [status?.title, status?.url]);
 
+  // Truthful, but never destructive: a remote navigation refills the address
+  // only when the human is not editing it. Typed text is NOT reset on blur —
+  // that reset used to race a tapped Go and submit the previous URL.
   useEffect(() => {
     if (!showNavigation || !status?.url || document.activeElement === addressInputRef.current) return;
     setAddress(status.url);
@@ -216,24 +272,37 @@ export function RemoteBrowserPane({
     }
     let disposed = false;
     let decoding = false;
-    let pending: ArrayBuffer | null = null;
-    const draw = async (bytes: ArrayBuffer) => {
-      pending = bytes;
+    let pending: RemoteBrowserFrame | null = null;
+    const matchesActivePage = (frame: RemoteBrowserFrame): boolean =>
+      frame.kind === 'legacy' ? activePageIdRef.current === undefined : frame.pageId === activePageIdRef.current;
+    const draw = async (frame: RemoteBrowserFrame) => {
+      // Fail closed before spending decode work. Legacy raw JPEGs are truthful
+      // only against an old status that has no active page identity.
+      if (!matchesActivePage(frame)) return;
+      pending = frame;
       if (decoding) return;
       decoding = true;
       while (!disposed && pending) {
         const next = pending;
         pending = null;
+        if (!matchesActivePage(next)) continue;
+        let bitmap: ImageBitmap | undefined;
         try {
-          const bitmap = await createImageBitmap(new Blob([next], { type: 'image/jpeg' }));
-          if (!disposed) {
+          bitmap = await createImageBitmap(new Blob([next.jpegBytes], { type: 'image/jpeg' }));
+          // The active page may commit while image decode is pending. Re-check
+          // immediately before paint so a delayed A frame cannot repaint after
+          // B cleared the canvas.
+          if (!disposed && matchesActivePage(next)) {
             if (canvas.width !== bitmap.width) canvas.width = bitmap.width;
             if (canvas.height !== bitmap.height) canvas.height = bitmap.height;
             canvas.getContext('2d', { alpha: false })?.drawImage(bitmap, 0, 0);
+            paintedPageIdRef.current = next.kind === 'tagged' ? next.pageId : undefined;
+            hasPaintedFrameRef.current = true;
           }
-          bitmap.close();
         } catch {
-          if (!disposed) setError('A remote browser frame could not be decoded.');
+          if (!disposed && matchesActivePage(next)) setError('A remote browser frame could not be decoded.');
+        } finally {
+          bitmap?.close();
         }
       }
       decoding = false;
@@ -254,7 +323,9 @@ export function RemoteBrowserPane({
       }
     });
     socket.addEventListener('message', event => {
-      if (!disposed && event.data instanceof ArrayBuffer) void draw(event.data);
+      if (disposed || !(event.data instanceof ArrayBuffer)) return;
+      const frame = decodeRemoteBrowserFrame(event.data);
+      if (frame) void draw(frame);
     });
     socket.addEventListener('close', event => {
       if (disposed) return;
@@ -327,11 +398,7 @@ export function RemoteBrowserPane({
   const canvasPoint = (event: { clientX: number; clientY: number }) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
-    const box = canvas.getBoundingClientRect();
-    return {
-      x: ((event.clientX - box.left) * canvas.width) / Math.max(1, box.width),
-      y: ((event.clientY - box.top) * canvas.height) / Math.max(1, box.height),
-    };
+    return remoteCanvasPoint(canvas.getBoundingClientRect(), canvas.width, canvas.height, event.clientX, event.clientY);
   };
 
   const sendPointer = (
@@ -339,13 +406,23 @@ export function RemoteBrowserPane({
     type: 'mouseMoved' | 'mousePressed' | 'mouseReleased',
   ) => {
     const point = canvasPoint(event);
+    // PointerEvent.detail is always 0, so the click run is tracked here from
+    // time and distance, and the SAME count is sent on press and release.
+    let clickCount = 0;
+    if (type === 'mousePressed') {
+      const run = nextRemoteClickRun(clickRunRef.current, point, now());
+      clickRunRef.current = run;
+      clickCount = run.count;
+    } else if (type === 'mouseReleased') {
+      clickCount = clickRunRef.current?.count ?? 1;
+    }
     const input: StreamInput = {
       kind: 'mouse',
       type,
       ...point,
       button: type === 'mouseMoved' ? 'none' : pointerButton(event.button),
       buttons: event.buttons,
-      clickCount: event.detail || (type === 'mousePressed' ? 1 : 0),
+      clickCount,
       modifiers: modifiers(event),
     };
     if (type === 'mouseMoved') {
@@ -396,6 +473,10 @@ export function RemoteBrowserPane({
 
   const onKey = (event: ReactKeyboardEvent<HTMLElement>, type: 'keyDown' | 'keyUp') => {
     if (event.nativeEvent.isComposing) return;
+    // The LOCAL paste chord is deliberately not consumed: preventDefault here
+    // cancels the browser's own paste, so the canvas `paste` event would never
+    // fire and the keystroke would instead paste the REMOTE clipboard.
+    if (isLocalPasteChord(event)) return;
     event.preventDefault();
     event.stopPropagation();
     const printable = type === 'keyDown' && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
@@ -493,6 +574,12 @@ export function RemoteBrowserPane({
   // contradicts the red alert by claiming the browser is merely idle.
   const unavailable = !running && (status?.state === 'error' || error !== null);
   const unavailableReason = status?.error ?? error ?? 'The remote browser could not start.';
+  const pages = status?.pages ?? [];
+  const activePageId = status?.activePageId;
+  const agentPageId = status?.agentPage?.pageId;
+  const pageState = status?.pageState;
+  const pageError = status?.pageError;
+  const loading = running && pageState === 'loading';
 
   return (
     <section className="flex min-h-0 flex-1 flex-col bg-surface" aria-label="Shared remote browser">
@@ -502,21 +589,108 @@ export function RemoteBrowserPane({
           {actorIcon}
           {actorLabel}
         </Badge>
+        <span className="text-meta text-muted" aria-live="polite">
+          {busy ? 'Working…' : loading ? 'Loading page…' : pageState === 'error' ? 'Page failed' : ''}
+        </span>
         <span className="ml-auto text-meta text-muted">
           {connection === 'connected' ? 'Live' : connection === 'connecting' ? 'Connecting…' : 'Display idle'}
         </span>
       </div>
+
+      {/* Only the daemon's real pages are ever tabs. A daemon that reports none
+          gets no strip at all rather than an invented client-side tab. */}
+      {running && pages.length > 0 && (
+        <div
+          role="tablist"
+          aria-label="Chrome pages"
+          className="flex shrink-0 items-stretch overflow-x-auto border-b border-border-soft bg-surface-2"
+        >
+          {pages.map(page => {
+            const selected = page.id === activePageId;
+            const label = remotePageLabel(page);
+            const agentUsed = page.id === agentPageId;
+            return (
+              <span
+                key={page.id}
+                className="flex min-w-[132px] max-w-[220px] shrink-0 items-stretch border-r border-border-soft data-[active=true]:bg-surface"
+                data-active={selected ? true : undefined}
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  tabIndex={selected ? 0 : -1}
+                  title={selected ? `${label} — active shared page` : label}
+                  disabled={busy}
+                  onClick={() => void mutate(() => api.activatePage(sessionId, page.id))}
+                  className="inline-flex min-h-[44px] min-w-0 flex-1 items-center gap-1 border-l-2 border-transparent px-2 text-left text-meta text-muted hover:bg-accent-soft hover:text-fg data-[active=true]:border-accent data-[active=true]:font-semibold data-[active=true]:text-fg"
+                  data-active={selected ? true : undefined}
+                >
+                  {agentUsed && (
+                    <span
+                      className="inline-flex shrink-0 items-center justify-center rounded-control border border-strong bg-surface px-1 py-0.5 text-muted"
+                      title="Agent last used this tab."
+                    >
+                      <Bot size={11} aria-hidden="true" />
+                      <span className="sr-only">Agent last used this tab.</span>
+                    </span>
+                  )}
+                  <span className="min-w-0 flex-1 truncate">{label}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void mutate(() => api.closePage(sessionId, page.id))}
+                  className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center text-muted hover:bg-err-soft hover:text-err"
+                  aria-label={`Close ${label}`}
+                  title={`Close ${label}`}
+                >
+                  <X size={14} aria-hidden="true" />
+                </button>
+              </span>
+            );
+          })}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void mutate(() => api.newPage(sessionId))}
+            className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center text-accent hover:bg-accent-soft"
+            aria-label="New Chrome tab"
+            title="New Chrome tab"
+          >
+            <Plus size={15} aria-hidden="true" />
+          </button>
+        </div>
+      )}
+
+      {/* The daemon deliberately keeps agentPage after that page is closed. Say so
+          plainly rather than dropping the marker or moving it onto another tab. */}
+      {running && agentPageId && !pages.some(page => page.id === agentPageId) && (
+        <div className="flex shrink-0 items-center gap-1 border-b border-border-soft bg-surface-2 px-2 py-1 text-meta text-muted">
+          <Bot size={11} aria-hidden="true" className="shrink-0" />
+          <span>Agent last used a closed tab.</span>
+        </div>
+      )}
 
       {showNavigation && (
         <form onSubmit={navigate} className="flex shrink-0 items-center gap-xs border-b border-border-soft px-2 py-2">
           <Button
             type="button"
             size="sm"
-            disabled={!running || busy}
+            disabled={!running || busy || status?.canGoBack === false}
             onClick={() => void mutate(() => api.back(sessionId))}
             aria-label="Back"
           >
             <ArrowLeft size={14} aria-hidden="true" />
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            disabled={!running || busy || status?.canGoForward === false}
+            onClick={() => void mutate(() => api.forward(sessionId))}
+            aria-label="Forward"
+          >
+            <ArrowRight size={14} aria-hidden="true" />
           </Button>
           <label className="flex min-w-0 flex-1 items-center gap-1 rounded-md border border-border bg-surface px-2">
             <Globe2 size={14} className="shrink-0 text-muted" aria-hidden="true" />
@@ -525,9 +699,6 @@ export function RemoteBrowserPane({
               ref={addressInputRef}
               value={address}
               onChange={event => setAddress(event.target.value)}
-              onBlur={() => {
-                if (status?.url) setAddress(status.url);
-              }}
               disabled={!running}
               placeholder="URL or hostname"
               className="h-9 min-w-0 flex-1 bg-transparent text-ui text-fg outline-none placeholder:text-muted"
@@ -624,6 +795,12 @@ export function RemoteBrowserPane({
         />
       </div>
 
+      {pageError && (
+        <div role="alert" className="shrink-0 border-b border-err/30 bg-err-soft px-3 py-2 text-meta text-err">
+          {pageError}
+        </div>
+      )}
+
       {error && (
         <div role="alert" className="shrink-0 border-b border-err/30 bg-err-soft px-3 py-2 text-meta text-err">
           {error}
@@ -651,6 +828,15 @@ export function RemoteBrowserPane({
           onPaste={onPaste}
           onContextMenu={event => event.preventDefault()}
         />
+        {loading && (
+          <div
+            className="pointer-events-none absolute inset-x-0 top-0 h-0.5 bg-accent"
+            role="status"
+            aria-live="polite"
+          >
+            <span className="sr-only">Loading page…</span>
+          </div>
+        )}
         {!running && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-panel text-center">
             <div className="max-w-xs">

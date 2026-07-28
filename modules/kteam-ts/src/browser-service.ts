@@ -13,6 +13,8 @@ import {
   type BrowserActivity,
   type BrowserActorKind,
   type BrowserInputEvent,
+  type BrowserPageActionSnapshot,
+  type BrowserPageSnapshot,
   type BrowserScreencastFrame,
   type BrowserStatusView,
   type BrowserViewport,
@@ -26,16 +28,19 @@ export interface BrowserSessionRegistry {
 export interface ManagedBrowserRuntime {
   readonly viewport: BrowserViewport;
   readonly unexpectedExit?: Promise<BrowserRuntimeFailure>;
-  resize(viewport: BrowserViewport): Promise<void>;
-  navigate(url: string): Promise<{ url: string; title: string }>;
-  click(selector: string): Promise<{ url: string; title: string }>;
-  type(selector: string, text: string): Promise<{ url: string; title: string }>;
-  read(selector?: string): Promise<{ url: string; title: string; text: string }>;
-  screenshot(): Promise<{ url: string; title: string; screenshotBase64: string }>;
-  back(): Promise<{ url: string; title: string }>;
-  forward(): Promise<{ url: string; title: string }>;
-  reload(): Promise<{ url: string; title: string }>;
-  location(): Promise<{ url: string; title: string }>;
+  resize(viewport: BrowserViewport): Promise<BrowserPageActionSnapshot>;
+  navigate(url: string): Promise<BrowserPageActionSnapshot>;
+  click(selector: string): Promise<BrowserPageActionSnapshot>;
+  type(selector: string, text: string): Promise<BrowserPageActionSnapshot>;
+  read(selector?: string): Promise<BrowserPageActionSnapshot & { text: string }>;
+  screenshot(): Promise<BrowserPageActionSnapshot & { screenshotBase64: string }>;
+  back(): Promise<BrowserPageActionSnapshot>;
+  forward(): Promise<BrowserPageActionSnapshot>;
+  reload(): Promise<BrowserPageActionSnapshot>;
+  newPage(url?: string): Promise<BrowserPageActionSnapshot>;
+  activatePage(pageId: string): Promise<BrowserPageActionSnapshot>;
+  closePage(pageId: string): Promise<BrowserPageActionSnapshot>;
+  location(): Promise<BrowserPageSnapshot>;
   startScreencast(listener: (frame: BrowserScreencastFrame) => void): Promise<void>;
   stopScreencast(): Promise<void>;
   dispatchInput(input: BrowserInputEvent): Promise<void>;
@@ -67,9 +72,14 @@ interface RunningBrowser {
   startedAt: number;
   lastActivityAt: number;
   lastActor?: { kind: BrowserActorKind; at: number; action: BrowserActivity };
+  /** The last agent page target. This deliberately survives that page closing. */
+  agentPage?: { pageId: string; at: number; action: BrowserActivity };
   viewers: Map<string, BrowserViewer>;
   streamStart?: Promise<void>;
-  location?: { url: string; title: string };
+  /** Last coherent worker sample. It is transient and never written to disk. */
+  snapshot?: BrowserPageSnapshot;
+  /** Concurrent status calls can report a pending navigation without queueing behind it. */
+  pendingNavigations: number;
 }
 
 interface BrowserViewer {
@@ -81,6 +91,8 @@ interface BrowserFailure {
   at: number;
   message: string;
 }
+
+type BrowserOperationResult = BrowserPageActionSnapshot & NonNullable<BrowserActionResult['result']>;
 
 export interface BrowserViewerAttachment {
   id: string;
@@ -104,7 +116,52 @@ const systemClock: BrowserServiceClock = {
 
 function safeFailure(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.slice(0, 500);
+  return message.split(/\r?\n|\r/, 1)[0]!.slice(0, 500);
+}
+
+function safePageError(error: string): string {
+  return error.split(/\r?\n|\r/, 1)[0]!.slice(0, 200);
+}
+
+/**
+ * The worker owns page identity. Keep its coherent sample intact, but derive
+ * the compatibility URL/title from the declared active page so callers never
+ * observe an active id that disagrees with the top-level fields.
+ */
+function coherentSnapshot(snapshot: BrowserPageSnapshot): BrowserPageSnapshot {
+  const pages = snapshot.pages.map(page => ({ ...page }));
+  const active = pages.find(page => page.id === snapshot.activePageId);
+  if (!active) {
+    throw new BrowserError('upstream_failed', 'remote browser returned an invalid active page snapshot', 502);
+  }
+  const boundedError = snapshot.pageError ? safePageError(snapshot.pageError) : undefined;
+  return {
+    // Deliberately construct only durable-in-memory status metadata. `snapshot`
+    // can be an action response with text, screenshot bytes, and actedPageId;
+    // those must stay in its explicit response and never enter entry.snapshot.
+    url: active.url,
+    title: active.title,
+    pages,
+    activePageId: snapshot.activePageId,
+    pageState: snapshot.pageState,
+    canGoBack: snapshot.canGoBack,
+    canGoForward: snapshot.canGoForward,
+    ...(boundedError ? { pageError: boundedError } : {}),
+  };
+}
+
+function isNavigationActivity(action: BrowserActivity): boolean {
+  // These verbs preserve active-page identity while a load is in flight. For
+  // click/activate/close, a status read must wait for the worker instead: it
+  // could otherwise describe the old tab after a popup or selection rebind.
+  return action === 'navigate' || action === 'back' || action === 'forward' || action === 'reload';
+}
+
+function canHumanInputChangePage(input: BrowserInputEvent): boolean {
+  return (
+    (input.kind === 'mouse' && input.type === 'mouseReleased') ||
+    (input.kind === 'key' && input.type === 'keyUp' && (input.key === 'Enter' || input.code === 'Enter'))
+  );
 }
 
 function boundHumanInput(input: BrowserInputEvent, viewport: BrowserViewport): BrowserInputEvent {
@@ -179,10 +236,30 @@ export class BrowserService {
     while (this.failures.size > 100) this.failures.delete(this.failures.keys().next().value!);
   }
 
-  private touch(entry: RunningBrowser, kind: BrowserActorKind, action: BrowserActivity): void {
+  private rememberSnapshot<T extends BrowserPageSnapshot>(entry: RunningBrowser, snapshot: T): T {
+    const coherent = coherentSnapshot(snapshot);
+    entry.snapshot = coherent;
+    return { ...snapshot, ...coherent };
+  }
+
+  private touch(entry: RunningBrowser, kind: BrowserActorKind, action: BrowserActivity): number {
     const at = this.clock.now();
     entry.lastActivityAt = at;
     entry.lastActor = { kind, at, action };
+    return at;
+  }
+
+  private rememberAgentPage(
+    entry: RunningBrowser,
+    actor: BrowserActorKind,
+    action: BrowserActivity,
+    pageId: string | undefined,
+    at: number,
+  ): void {
+    // Actor provenance comes exclusively from the service/API call context.
+    // A page id is opaque browser data, never an actor identity.
+    if (actor !== 'agent' || !pageId) return;
+    entry.agentPage = { pageId, action, at };
   }
 
   private terminateViewers(entry: RunningBrowser, terminal: BrowserViewerTerminal): void {
@@ -210,16 +287,32 @@ export class BrowserService {
       viewers: entry?.viewers.size ?? 0,
       persistentProfile: true,
       idleTimeoutSeconds: Math.round(this.idleTimeoutMs / 1_000),
+      pages: [],
       capacity: { running: this.activeCount(), maximum: this.maximumInstances },
     };
     if (entry) {
       view.startedAt = new Date(entry.startedAt).toISOString();
-      if (entry.location) {
-        view.url = entry.location.url;
-        view.title = entry.location.title;
+      const snapshot = entry.snapshot;
+      if (snapshot) {
+        view.url = snapshot.url;
+        view.title = snapshot.title;
+        view.pages = snapshot.pages;
+        view.activePageId = snapshot.activePageId;
+        view.pageState = entry.pendingNavigations > 0 ? 'loading' : snapshot.pageState;
+        view.canGoBack = snapshot.canGoBack;
+        view.canGoForward = snapshot.canGoForward;
+        if (entry.pendingNavigations === 0 && snapshot.pageError) view.pageError = snapshot.pageError;
       }
       if (entry.viewers.size === 0)
         view.idleDeadline = new Date(entry.lastActivityAt + this.idleTimeoutMs).toISOString();
+      if (entry.agentPage) {
+        view.agentPage = {
+          pageId: entry.agentPage.pageId,
+          kind: 'agent',
+          action: entry.agentPage.action,
+          at: new Date(entry.agentPage.at).toISOString(),
+        };
+      }
       if (entry.lastActor) {
         view.lastActor = {
           kind: entry.lastActor.kind,
@@ -236,11 +329,24 @@ export class BrowserService {
   async status(sessionRef: string): Promise<BrowserStatusView> {
     const sessionId = await this.resolveSession(sessionRef);
     const entry = this.entries.get(sessionId);
-    if (entry?.state === 'running') {
-      const location = await entry.runtime.location().catch(() => undefined);
-      if (location && this.entries.get(sessionId) === entry && entry.state === 'running') entry.location = location;
+    // The worker serializes commands. Do not make a status request queue behind
+    // an in-flight navigation: the cached identity plus `loading` is useful
+    // feedback while that command is genuinely busy.
+    if (entry?.state === 'running' && entry.pendingNavigations === 0) {
+      const snapshot = await entry.runtime.location().catch(() => undefined);
+      if (snapshot && this.entries.get(sessionId) === entry && entry.state === 'running') {
+        try {
+          this.rememberSnapshot(entry, snapshot);
+        } catch {
+          // A malformed transient sample must not replace the last truthful
+          // one or make a status read fail closed.
+        }
+      }
     }
-    return this.statusFor(sessionId, entry);
+    // The runtime can exit while location() is pending. Re-read the map so the
+    // recorded failure wins over the stale entry that handleUnexpectedExit()
+    // has already marked as stopping and removed.
+    return this.statusFor(sessionId, this.entries.get(sessionId));
   }
 
   async start(sessionRef: string, actor: BrowserActorKind): Promise<BrowserStatusView> {
@@ -251,11 +357,23 @@ export class BrowserService {
     this.assertServiceOpen();
     const existing = this.entries.get(sessionId);
     if (existing) {
+      if (existing.pendingNavigations === 0) {
+        const snapshot = await existing.runtime.location();
+        const current = this.entries.get(sessionId);
+        if (current !== existing || current.state !== 'running') return this.statusFor(sessionId, current);
+        this.rememberSnapshot(existing, snapshot);
+      }
       this.touch(existing, actor, 'start');
       return this.statusFor(sessionId, existing);
     }
     const pending = this.starting.get(sessionId);
-    if (pending) return this.statusFor(sessionId, await pending);
+    if (pending) {
+      const launched = await pending;
+      const entry = this.entries.get(sessionId);
+      if (entry !== launched || entry.state !== 'running') return this.statusFor(sessionId, entry);
+      this.touch(entry, actor, 'start');
+      return this.statusFor(sessionId, entry);
+    }
     if (this.activeCount() >= this.maximumInstances) {
       throw new BrowserError(
         'capacity',
@@ -271,12 +389,21 @@ export class BrowserService {
           await runtime.close().catch(() => undefined);
           throw new BrowserError('not_running', 'remote browser service is shutting down', 503);
         }
+        let snapshot: BrowserPageSnapshot;
+        try {
+          snapshot = coherentSnapshot(await runtime.location());
+        } catch (error) {
+          await runtime.close().catch(() => undefined);
+          throw error;
+        }
         const entry: RunningBrowser = {
           runtime,
           state: 'running',
           startedAt,
           lastActivityAt: this.clock.now(),
           viewers: new Map(),
+          pendingNavigations: 0,
+          snapshot,
         };
         this.touch(entry, actor, 'start');
         this.entries.set(sessionId, entry);
@@ -288,7 +415,8 @@ export class BrowserService {
     );
     this.starting.set(sessionId, launch);
     try {
-      return this.statusFor(sessionId, await launch);
+      await launch;
+      return this.statusFor(sessionId, this.entries.get(sessionId));
     } catch (error) {
       this.rememberFailure(sessionId, error);
       throw error;
@@ -374,6 +502,10 @@ export class BrowserService {
       await entry.streamStart;
     } catch (error) {
       entry.viewers.delete(id);
+      // A worker can partially enable screencasting before startup rejects.
+      // If every waiter is now gone, compensate even though there is no
+      // attachment object whose detach() could perform the cleanup.
+      if (entry.viewers.size === 0) await entry.runtime.stopScreencast().catch(() => undefined);
       throw error;
     } finally {
       if (entry.streamStart) entry.streamStart = undefined;
@@ -399,6 +531,19 @@ export class BrowserService {
     const sessionId = await this.resolveSession(sessionRef);
     const entry = this.running(sessionId);
     await entry.runtime.dispatchInput(boundHumanInput(input, entry.runtime.viewport));
+    // The hot stream includes mouse moves and key repeats, so do not make each
+    // input pay for title/history sampling. A click release or Enter release
+    // can actually change tabs; refresh only for those terminal events.
+    if (canHumanInputChangePage(input)) {
+      const snapshot = await entry.runtime.location().catch(() => undefined);
+      if (snapshot && this.entries.get(sessionId) === entry && entry.state === 'running') {
+        try {
+          this.rememberSnapshot(entry, snapshot);
+        } catch {
+          // Keep the last coherent sample if a transient worker reply is bad.
+        }
+      }
+    }
     this.touch(entry, 'human', input.kind === 'mouse' ? 'pointer' : input.kind === 'key' ? 'keyboard' : 'paste');
   }
 
@@ -413,13 +558,26 @@ export class BrowserService {
     sessionId: string,
     action: BrowserActivity,
     actor: BrowserActorKind,
-    operation: (runtime: ManagedBrowserRuntime) => Promise<BrowserActionResult['result']>,
+    operation: (runtime: ManagedBrowserRuntime) => Promise<BrowserOperationResult>,
   ): Promise<BrowserActionResult> {
     const entry = this.running(sessionId);
-    const result = await operation(entry.runtime);
-    if (result?.url !== undefined) entry.location = { url: result.url, title: result.title ?? '' };
-    this.touch(entry, actor, action);
-    return { status: this.statusFor(sessionId, entry), ...(result ? { result } : {}) };
+    const navigation = isNavigationActivity(action);
+    if (navigation) entry.pendingNavigations += 1;
+    let result: BrowserOperationResult;
+    try {
+      result = this.rememberSnapshot(entry, await operation(entry.runtime));
+    } finally {
+      if (navigation) entry.pendingNavigations = Math.max(0, entry.pendingNavigations - 1);
+    }
+    const current = this.entries.get(sessionId);
+    if (current !== entry || current.state !== 'running') {
+      return { status: this.statusFor(sessionId, current), result };
+    }
+    const at = this.touch(current, actor, action);
+    // The worker serializes selection and the verb, so this identity is atomic
+    // even when a click opens a popup or a close selects a neighbour.
+    this.rememberAgentPage(current, actor, action, result.actedPageId, at);
+    return { status: this.statusFor(sessionId, current), result };
   }
 
   async act(sessionRef: string, action: BrowserAction, actor: BrowserActorKind): Promise<BrowserActionResult> {
@@ -435,11 +593,8 @@ export class BrowserService {
       case 'stop':
         return { status: await this.stop(sessionId, actor) };
       case 'resize': {
-        const entry = this.running(sessionId);
         const viewport = normalizeBrowserViewport(action.width, action.height);
-        await entry.runtime.resize(viewport);
-        this.touch(entry, actor, 'resize');
-        return { status: this.statusFor(sessionId, entry) };
+        return await this.agentResult(sessionId, 'resize', actor, runtime => runtime.resize(viewport));
       }
       case 'human-activity':
         return { status: await this.noteHumanActivity(sessionId, action.kind) };
@@ -459,6 +614,14 @@ export class BrowserService {
         return await this.agentResult(sessionId, 'forward', actor, runtime => runtime.forward());
       case 'reload':
         return await this.agentResult(sessionId, 'reload', actor, runtime => runtime.reload());
+      case 'new-page':
+        return await this.agentResult(sessionId, 'new-page', actor, runtime => runtime.newPage(action.url));
+      case 'activate-page':
+        return await this.agentResult(sessionId, 'activate-page', actor, runtime =>
+          runtime.activatePage(action.pageId),
+        );
+      case 'close-page':
+        return await this.agentResult(sessionId, 'close-page', actor, runtime => runtime.closePage(action.pageId));
     }
   }
 

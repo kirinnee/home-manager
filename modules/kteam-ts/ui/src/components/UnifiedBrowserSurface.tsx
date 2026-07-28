@@ -11,13 +11,17 @@
 // never waits for a fake timeout or silently changes engines. The selector is
 // stable, the preview warning is honest, and "Open in real browser" is always
 // one tap away.
+//
+// There is exactly ONE tab strip in this surface and it lives inside the REAL
+// engine, driven by the daemon's real Chrome pages. Preview keeps its own
+// independent linear history and invents no tabs of its own.
 
 import { useCallback, useEffect, useRef, useState, type ComponentType, type FormEvent } from 'react';
 import { ArrowLeft, ArrowRight, ExternalLink, Globe2, Monitor, RefreshCw, ShieldAlert, X } from 'lucide-react';
 import { Button } from './Primitives';
 import { browserDestination, InAppBrowserFrame, isLoopbackHostname, type BrowserDestination } from './InAppBrowser';
 import { RemoteBrowserPane, type RemoteBrowserPaneProps } from './RemoteBrowserPane';
-import { remoteBrowserApi, type RemoteBrowserActionResult } from '../lib/remote-browser';
+import { remoteBrowserApi, type RemoteBrowserActionResult, type RemoteBrowserStatus } from '../lib/remote-browser';
 
 export type BrowserEngine = 'preview' | 'remote';
 
@@ -54,6 +58,8 @@ export type BrowserAddressResolution =
 
 const EXPLICIT_SCHEME = /^[a-z][a-z\d+.-]*:/i;
 const HOST_WITH_PORT = /^(?:localhost|[^\s/:]+\.[^\s/:]+|\d{1,3}(?:\.\d{1,3}){3}|\[[^\]]+\]):\d+(?:[/?#]|$)/i;
+/** `https:`, `https:/`, `https://` — a scheme the human has not finished typing. */
+const SCHEME_ONLY = /^(https?):\/{0,2}$/i;
 
 function looksLikeBareHost(value: string): boolean {
   if (/\s/.test(value)) return false;
@@ -74,6 +80,13 @@ function looksLikeBareHost(value: string): boolean {
 export function resolveBrowserAddress(input: string, baseHref?: string): BrowserAddressResolution {
   const value = input.trim();
   if (!value) return { kind: 'error', message: 'Enter a URL or search terms.' };
+
+  // A half-typed scheme is an unfinished thought, not a mistake. Say what is
+  // missing instead of scolding, and never turn it into a search.
+  const schemeOnly = value.match(SCHEME_ONLY);
+  if (schemeOnly) {
+    return { kind: 'error', message: `Keep typing—add a site after ${schemeOnly[1]!.toLowerCase()}://` };
+  }
 
   const relative = /^(?:\/|\.\.?\/|[?#])/.test(value);
   const hostWithPort = HOST_WITH_PORT.test(value);
@@ -192,6 +205,7 @@ export function UnifiedBrowserSurface({
   const [engine, setEngine] = useState<BrowserEngine>(initialEngine);
   const [previewHistory, setPreviewHistory] = useState<PreviewHistory>(() => createPreviewHistory(destination));
   const [remoteLocation, setRemoteLocation] = useState<RemoteLocation | null>(null);
+  const [remoteStatus, setRemoteStatus] = useState<RemoteBrowserStatus | null>(null);
   const [address, setAddress] = useState(destination?.href ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -210,6 +224,7 @@ export function UnifiedBrowserSurface({
   const applyRemoteResult = useCallback((result: RemoteBrowserActionResult) => {
     const location = locationFromResult(result);
     if (location) setRemoteLocation(location);
+    if (result.status) setRemoteStatus(result.status);
   }, []);
 
   const runRemote = useCallback(
@@ -332,12 +347,20 @@ export function UnifiedBrowserSurface({
       setAddress(location.url);
   }, []);
 
+  const remoteStatusChanged = useCallback((next: RemoteBrowserStatus) => setRemoteStatus(next), []);
+
   const externalDestination = browserDestination(currentUrl);
   const previewBackDisabled =
     engine === 'preview' && (previewHistory.entries.length === 0 || previewHistory.index <= 0);
   const previewForwardDisabled =
     engine === 'preview' &&
     (previewHistory.entries.length === 0 || previewHistory.index >= previewHistory.entries.length - 1);
+  // A daemon that has not reported history capability yet must not disable the
+  // controls: `undefined` means unknown, only an explicit `false` means "cannot".
+  const backDisabled = engine === 'preview' ? previewBackDisabled : remoteStatus?.canGoBack === false;
+  const forwardDisabled = engine === 'preview' ? previewForwardDisabled : remoteStatus?.canGoForward === false;
+  const remotePageState = engine === 'remote' ? remoteStatus?.pageState : undefined;
+  const remotePageError = engine === 'remote' ? remoteStatus?.pageError : undefined;
   const Heading = presentation === 'pane' ? 'h2' : 'h1';
 
   return (
@@ -403,7 +426,7 @@ export function UnifiedBrowserSurface({
           <Button
             type="button"
             variant="ghost"
-            disabled={busy || previewBackDisabled}
+            disabled={busy || backDisabled}
             onClick={goBack}
             className="min-h-[44px] min-w-[44px] justify-center p-0"
             aria-label={`Back in ${engine === 'preview' ? 'preview' : 'real browser'}`}
@@ -414,7 +437,7 @@ export function UnifiedBrowserSurface({
           <Button
             type="button"
             variant="ghost"
-            disabled={busy || previewForwardDisabled}
+            disabled={busy || forwardDisabled}
             onClick={goForward}
             className="min-h-[44px] min-w-[44px] justify-center p-0"
             aria-label={`Forward in ${engine === 'preview' ? 'preview' : 'real browser'}`}
@@ -436,11 +459,12 @@ export function UnifiedBrowserSurface({
           <label className="flex min-h-[44px] min-w-0 items-center gap-xs rounded-control border border-strong bg-surface-2 px-2">
             <span className="sr-only">URL or DuckDuckGo search</span>
             <Globe2 size={14} aria-hidden="true" className="shrink-0 text-muted" />
+            {/* No onBlur reset: tapping Go blurs this input first, and restoring
+                the previous URL there submitted the OLD address. */}
             <input
               ref={addressRef}
               value={address}
               onChange={event => setAddress(event.target.value)}
-              onBlur={() => setAddress(currentUrl)}
               placeholder="URL or DuckDuckGo search"
               autoCapitalize="none"
               autoCorrect="off"
@@ -466,18 +490,29 @@ export function UnifiedBrowserSurface({
             <>
               <ShieldAlert size={14} aria-hidden="true" className="shrink-0 text-warn" />
               <span>
-                Preview tracks app-opened pages; in-page links may not update here. Some sites block previews.
+                Preview accepts the address, but a site can refuse to load in an embedded reader and this reader cannot
+                tell when it does. Real is the full interactive browser.
               </span>
             </>
           ) : (
             <>
               <Monitor size={14} aria-hidden="true" className="shrink-0 text-accent" />
               <span className="min-w-0 truncate" title={remoteLocation?.title || currentUrl}>
-                {remoteLocation?.title || 'Shared Chrome · persistent session'}
+                {busy
+                  ? 'Working…'
+                  : remotePageState === 'loading'
+                    ? 'Loading page…'
+                    : remoteLocation?.title || 'Shared Chrome · persistent session'}
               </span>
             </>
           )}
         </div>
+
+        {remotePageError && (
+          <div role="alert" className="rounded-control border border-err/30 bg-err-soft px-2 py-1.5 text-meta text-err">
+            {remotePageError}
+          </div>
+        )}
 
         {error && (
           <div role="alert" className="rounded-control border border-err/30 bg-err-soft px-2 py-1.5 text-meta text-err">
@@ -510,6 +545,7 @@ export function UnifiedBrowserSurface({
           isActive={isActive && engine === 'remote'}
           showNavigation={false}
           onLocationChange={remoteChanged}
+          onStatusChange={remoteStatusChanged}
         />
       )}
 
