@@ -16,13 +16,16 @@
 import { describe, expect, test } from 'bun:test';
 import {
   ASSISTANT_LAYOUT,
+  createBlockTapPointerHandlers,
   isPinnable,
   isPlainBlockTap,
   pinPreviewOf,
   SYSTEM_DIVIDER_LAYOUT,
   transcriptImagesEqual,
+  type BlockTapPointerEventLike,
 } from './TranscriptRow';
 import type { TranscriptBlock } from '../lib/transcript';
+import { TOUCH_SELECTION_DWELL_MS } from '../hooks/useLiveTick';
 
 /** Utilities that shrink the content box horizontally. A bare one of these
  *  (no variant prefix) is a reserve every viewport pays for. */
@@ -120,18 +123,92 @@ describe('pin affordance — tap gating', () => {
   // inside one of the interactive selectors isPlainBlockTap guards against.
   const el = (insideInteractive: boolean): Element =>
     ({ closest: () => (insideInteractive ? ({} as Element) : null) }) as unknown as Element;
+  const tap = { durationMs: 90, distancePx: 2, primary: true, pointerType: 'touch' };
 
   test('a plain tap on inert block content reveals the bar', () => {
-    expect(isPlainBlockTap(el(false), false)).toBe(true);
+    expect(isPlainBlockTap(el(false), false, tap)).toBe(true);
   });
   test('a tap that lands on a link/button/disclosure is left alone', () => {
-    expect(isPlainBlockTap(el(true), false)).toBe(false);
+    expect(isPlainBlockTap(el(true), false, tap)).toBe(false);
   });
   test('a tap while a selection is active never reveals the bar', () => {
-    expect(isPlainBlockTap(el(false), true)).toBe(false);
+    expect(isPlainBlockTap(el(false), true, tap)).toBe(false);
+  });
+  test('a long-press never mutates the row even when the native range is still collapsed at release', () => {
+    expect(isPlainBlockTap(el(false), false, { ...tap, durationMs: 600 })).toBe(false);
+  });
+  test('a selection-handle drag or scroll gesture never reveals the bar', () => {
+    expect(isPlainBlockTap(el(false), false, { ...tap, distancePx: 24 })).toBe(false);
+  });
+  test('a secondary pointer never reveals the bar', () => {
+    expect(isPlainBlockTap(el(false), false, { ...tap, primary: false })).toBe(false);
+  });
+  test('a slow stationary mouse click still works on a hybrid touch device', () => {
+    expect(isPlainBlockTap(el(false), false, { ...tap, durationMs: 600, pointerType: 'mouse' })).toBe(true);
   });
   test('a null target (no element) counts as a plain tap', () => {
-    expect(isPlainBlockTap(null, false)).toBe(true);
+    expect(isPlainBlockTap(null, false, tap)).toBe(true);
+  });
+});
+
+const pointer = (over: Partial<BlockTapPointerEventLike> = {}): BlockTapPointerEventLike => ({
+  pointerId: 7,
+  pointerType: 'touch',
+  clientX: 100,
+  clientY: 200,
+  timeStamp: 0,
+  isPrimary: true,
+  button: 0,
+  target: { closest: () => null } as unknown as Element,
+  ...over,
+});
+
+describe('pin affordance — production pointer handlers', () => {
+  const setup = (hasSelection = false) => {
+    let barOpen = false;
+    const handlers = createBlockTapPointerHandlers({
+      hasSelection: () => hasSelection,
+      onPlainTap: () => {
+        barOpen = !barOpen;
+      },
+    });
+    return { handlers, isBarOpen: () => barOpen };
+  };
+
+  test('pointerdown → pointerup quick tap opens Pin', () => {
+    const row = setup();
+    row.handlers.onPointerDown(pointer());
+    row.handlers.onPointerUp(pointer({ timeStamp: 90 }));
+    expect(row.isBarOpen()).toBe(true);
+  });
+
+  test('pointerdown → long-press release does not open Pin', () => {
+    const row = setup();
+    row.handlers.onPointerDown(pointer());
+    row.handlers.onPointerUp(pointer({ timeStamp: TOUCH_SELECTION_DWELL_MS }));
+    expect(row.isBarOpen()).toBe(false);
+  });
+
+  test('pointerdown → drag → pointerup does not open Pin', () => {
+    const row = setup();
+    row.handlers.onPointerDown(pointer());
+    row.handlers.onPointerMove(pointer({ clientX: 124, timeStamp: 40 }));
+    row.handlers.onPointerUp(pointer({ clientX: 124, timeStamp: 80 }));
+    expect(row.isBarOpen()).toBe(false);
+  });
+
+  test('pointercancel clears the pending tap', () => {
+    const row = setup();
+    row.handlers.onPointerDown(pointer());
+    row.handlers.onPointerCancel();
+    row.handlers.onPointerUp(pointer({ timeStamp: 90 }));
+    expect(row.isBarOpen()).toBe(false);
+  });
+
+  test('the tested handlers are spread onto every touch-pinnable row', async () => {
+    const source = await Bun.file(new URL('./TranscriptRow.tsx', import.meta.url)).text();
+    expect(source).toContain('const rowPointerHandlers = touch && pinnable ? blockTapHandlers : {};');
+    expect(source).toContain('{...rowPointerHandlers}');
   });
 });
 

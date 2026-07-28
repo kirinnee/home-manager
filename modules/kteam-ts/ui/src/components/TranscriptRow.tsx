@@ -24,7 +24,7 @@
 // widest gap in the transcript, which is what makes turns readable without
 // drawing a divider between them.
 
-import { memo, useEffect, useReducer, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { memo, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { ChevronRight, Brain, Info, Pin, PinOff } from 'lucide-react';
 import {
   isInformativeTurnBoundary,
@@ -41,6 +41,7 @@ import { displayCallsign } from '../lib/callsign';
 import { cn, fmtClock } from '../lib/utils';
 import { isMessagePinned, pinsStore, type PinBlockKind } from '../lib/pins';
 import { getForegroundSession } from '../lib/pin-bridge';
+import { TOUCH_SELECTION_DWELL_MS } from '../hooks/useLiveTick';
 
 const PROTOCOL_HEADER = /#\s*(AGENTS\.md instructions|SYSTEM\s*PROMPT|INSTRUCTIONS)/i;
 const LONG_USER_LINES = 16;
@@ -220,10 +221,10 @@ export function isPinnable(block: TranscriptBlock): boolean {
 //              touch, where hover never fires.
 //   TOUCH    — a plain tap on the block toggles a slim action bar beneath it
 //              (Pin/Unpin), dismissed by scroll, an outside tap, or the action.
-//              A tap does not scroll and does not select, so it never fights the
-//              transcript's hard-won selection/scroll machinery (Transcript.tsx
-//              pinBlockedBySelection); a long-press, which IS native selection,
-//              was deliberately not used.
+//              Duration + movement are part of the tap decision: the selection
+//              range can still be collapsed at the pointerup of an iOS/Android
+//              long-press, so sampling window.getSelection() alone would mount
+//              this bar INSIDE the selected row and destroy the native range.
 //
 // The session id comes from the foreground bridge, never a prop — only the
 // foreground pane is interactable, and it is the one that declared itself.
@@ -305,13 +306,112 @@ function PinControls({
   );
 }
 
-/** Is a tap a plain tap that should reveal the pin bar — i.e. not the reader
- *  starting a selection and not a press on some other interactive control?
+/** A deliberate tap stays within a movement budget. Native text selection
+ *  requires a dwell, while transcript scrolling/handle dragging moves; either
+ *  signal vetoes a row mutation even when the native range is still collapsed
+ *  at pointerup. The shared 350ms dwell cutoff intentionally precedes the usual
+ *  ~500ms native long-press: the safety gap avoids mounting Pin UI while the
+ *  browser is deciding whether to begin selection. */
+const BLOCK_TAP_SLOP_PX = 12;
+
+export interface BlockTapGesture {
+  durationMs: number;
+  distancePx: number;
+  primary: boolean;
+  pointerType: string;
+}
+
+/** Is a gesture a plain tap that should reveal the pin bar — i.e. not a native
+ *  selection dwell/handle drag and not a press on another interactive control?
  *  Exported and DOM-shaped-but-injectable so the decision is unit-testable. */
-export function isPlainBlockTap(target: Element | null, hasSelection: boolean): boolean {
-  if (hasSelection) return false;
+export function isPlainBlockTap(target: Element | null, hasSelection: boolean, gesture: BlockTapGesture): boolean {
+  if (
+    hasSelection ||
+    !gesture.primary ||
+    (gesture.pointerType !== 'mouse' && gesture.durationMs >= TOUCH_SELECTION_DWELL_MS) ||
+    gesture.distancePx > BLOCK_TAP_SLOP_PX
+  )
+    return false;
   if (!target) return true;
   return !target.closest('a, button, input, textarea, summary, [role="button"], [data-pin-bar]');
+}
+
+export interface BlockTapPointerEventLike {
+  pointerId: number;
+  pointerType: string;
+  clientX: number;
+  clientY: number;
+  timeStamp: number;
+  isPrimary: boolean;
+  button: number;
+  target: EventTarget | null;
+}
+
+export interface BlockTapPointerHandlers {
+  onPointerDown(event: BlockTapPointerEventLike): void;
+  onPointerMove(event: BlockTapPointerEventLike): void;
+  onPointerUp(event: BlockTapPointerEventLike): void;
+  onPointerCancel(): void;
+}
+
+/** The exact row event handlers used in production, exported so the DOM-free
+ *  suite can drive pointerdown→pointerup rather than testing only the final tap
+ *  predicate. State lives in this closure, so a parent render during a gesture
+ *  cannot erase or manufacture a Pin-bar tap. */
+export function createBlockTapPointerHandlers(options: {
+  hasSelection(): boolean;
+  onPlainTap(): void;
+}): BlockTapPointerHandlers {
+  let start: {
+    pointerId: number;
+    pointerType: string;
+    x: number;
+    y: number;
+    at: number;
+    maxDistance: number;
+  } | null = null;
+
+  return {
+    onPointerDown: event => {
+      if (!event.isPrimary || event.button !== 0) {
+        start = null;
+        return;
+      }
+      start = {
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        x: event.clientX,
+        y: event.clientY,
+        at: event.timeStamp,
+        maxDistance: 0,
+      };
+    },
+    onPointerMove: event => {
+      if (!start || event.pointerId !== start.pointerId) return;
+      start.maxDistance = Math.max(start.maxDistance, Math.hypot(event.clientX - start.x, event.clientY - start.y));
+    },
+    onPointerUp: event => {
+      const gestureStart = start;
+      start = null;
+      if (!gestureStart || event.pointerId !== gestureStart.pointerId) return;
+      const distancePx = Math.max(
+        gestureStart.maxDistance,
+        Math.hypot(event.clientX - gestureStart.x, event.clientY - gestureStart.y),
+      );
+      if (
+        isPlainBlockTap(event.target as Element | null, options.hasSelection(), {
+          durationMs: Math.max(0, event.timeStamp - gestureStart.at),
+          distancePx,
+          primary: event.isPrimary,
+          pointerType: gestureStart.pointerType || event.pointerType,
+        })
+      )
+        options.onPlainTap();
+    },
+    onPointerCancel: () => {
+      start = null;
+    },
+  };
 }
 
 export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, previous, touch = false }: Props) {
@@ -320,6 +420,18 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, 
   const [barOpen, setBarOpen] = useState(false);
   const rowRef = useRef<HTMLDivElement | null>(null);
   const pinnable = isPinnable(block);
+  const blockTapHandlers = useMemo(
+    () =>
+      createBlockTapPointerHandlers({
+        hasSelection: () => {
+          const selection = typeof window !== 'undefined' ? window.getSelection() : null;
+          return !!selection && !selection.isCollapsed && selection.rangeCount > 0;
+        },
+        onPlainTap: () => setBarOpen(open => !open),
+      }),
+    [],
+  );
+  const rowPointerHandlers = touch && pinnable ? blockTapHandlers : {};
 
   // TOUCH dismissal: once the bar is open, any scroll of the transcript or a tap
   // outside this row closes it — the bar is a transient, not a mode.
@@ -330,9 +442,15 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, 
       if (rowRef.current && !rowRef.current.contains(event.target as Node)) setBarOpen(false);
     };
     const scroller = rowRef.current?.closest('[data-density-region="transcript-scroller"]');
-    scroller?.addEventListener('scroll', close, { passive: true });
+    // Mounting the bar increases this row's height. While following the tail,
+    // Transcript's ResizeObserver answers that layout change with a programmatic
+    // re-pin; attaching immediately made that self-authored scroll close the bar
+    // in the same frame it opened. Arm only after layout/observer work settles;
+    // later reader scrolling still dismisses it normally.
+    const scrollArmTimer = setTimeout(() => scroller?.addEventListener('scroll', close, { passive: true }), 100);
     document.addEventListener('pointerdown', onDocDown, { capture: true });
     return () => {
+      clearTimeout(scrollArmTimer);
       scroller?.removeEventListener('scroll', close);
       document.removeEventListener('pointerdown', onDocDown, { capture: true } as EventListenerOptions);
     };
@@ -343,17 +461,10 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, 
   if (block.kind === 'turn' && !isInformativeTurnBoundary(block)) return null;
 
   const kind = tierOf(block.kind);
-  // TOUCH only: a plain tap on the block reveals the pin bar. Gated so it never
-  // swallows a tap meant for a link/button/disclosure inside the row, and never
-  // fires while the reader is making a selection.
-  const onBlockPointerUp =
-    touch && pinnable
-      ? (event: ReactPointerEvent<HTMLDivElement>) => {
-          const sel = typeof window !== 'undefined' ? window.getSelection() : null;
-          const hasSelection = !!sel && !sel.isCollapsed && sel.rangeCount > 0;
-          if (isPlainBlockTap(event.target as Element | null, hasSelection)) setBarOpen(open => !open);
-        }
-      : undefined;
+  // TOUCH only: a plain tap on the block reveals the pin bar. The controller
+  // tracks the complete gesture without renders because selection can still
+  // look collapsed at long-press release. A dwell or movement is native
+  // selection/scrolling, never permission to insert a bar inside this row.
   // A speaker change (user→assistant or back) is the widest gap in the
   // transcript. Intervening chrome does not break it: a reply that ran tools
   // first is still the other party starting to speak.
@@ -406,7 +517,7 @@ export const TranscriptRow = memo(function TranscriptRow({ block, live, isLast, 
       data-kind={kind}
       data-turn={turnChange ? 'true' : undefined}
       data-after={previous ? tierOf(previous.kind) : undefined}
-      onPointerUp={onBlockPointerUp}
+      {...rowPointerHandlers}
     >
       {body}
       {pinnable && <PinControls block={block} touch={touch} barOpen={barOpen} setBarOpen={setBarOpen} />}

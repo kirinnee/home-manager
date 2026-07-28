@@ -12,7 +12,15 @@
 // the guard must get right are checkable without a Selection or a Node.
 
 import { describe, expect, test } from 'bun:test';
-import { pinBlockedBySelection, paneUsableTableWidth, touchQuotePlacement, type SelectionLike } from './Transcript';
+import {
+  TOUCH_QUOTE_HEIGHT,
+  TOUCH_QUOTE_WIDTH,
+  TOUCH_SELECTION_HANDLE_CLEARANCE,
+  paneUsableTableWidth,
+  pinBlockedBySelection,
+  touchQuotePlacement,
+  type SelectionLike,
+} from './Transcript';
 
 // Two sentinel "nodes". `contains` decides which is "inside" the viewport; the
 // guard never inspects a node itself, only asks the predicate.
@@ -153,41 +161,76 @@ describe('quotableSelectionText', () => {
 
 // ---------------------------------------------------------------------------
 // touchQuotePlacement — where the touch Quote/Pin pair may sit. The reported
-// bug: placed above the selection it covered the selected bubble's own
-// timestamp row (390x844: buttons at y=177 over the clock at y=203). Policy is
-// now below-first, so the pair can only cover text the reader already read.
+// bugs: placed above the selection it covered the selected bubble's own
+// timestamp row (390x844: buttons at y=177 over the clock at y=203); then the
+// below-first replacement left only 10px for native selection handles, so its
+// pointer-active buttons captured both endpoint hit lanes. Policy is below-first
+// with a complete native handle lane on either side.
 
 describe('touchQuotePlacement', () => {
   const PHONE = { width: 390, height: 844 };
 
-  test('sits BELOW the selection when there is room — never over the header row above it', () => {
+  const actionsHit = (position: { left: number; top: number }, x: number, y: number): boolean =>
+    x >= position.left &&
+    x < position.left + TOUCH_QUOTE_WIDTH &&
+    y >= position.top &&
+    y < position.top + TOUCH_QUOTE_HEIGHT;
+
+  test('sits BELOW the selection when there is room, beyond a complete native handle lane', () => {
     // The measured collision case: selection line at y=225–244 in a bubble
     // whose clock row is at y=203–222.
-    const pos = touchQuotePlacement({ x: 128, top: 225, bottom: 244 }, PHONE);
+    const pos = touchQuotePlacement({ x: 128, top: 225, bottom: 244 }, PHONE)!;
     expect(pos.top).toBeGreaterThan(244); // strictly below the selection…
-    expect(pos.top).toBe(244 + 10); // …by the handle gap
+    expect(pos.top - 244).toBe(TOUCH_SELECTION_HANDLE_CLEARANCE); // …past the native handle's touch target
   });
 
-  test('flips ABOVE only when the selection ends too near the bottom to fit', () => {
-    const pos = touchQuotePlacement({ x: 128, top: 800, bottom: 820 }, PHONE);
+  test('flips ABOVE only when the selection ends too near the bottom to fit, preserving that handle lane too', () => {
+    const pos = touchQuotePlacement({ x: 128, top: 800, bottom: 820 }, PHONE)!;
     expect(pos.top).toBeLessThan(800);
-    expect(pos.top).toBe(800 - 10 - 44);
+    expect(800 - (pos.top + TOUCH_QUOTE_HEIGHT)).toBe(TOUCH_SELECTION_HANDLE_CLEARANCE);
   });
 
-  test('a flipped pair near the very top clamps on screen', () => {
-    const pos = touchQuotePlacement({ x: 128, top: 20, bottom: 830 }, PHONE);
-    expect(pos.top).toBeGreaterThanOrEqual(8);
+  test('a viewport-spanning selection uses its middle instead of clamping over either endpoint', () => {
+    const range = { x: 128, top: 20, bottom: 830 };
+    const pos = touchQuotePlacement(range, PHONE)!;
+    expect(pos.top - range.top).toBeGreaterThanOrEqual(TOUCH_SELECTION_HANDLE_CLEARANCE);
+    expect(range.bottom - (pos.top + TOUCH_QUOTE_HEIGHT)).toBeGreaterThanOrEqual(TOUCH_SELECTION_HANDLE_CLEARANCE);
+  });
+
+  test('returns no controls when a tiny viewport has no placement that leaves both native handles free', () => {
+    expect(touchQuotePlacement({ x: 60, top: 20, bottom: 100 }, { width: 180, height: 120 })).toBeNull();
   });
 
   test('left edge clamps inside a 360px viewport at both extremes', () => {
     const narrow = { width: 360, height: 780 };
-    expect(touchQuotePlacement({ x: 0, top: 100, bottom: 120 }, narrow).left).toBe(8);
-    const right = touchQuotePlacement({ x: 360, top: 100, bottom: 120 }, narrow).left;
-    expect(right + 148).toBeLessThanOrEqual(360 - 8);
+    expect(touchQuotePlacement({ x: 0, top: 100, bottom: 120 }, narrow)!.left).toBe(8);
+    const right = touchQuotePlacement({ x: 360, top: 100, bottom: 120 }, narrow)!.left;
+    expect(right + TOUCH_QUOTE_WIDTH).toBeLessThanOrEqual(360 - 8);
   });
 
   test('centres on the selection when nothing clamps', () => {
-    const pos = touchQuotePlacement({ x: 195, top: 300, bottom: 320 }, PHONE);
-    expect(pos.left).toBe(195 - 148 / 2);
+    const pos = touchQuotePlacement({ x: 195, top: 300, bottom: 320 }, PHONE)!;
+    expect(pos.left).toBe(195 - TOUCH_QUOTE_WIDTH / 2);
+  });
+
+  test('simulated touches throughout both 44px endpoint lanes miss the action buttons', () => {
+    // Geometry captured by the browser probe: a short selected line whose two
+    // endpoints both sit horizontally under the centred Quote/Pin pair. With the
+    // old 10px gap, every point from +10 through +44 hit one of the buttons.
+    const range = { x: 313.5, top: 299, bottom: 318 };
+    const pos = touchQuotePlacement(range, PHONE)!;
+    for (const x of [261, 366]) {
+      for (const delta of [10, 16, 22, 32, 44]) {
+        expect(actionsHit(pos, x, range.bottom + delta)).toBe(false);
+      }
+    }
+
+    const flippedRange = { x: 195, top: 800, bottom: 820 };
+    const flipped = touchQuotePlacement(flippedRange, PHONE)!;
+    for (const x of [170, 220]) {
+      for (const delta of [10, 16, 22, 32, 44]) {
+        expect(actionsHit(flipped, x, flippedRange.top - delta)).toBe(false);
+      }
+    }
   });
 });
