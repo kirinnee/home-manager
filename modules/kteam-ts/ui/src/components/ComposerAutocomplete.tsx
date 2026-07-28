@@ -1,4 +1,5 @@
-// Presentation for the composer's shared /, @, &, and ? trigger engine.
+// Presentation for the composer's shared action (`/`) and reference (`@`)
+// trigger engine.
 //
 // The visual direction is a compact "signal rail": an industrial, information-
 // dense strip attached to the composer rather than a floating command-palette
@@ -26,6 +27,7 @@
 import { useLayoutEffect, useMemo, useRef } from 'react';
 import {
   BookOpen,
+  Bot,
   CircleHelp,
   File,
   Folder,
@@ -93,6 +95,7 @@ export function createRowPointerHandlers(index: number, onAccept: (index: number
 function iconFor(kind: ComposerAutocompleteKind) {
   if (kind === 'command') return Terminal;
   if (kind === 'skill') return BookOpen;
+  if (kind === 'agent') return Bot;
   if (kind === 'directory') return Folder;
   if (kind === 'task') return ListTodo;
   if (kind === 'attention') return CircleHelp;
@@ -253,8 +256,7 @@ export function ComposerAutocompletePopover({
   const copy = resultCopy(controller);
   const trigger = controller.match.trigger;
   const groups = groupAutocompleteCandidates(controller.candidates);
-  const surface =
-    trigger === '/' ? 'commands-skills' : trigger === '@' ? 'files' : trigger === '&' ? 'tasks' : 'attention';
+  const surface = trigger === '/' ? 'commands-skills' : 'references';
 
   return (
     <div

@@ -52,18 +52,14 @@ describe('composer autocomplete trigger detection', () => {
   });
 
   test.each([
-    { value: '&', trigger: '&' as const, query: '', start: 0 },
-    { value: '&F', trigger: '&' as const, query: 'F', start: 0 },
-    { value: 'see &F12', trigger: '&' as const, query: 'F12', start: 4 },
-    { value: '(&B2', trigger: '&' as const, query: 'B2', start: 1 },
-    { value: 'line\n&', trigger: '&' as const, query: '', start: 5 },
-    { value: 'can you look at &', trigger: '&' as const, query: '', start: 16 },
-    { value: '?A', trigger: '?' as const, query: 'A', start: 0 },
-    { value: 'resolve ?A3', trigger: '?' as const, query: 'A3', start: 8 },
-    { value: 'line\n?A12', trigger: '?' as const, query: 'A12', start: 5 },
-  ])('$value opens the $trigger reference picker', ({ value, trigger, query, start }) => {
+    { value: '@', query: '', start: 0 },
+    { value: '@ott', query: 'ott', start: 0 },
+    { value: 'see @F12', query: 'F12', start: 4 },
+    { value: 'resolve @?A3', query: '?A3', start: 8 },
+    { value: 'line\n@#B2', query: '#B2', start: 5 },
+  ])('$value opens the unified reference picker', ({ value, query, start }) => {
     expect(detectComposerTrigger(value, caret(value.length))).toMatchObject({
-      trigger,
+      trigger: '@',
       query,
       start,
       end: value.length,
@@ -85,6 +81,11 @@ describe('composer autocomplete trigger detection', () => {
     '#F',
     'see #F12',
     '(#B2',
+    '&',
+    '&F12',
+    'see &F12',
+    '?A3',
+    'resolve ?A3',
     'foo#L12',
     'see #L12',
   ])('%s stays ordinary prose or markdown', value => {
@@ -95,43 +96,12 @@ describe('composer autocomplete trigger detection', () => {
     { value: 'Tom & Jerry', caretAt: 'Tom & Jerry'.length },
     { value: 'Tom & Jerry', caretAt: 'Tom &'.length },
     { value: 'R&D', caretAt: 'R&D'.length },
-    { value: 'AT&T', caretAt: 'AT&T'.length },
-    { value: '&amp;', caretAt: '&amp;'.length },
     { value: '&amp;', caretAt: 1 },
-    { value: '&nbsp;', caretAt: '&nbsp;'.length },
-    { value: '&nbsp;', caretAt: 1 },
-    { value: '&#39;', caretAt: '&#39;'.length },
-    { value: '&#39;', caretAt: 1 },
-    { value: '&#x27;', caretAt: 1 },
-    { value: '&#X27;', caretAt: 1 },
     { value: 'a && b', caretAt: 'a && b'.length },
-    { value: '&&', caretAt: 1 },
-    { value: '&&', caretAt: 2 },
-  ])('$value at caret $caretAt is not a task trigger', ({ value, caretAt }) => {
+    { value: 'Is this right?', caretAt: 'Is this right?'.length },
+    { value: 'resolve ?A3', caretAt: 'resolve ?A3'.length },
+  ])('$value at caret $caretAt does not revive a retired trigger', ({ value, caretAt }) => {
     expect(detectComposerTrigger(value, caret(caretAt))).toBeNull();
-  });
-
-  test.each(['Tom &', 'cmd &'])('%s pays the deliberate one-sigil cost of browse-anywhere', value => {
-    expect(detectComposerTrigger(value, caret(value.length))).toMatchObject({
-      trigger: '&',
-      query: '',
-      start: value.lastIndexOf('&'),
-    });
-  });
-
-  test('the next whitespace keystroke closes a mid-line browse immediately', () => {
-    expect(detectComposerTrigger('Tom & ', caret('Tom & '.length))).toBeNull();
-  });
-
-  test('changing the task sigil does not tighten the existing attention boundary', () => {
-    expect(detectComposerTrigger('&?A3', caret(5))).toMatchObject({ trigger: '?', query: 'A3', start: 1 });
-  });
-
-  test('reference replacement stops before prose punctuation', () => {
-    const task = detectComposerTrigger('see &F12, please', caret(8));
-    expect(task).toMatchObject({ trigger: '&', query: 'F12', start: 4, end: 8 });
-    const attention = detectComposerTrigger('resolve ?A3.', caret(11));
-    expect(attention).toMatchObject({ trigger: '?', query: 'A3', start: 8, end: 11 });
   });
 
   test('the replace span extends beyond a caret in the middle of a token', () => {
@@ -146,8 +116,7 @@ describe('composer autocomplete trigger detection', () => {
   test('a non-collapsed textarea selection never opens suggestions', () => {
     expect(detectComposerTrigger('/summary', { start: 1, end: 4 })).toBeNull();
     expect(detectComposerTrigger('@src', { start: 0, end: 4 })).toBeNull();
-    expect(detectComposerTrigger('&F12', { start: 1, end: 4 })).toBeNull();
-    expect(detectComposerTrigger('?A3', { start: 1, end: 3 })).toBeNull();
+    expect(detectComposerTrigger('@F12', { start: 1, end: 4 })).toBeNull();
   });
 
   test('! is ordinary text until an exactly-once recorded shell action exists', () => {
@@ -156,7 +125,7 @@ describe('composer autocomplete trigger detection', () => {
   });
 
   describe('@ requires the sigil to BEGIN its token', () => {
-    test('an email address is not a file mention', () => {
+    test('an email address is not a reference trigger', () => {
       // Not merely a cosmetic false positive: `match.start` is the sigil, so
       // accepting here would replace `@example.com` and weld `bob` to a path.
       expect(detectComposerTrigger('mail bob@example.com', caret(20))).toBeNull();
@@ -224,15 +193,15 @@ describe('composer autocomplete token replacement', () => {
     });
   });
 
-  test('canonical task and attention references replace their whole token', () => {
-    const task = detectComposerTrigger('track &F1', caret(9));
-    expect(replaceComposerTrigger('track &F1', task!, '#F12')).toEqual({
+  test('one @ trigger can insert canonical task and attention references', () => {
+    const task = detectComposerTrigger('track @F1', caret(9));
+    expect(replaceComposerTrigger('track @F1', task!, '#F12')).toEqual({
       value: 'track #F12 ',
       selection: { start: 11, end: 11 },
     });
 
-    const attention = detectComposerTrigger('resolve ?A', caret(10));
-    expect(replaceComposerTrigger('resolve ?A', attention!, '?A3')).toEqual({
+    const attention = detectComposerTrigger('resolve @A', caret(10));
+    expect(replaceComposerTrigger('resolve @A', attention!, '?A3')).toEqual({
       value: 'resolve ?A3 ',
       selection: { start: 12, end: 12 },
     });
@@ -254,6 +223,14 @@ describe('composer autocomplete filtering and navigation', () => {
       candidate('name', 'summary', { detail: 'Fast recap' }),
     ];
     expect(rankComposerCandidates(rows, 'sum').map(row => row.id)).toEqual(['name', 'description']);
+  });
+
+  test('small named references stay ahead of filesystem matches', () => {
+    const rows = [
+      candidate('file', 'ottis.ts', { kind: 'file', replacement: '@ottis.ts' }),
+      candidate('agent', 'ottis', { kind: 'agent', rankPriority: 1, replacement: 'agent-ref' }),
+    ];
+    expect(rankComposerCandidates(rows, 'ottis').map(row => row.id)).toEqual(['agent', 'file']);
   });
 
   test('fuzzy subsequences match and absent candidates are dropped', () => {

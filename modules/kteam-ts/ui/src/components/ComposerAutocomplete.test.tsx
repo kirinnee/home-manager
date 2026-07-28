@@ -176,26 +176,42 @@ describe('ComposerAutocompletePopover', () => {
     expect(grouped.flatMap(group => group.rows.map(row => row.index))).toEqual([0, 1, 2]);
   });
 
-  test('task and attention rows expose identity details and task status', () => {
+  test('the unified reference surface exposes agent, task, and attention identity details', () => {
+    const agent: ComposerAutocompleteCandidate = {
+      id: 'agent:ms-ottis',
+      kind: 'agent',
+      label: 'ottis',
+      detail: 'browser-work · Make Browser Real',
+      badge: 'tool running',
+      group: 'Agents',
+      replacement: '[@ottis](/session/ms-ottis#kteam-agent-mention)',
+    };
     const taskHtml = renderToStaticMarkup(
       <ComposerAutocompletePopover
         controller={controller({
-          provider: { ...provider, trigger: '&', label: 'Tasks' },
-          match: { trigger: '&', query: 'F', start: 0, end: 2, caret: 2 },
+          provider: { ...provider, trigger: '@', label: 'References' },
+          match: { trigger: '@', query: 'F', start: 0, end: 2, caret: 2 },
           candidates: [
+            agent,
             {
               id: 'task:F38',
               kind: 'task',
               label: '#F38',
               detail: 'Composer autocomplete',
               badge: 'In progress',
+              group: 'Tasks',
               replacement: '#F38',
             },
           ],
         })}
       />,
     );
-    expect(taskHtml).toContain('data-composer-autocomplete="tasks"');
+    expect(taskHtml).toContain('data-composer-autocomplete="references"');
+    expect(taskHtml).toContain('>Agents</div>');
+    expect(taskHtml).toContain('>Tasks</div>');
+    expect(taskHtml).toContain('data-kind="agent"');
+    expect(taskHtml).toContain('browser-work · Make Browser Real');
+    expect(taskHtml).toContain('>tool running</span>');
     expect(taskHtml).toContain('#F38');
     expect(taskHtml).toContain('Composer autocomplete');
     expect(taskHtml).toContain('>In progress</span>');
@@ -204,21 +220,23 @@ describe('ComposerAutocompletePopover', () => {
     const attentionHtml = renderToStaticMarkup(
       <ComposerAutocompletePopover
         controller={controller({
-          provider: { ...provider, trigger: '?', label: 'Attention' },
-          match: { trigger: '?', query: 'A', start: 0, end: 2, caret: 2 },
+          provider: { ...provider, trigger: '@', label: 'References' },
+          match: { trigger: '@', query: 'A', start: 0, end: 2, caret: 2 },
           candidates: [
             {
               id: 'attention:A3',
               kind: 'attention',
               label: '?A3',
               detail: 'Choose the rollout window',
+              group: 'Attention',
               replacement: '?A3',
             },
           ],
         })}
       />,
     );
-    expect(attentionHtml).toContain('data-composer-autocomplete="attention"');
+    expect(attentionHtml).toContain('data-composer-autocomplete="references"');
+    expect(attentionHtml).toContain('>Attention</div>');
     expect(attentionHtml).toContain('?A3');
     expect(attentionHtml).toContain('Choose the rollout window');
   });

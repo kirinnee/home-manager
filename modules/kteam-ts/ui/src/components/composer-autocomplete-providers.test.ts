@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
   builtinCommandsForHarness,
-  createAttentionProvider,
   createComposerAutocompleteProviders,
   createFilesProvider,
+  createReferencesProvider,
   createSkillsProvider,
-  createTasksProvider,
+  isNamedReferenceQuery,
   loadSkillsCatalog,
   splitFileReferenceQuery,
   splitFileQuery,
@@ -17,6 +17,7 @@ import {
   type ComposerTrigger,
   type ComposerTriggerMatch,
 } from './composer-autocomplete-engine';
+import type { SessionStatus, SessionView } from '../types';
 
 const realFetch = globalThis.fetch;
 let requests: string[];
@@ -42,6 +43,42 @@ function match(trigger: ComposerTrigger, query: string): ComposerTriggerMatch {
 
 function context(trigger: ComposerTrigger, query: string, signal = new AbortController().signal) {
   return { query, match: match(trigger, query), signal };
+}
+
+function agentSession({
+  id,
+  teammate,
+  status = 'running',
+  label = 'ui-work',
+  task = 'Build the reference picker',
+  activity = '2026-07-28T12:00:00.000Z',
+  createdAt = '2026-07-28T10:00:00.000Z',
+}: {
+  id: string;
+  teammate: string;
+  status?: SessionStatus;
+  label?: string;
+  task?: string;
+  activity?: string;
+  createdAt?: string;
+}): SessionView {
+  return {
+    config: {
+      id,
+      name: task,
+      teammate,
+      label,
+      binary: 'codex-auto-loge',
+      harness: 'codex',
+      modelHint: 'gpt-5.6-sol',
+      mode: 'auto',
+      cwd: '/repo',
+      createdAt,
+      updatedAt: activity,
+    } as SessionView['config'],
+    state: { id, status, turn: 1, lastActivityAt: activity, observedModel: 'gpt-5.6-sol' },
+    directory: `/fleet/${id}`,
+  };
 }
 
 describe('/ skills provider', () => {
@@ -196,11 +233,11 @@ describe('/ skills provider', () => {
 });
 
 describe('store-backed reference providers', () => {
-  test('& rows keep canonical # references, titles, and live statuses without fetching', async () => {
+  test('@ rows keep canonical task references, titles, and live statuses without fetching named data', () => {
     let tasks: ComposerTaskSummary[] = [{ id: 'F38', title: 'Composer autocomplete', status: 'in_progress' }];
-    const provider = createTasksProvider(() => tasks);
+    const provider = createReferencesProvider({ sessionId: 'one', getTasks: () => tasks });
 
-    const first = await provider.candidates(context('&', 'F'));
+    const first = provider.initialCandidates!(context('@', 'F'))!;
     expect(first.candidates).toEqual([
       expect.objectContaining({
         kind: 'task',
@@ -213,16 +250,19 @@ describe('store-backed reference providers', () => {
     expect(requests).toHaveLength(0);
 
     tasks = [{ id: 'B7', title: 'New live snapshot', status: 'blocked' as const }];
-    const updated = await provider.candidates(context('&', 'B'));
+    const updated = provider.initialCandidates!(context('@', 'B'))!;
     expect(updated.candidates[0]).toMatchObject({ label: '#B7', badge: 'Blocked' });
   });
 
-  test('? rows contain unresolved canonical references and identifying subjects', async () => {
-    const provider = createAttentionProvider(() => [
-      { id: 'A3', subject: 'Choose the rollout window', source: 'question' },
-      { id: 'A8', subject: 'Approve production access', source: 'permission' },
-    ]);
-    const result = await provider.candidates(context('?', 'A'));
+  test('@ rows contain unresolved canonical attention references and identifying subjects', () => {
+    const provider = createReferencesProvider({
+      sessionId: 'one',
+      getAttentionItems: () => [
+        { id: 'A3', subject: 'Choose the rollout window', source: 'question' },
+        { id: 'A8', subject: 'Approve production access', source: 'permission' },
+      ],
+    });
+    const result = provider.initialCandidates!(context('@', 'A'))!;
     expect(result.candidates).toEqual([
       expect.objectContaining({
         kind: 'attention',
@@ -237,36 +277,211 @@ describe('store-backed reference providers', () => {
   });
 
   test('reuses an in-flight warmup on the first keystroke, then reads the live snapshot', async () => {
+    responder = () => Response.json({ entries: [] });
     let release!: () => void;
     const warmup = new Promise<void>(resolve => {
       release = resolve;
     });
     let tasks: Array<{ id: string; title: string; status: 'todo' }> = [];
-    const provider = createTasksProvider(
-      () => tasks,
-      'one',
-      () => warmup,
-    );
+    const provider = createReferencesProvider({
+      sessionId: 'one',
+      getTasks: () => tasks,
+      waitForTasks: () => warmup,
+    });
     const before = provider.snapshotKey;
 
-    const result = provider.candidates(context('&', 'F'));
+    const result = provider.candidates(context('@', 'F'));
     tasks = [{ id: 'F12', title: 'Loaded by the existing warmup', status: 'todo' }];
     release();
 
-    await expect(result).resolves.toEqual({
+    await expect(result).resolves.toMatchObject({
       candidates: [expect.objectContaining({ label: '#F12', detail: 'Loaded by the existing warmup' })],
     });
     expect(provider.snapshotKey).not.toBe(before);
-    expect(requests).toHaveLength(0);
+    expect(requests).toEqual(['/v1/sessions/one/fs']);
   });
 
-  test('the composer factory installs all four cached trigger providers', () => {
+  test('the composer factory exposes one action trigger and one reference trigger', () => {
     expect(createComposerAutocompleteProviders({ sessionId: 'one' }).map(provider => provider.trigger)).toEqual([
       '/',
       '@',
-      '&',
-      '?',
     ]);
+  });
+});
+
+describe('@ unified references provider', () => {
+  test.each([
+    ['', true],
+    ['ott', true],
+    ['F12', true],
+    ['#F12', true],
+    ['?A3', true],
+    ['src/', false],
+    ['src/app.ts', false],
+    ['app.ts:12', false],
+    ['someone@example.com', false],
+  ] as const)('classifies %p as named=%p', (query, expected) => {
+    expect(isNamedReferenceQuery(query)).toBe(expected);
+  });
+
+  test('groups live agents, tasks, and attention above Files and inserts a stable id-backed agent link', async () => {
+    responder = () => Response.json({ entries: [{ name: 'ottis.ts', type: 'file' }] });
+    const sessions = [
+      agentSession({
+        id: 'ms-finished',
+        teammate: 'ottis',
+        status: 'completed',
+        label: 'old-label',
+        task: 'Old Ottis work',
+        activity: '2026-07-28T13:00:00.000Z',
+      }),
+      agentSession({
+        id: 'ms-live',
+        teammate: 'ottis',
+        status: 'tool_running',
+        label: 'browser-work',
+        task: 'Make Browser Real',
+        activity: '2026-07-28T11:00:00.000Z',
+      }),
+    ];
+    const provider = createReferencesProvider({
+      sessionId: 'one',
+      getSessions: () => sessions,
+      getTasks: () => [{ id: 'F77', title: 'Mention agents', status: 'in_progress' }],
+      getAttentionItems: () => [{ id: 'A3', subject: 'Choose delivery semantics', source: 'question' }],
+    });
+
+    const initial = provider.initialCandidates?.(context('@', ''));
+    expect(initial?.candidates.map(candidate => candidate.group)).toEqual(['Agents', 'Agents', 'Tasks', 'Attention']);
+    expect(initial?.candidates[0]).toMatchObject({
+      id: 'agent:ms-live',
+      label: 'ottis',
+      badge: 'tool running',
+      replacement: '[@ottis](/session/ms-live#kteam-agent-mention)',
+    });
+    expect(initial?.candidates[0]?.detail).toContain('browser-work · Make Browser Real');
+    expect(initial?.candidates[0]?.detail).toContain('gpt-5.6-sol · codex-auto-loge');
+    expect(initial?.candidates[1]?.id).toBe('agent:ms-finished');
+    expect(requests).toHaveLength(0);
+
+    const result = await provider.candidates(context('@', 'ott'));
+    expect(result.candidates.map(candidate => candidate.group)).toEqual([
+      'Agents',
+      'Agents',
+      'Tasks',
+      'Attention',
+      'Files',
+    ]);
+    expect(result.candidates.at(-1)).toMatchObject({ label: 'ottis.ts', replacement: '@ottis.ts' });
+    expect(requests).toEqual(['/v1/sessions/one/fs']);
+  });
+
+  test('a path-shaped @src/ query is Files-only even when named rows would match src', async () => {
+    responder = url => {
+      expect(url).toBe('/v1/sessions/one/fs?path=src');
+      return Response.json({ path: 'src', entries: [{ name: 'core.ts', type: 'file' }] });
+    };
+    const provider = createReferencesProvider({
+      sessionId: 'one',
+      getSessions: () => [agentSession({ id: 'ms-src', teammate: 'src' })],
+      getTasks: () => [{ id: 'F12', title: 'src migration', status: 'todo' }],
+      getAttentionItems: () => [{ id: 'A3', subject: 'src approval', source: 'permission' }],
+    });
+
+    expect(provider.initialCandidates?.(context('@', 'src/'))).toBeUndefined();
+    const result = await provider.candidates(context('@', 'src/'));
+    expect(result.candidates).toEqual([
+      expect.objectContaining({ kind: 'file', group: 'Files', label: 'core.ts', replacement: '@src/core.ts' }),
+    ]);
+  });
+
+  test('a path-shaped query never waits for or warms unrelated named stores', async () => {
+    responder = () => Response.json({ entries: [{ name: 'core.ts', type: 'file' }] });
+    let taskWarmups = 0;
+    let attentionWarmups = 0;
+    const provider = createReferencesProvider({
+      sessionId: 'one',
+      waitForTasks: () => {
+        taskWarmups += 1;
+        return Promise.resolve();
+      },
+      waitForAttentionItems: () => {
+        attentionWarmups += 1;
+        return Promise.resolve();
+      },
+    });
+
+    await expect(provider.candidates(context('@', 'src/'))).resolves.toMatchObject({
+      candidates: [expect.objectContaining({ group: 'Files', replacement: '@src/core.ts' })],
+    });
+    expect({ taskWarmups, attentionWarmups }).toEqual({ taskWarmups: 0, attentionWarmups: 0 });
+  });
+
+  test('bare @ keeps every named group and Files discoverable under the global row cap', async () => {
+    responder = () =>
+      Response.json({
+        entries: Array.from({ length: 10 }, (_, index) => ({ name: `file-${index}.ts`, type: 'file' })),
+      });
+    const provider = createReferencesProvider({
+      sessionId: 'one',
+      getSessions: () => [agentSession({ id: 'ms-ottis', teammate: 'ottis' })],
+      getTasks: () =>
+        Array.from({ length: 20 }, (_, index) => ({
+          id: `F${index + 1}`,
+          title: `Task ${index + 1}`,
+          status: 'todo' as const,
+        })),
+      getAttentionItems: () =>
+        Array.from({ length: 20 }, (_, index) => ({
+          id: `A${index + 1}`,
+          subject: `Attention ${index + 1}`,
+          source: 'question',
+        })),
+    });
+
+    expect(provider.initialCandidates?.(context('@', ''))?.candidates).toHaveLength(16);
+    const result = await provider.candidates(context('@', ''));
+    const visible = rankComposerCandidates(result.candidates, '');
+    expect([...new Set(visible.map(candidate => candidate.group))]).toEqual(['Agents', 'Tasks', 'Attention', 'Files']);
+    expect(visible.filter(candidate => candidate.group === 'Files')).toHaveLength(4);
+    expect(visible.at(-1)?.group).toBe('Files');
+  });
+
+  test('keeps named references available when Files fails', async () => {
+    responder = () => Response.json({ error: 'offline' }, { status: 503 });
+    const provider = createReferencesProvider({
+      sessionId: 'one',
+      getSessions: () => [agentSession({ id: 'ms-ottis', teammate: 'ottis' })],
+    });
+    const result = await provider.candidates(context('@', 'ott'));
+    expect(result.candidates).toEqual([expect.objectContaining({ id: 'agent:ms-ottis' })]);
+    expect(result.notice).toContain('Files unavailable');
+  });
+
+  test('a Files failure still keeps every available named group visible on bare @', async () => {
+    responder = () => Response.json({ error: 'offline' }, { status: 503 });
+    const provider = createReferencesProvider({
+      sessionId: 'one',
+      getSessions: () => [agentSession({ id: 'ms-ottis', teammate: 'ottis' })],
+      getTasks: () =>
+        Array.from({ length: 20 }, (_, index) => ({
+          id: `F${index + 1}`,
+          title: `Task ${index + 1}`,
+          status: 'todo' as const,
+        })),
+      getAttentionItems: () =>
+        Array.from({ length: 20 }, (_, index) => ({
+          id: `A${index + 1}`,
+          subject: `Attention ${index + 1}`,
+          source: 'question',
+        })),
+    });
+
+    const result = await provider.candidates(context('@', ''));
+    const visible = rankComposerCandidates(result.candidates, '');
+    expect(visible).toHaveLength(20);
+    expect([...new Set(visible.map(candidate => candidate.group))]).toEqual(['Agents', 'Tasks', 'Attention']);
+    expect(result.notice).toContain('Files unavailable');
   });
 });
 
