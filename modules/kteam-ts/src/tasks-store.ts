@@ -34,6 +34,7 @@ import { existsSync } from 'fs';
 import path from 'path';
 import type { KTeamPaths } from './paths';
 import { atomicJson, now } from './io';
+import { taskTitleIssue } from './task-title';
 import {
   MAX_TASK_DESCRIPTION_LEN,
   MAX_TASK_CLARIFICATIONS,
@@ -433,7 +434,10 @@ function capped(label: string, text: string, max: number): string {
 export function validateTaskTitle(value: unknown): string {
   const title = nonEmpty(value);
   if (title === null) throw new TaskError('invalid', 'title is required');
-  return capped('title', title, MAX_TASK_TITLE_LEN);
+  const cappedTitle = capped('title', title, MAX_TASK_TITLE_LEN);
+  const issue = taskTitleIssue(cappedTitle);
+  if (issue !== null) throw new TaskError('invalid', issue);
+  return cappedTitle;
 }
 
 /** The brief. Empty is allowed (a placeholder row); over-cap is refused. */

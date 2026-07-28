@@ -9,6 +9,7 @@ import {
   computeTaskBlocking,
   dependencySatisfied,
   inferTaskWorkflow,
+  taskBoardLaneFromPhase,
   taskDependents,
   taskPhaseFromStatus,
   taskStatusFromPhase,
@@ -85,6 +86,14 @@ describe('status ↔ phase mapping is a stable round-trip', () => {
     expect(taskPhaseFromStatus('blocked')).toBe('todo');
   });
 
+  test('the board folds active workflow checkpoints into one lane without changing the phase model', () => {
+    expect(taskBoardLaneFromPhase('research')).toBe('in_progress');
+    expect(taskBoardLaneFromPhase('design')).toBe('in_progress');
+    expect(taskBoardLaneFromPhase('build')).toBe('in_progress');
+    expect(taskBoardLaneFromPhase('todo')).toBe('todo');
+    expect(taskBoardLaneFromPhase('built')).toBe('built');
+  });
+
   test('workflow inference is best-effort from a parsed phase', () => {
     expect(inferTaskWorkflow('research')).toBe('investigate');
     expect(inferTaskWorkflow('done')).toBe('investigate');
@@ -126,6 +135,7 @@ describe('phase transitions are adjacent-only', () => {
     expect(() => assertTaskPhaseTransition(t, 'build', false)).not.toThrow();
     // skipping built is a two-step jump
     expect(() => assertTaskPhaseTransition(t, 'built', false)).toThrow('cannot move todo → built');
+    expect(() => assertTaskPhaseTransition(t, 'live', false)).toThrow('expected build (in_progress on board)');
     // build → built is the next adjacent step and needs no human (not a gate)
     expect(() =>
       assertTaskPhaseTransition(task({ phase: 'build', status: 'in_progress' }), 'built', false),
@@ -164,11 +174,13 @@ describe('research and design are human approval gates', () => {
     // research → design: an agent is refused, a human is allowed
     const inResearch = task({ ...rf, phase: 'research', status: 'researched' });
     expect(() => assertTaskPhaseTransition(inResearch, 'design', false)).toThrow('until the human approves');
+    expect(() => assertTaskPhaseTransition(inResearch, 'design', false)).toThrow('research (in_progress on board)');
     expect(() => assertTaskPhaseTransition(inResearch, 'design', false)).toThrow(TaskError);
     expect(() => assertTaskPhaseTransition(inResearch, 'design', true)).not.toThrow();
     // design → build: same gate on exit
     const inDesign = task({ ...rf, phase: 'design', status: 'designed' });
     expect(() => assertTaskPhaseTransition(inDesign, 'build', false)).toThrow('until the human approves');
+    expect(() => assertTaskPhaseTransition(inDesign, 'build', false)).toThrow('design (in_progress on board)');
     expect(() => assertTaskPhaseTransition(inDesign, 'build', true)).not.toThrow();
   });
 
@@ -336,6 +348,21 @@ describe('approval blocking is separate from dependency blocking', () => {
     expect(result.blocked).toBe(true);
     expect(result.blockedReason).toBe('needs an API key from the user');
     expect(result.blockedBy).toEqual([]);
+  });
+
+  test('an explicit manual block stays human-facing even when a dependency is also unmet', () => {
+    const held = task({
+      id: 'F2',
+      status: 'blocked',
+      statusReason: 'choose the production region',
+      dependsOn: ['F1'],
+    });
+    const result = computeTaskBlocking(held, [], [held, task({ id: 'F1', phase: 'build' })]);
+    expect(result).toMatchObject({
+      blocked: true,
+      blockedReason: 'choose the production region',
+      blockedBy: [],
+    });
   });
 
   test('withTaskBlocking merges the derived blocker onto the view', () => {

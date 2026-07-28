@@ -21,6 +21,7 @@
 //    mutations (see tasks-api.ts for the at-most-once contract that pairs with it).
 
 import {
+  TASK_BOARD_LANES,
   TASK_KINDS,
   TASK_LINK_FIELDS,
   TASK_PHASES,
@@ -40,11 +41,13 @@ import {
 } from './tasks-types';
 import { normalizeTaskId } from './tasks-store';
 import { TASK_STALENESS_COPY, TASK_STATUS_LABEL, renderTaskBoardMd, renderTaskMd } from './tasks-contract';
-import { taskPhaseFromStatus } from './tasks-workflow';
+import { taskBoardLaneFromPhase, taskPhaseFromStatus } from './tasks-workflow';
+import { TASK_TITLE_GUIDANCE, taskTitleIssue } from './task-title';
 
 export const TASK_CLI_USAGE = `kteam task <command>
 
   create --kind <${TASK_KINDS.join('|')}> --title <title>
+         ${TASK_TITLE_GUIDANCE}
          --ask <verbatim-human-words> --ask-source <message-link>
          [--workflow <${TASK_WORKFLOWS.join('|')}>] [--depends-on <#F12>]…
          [--file <path>]…
@@ -69,6 +72,7 @@ export const TASK_CLI_USAGE = `kteam task <command>
   list --all             fleet-wide aggregate READ
 
 Every status/phase action REQUIRES --reason; creating blocked or dropped does too.
+Research, design, and build remain audit phases but share the in_progress board lane.
 File claims are ADVISORY (never a lock); --reason on file is optional.`;
 
 export interface TaskCreateBody {
@@ -317,7 +321,10 @@ function parseCreate(flags: Map<string, string[]>, rest: readonly string[], sess
   // A bare `create --kind feature "Title"` is accepted as well as --title.
   const title = one(flags, 'title') ?? rest.join(' ');
   if (title.trim().length === 0) return invalid('--title is required');
-  const body: TaskCreateBody = { kind: kind as TaskKind, title: title.trim() };
+  const canonicalTitle = title.trim();
+  const titleIssue = taskTitleIssue(canonicalTitle);
+  if (titleIssue !== null) return invalid(titleIssue);
+  const body: TaskCreateBody = { kind: kind as TaskKind, title: canonicalTitle };
   const ask = one(flags, 'ask');
   const askSource = one(flags, 'ask-source');
   if (ask === undefined || ask.length === 0 || askSource === undefined || askSource.trim().length === 0) {
@@ -455,10 +462,11 @@ export function renderTaskListText(response: TaskListResponse): string {
     return a.id.localeCompare(b.id, undefined, { numeric: true });
   });
   const line = (task: TaskSummary): string => {
-    const stalled = task.blocked ? ` 🚧 ${task.blockedReason ?? 'blocked'}` : '';
+    const stalled = task.blocked ? ` 🚧 ${task.blockedReason ?? 'reason unavailable'}` : '';
     const stale = task.live.staleness === null ? '' : ` ⚠ ${task.live.staleness}`;
     const phase = task.phase ?? taskPhaseFromStatus(task.status);
-    return `${pad(taskReference(task.id), 6)} ${pad(phase, 9)} ${pad(task.assignee ?? '—', 12)} ${task.title}${stalled}${stale}`;
+    const primaryState = task.blocked ? 'BLOCKED' : taskBoardLaneFromPhase(phase).replace('_', ' ').toUpperCase();
+    return `${pad(taskReference(task.id), 6)} ${pad(primaryState, 11)} ${pad(task.assignee ?? '—', 12)} ${task.title}${stalled}${stale}`;
   };
   const attention = ordered.filter(task => task.blocked && (task.blockedBy ?? []).length === 0);
   if (attention.length > 0) {
@@ -491,12 +499,16 @@ const taskListTime = (value: string | null): number => {
 
 export function renderTaskKanbanText(response: TaskListResponse): string {
   const lines: string[] = [];
-  for (const phase of TASK_PHASES) {
-    const tasks = response.tasks.filter(task => (task.phase ?? taskPhaseFromStatus(task.status)) === phase);
+  for (const lane of TASK_BOARD_LANES) {
+    const tasks = response.tasks.filter(
+      task => taskBoardLaneFromPhase(task.phase ?? taskPhaseFromStatus(task.status)) === lane,
+    );
     if (tasks.length === 0) continue;
-    lines.push(`${phase.toUpperCase()} (${tasks.length})`);
+    lines.push(`${lane.replace('_', ' ').toUpperCase()} (${tasks.length})`);
     for (const task of tasks) {
-      lines.push(`  ${taskReference(task.id)} ${task.title}${task.blocked ? ` 🚧 ${task.blockedReason}` : ''}`);
+      lines.push(
+        `  ${taskReference(task.id)} ${task.blocked ? `BLOCKED 🚧 ${task.blockedReason ?? 'reason unavailable'} — ` : ''}${task.title}`,
+      );
     }
     lines.push('');
   }

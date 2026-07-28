@@ -20,7 +20,10 @@ export const MAX_AGENT_ATTENTION_PER_SESSION = 10;
 export const MAX_ATTENTION_RESOLUTIONS = 100;
 
 export const MAX_ATTENTION_SUBJECT_LEN = 240;
-export const MAX_ATTENTION_DETAIL_LEN = 2_000;
+// A valid blocked-task reason is at most 2,048 characters. Task-sourced
+// Attention must be able to carry that complete reason instead of rejecting
+// the very blocker it exists to surface.
+export const MAX_ATTENTION_DETAIL_LEN = 2_048;
 export const MAX_ATTENTION_SOURCE_REF_LEN = 512;
 
 /** `permission` is reserved for the source adapter, but the daemon does not

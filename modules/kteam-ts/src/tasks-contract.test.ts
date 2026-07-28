@@ -263,6 +263,15 @@ describe('create body parsing', () => {
     );
   });
 
+  test('direct API creation shares the five-word title rule and guidance', () => {
+    expect(parseTaskCreateBody({ kind: 'feature', title: 'One two three four five', ask: TEST_ASK }).title).toBe(
+      'One two three four five',
+    );
+    expect(() => parseTaskCreateBody({ kind: 'feature', title: 'One two three four five six', ask: TEST_ASK })).toThrow(
+      /6 words.*description/,
+    );
+  });
+
   test('workflow picks the sub-workflow at creation and refuses an unknown one', () => {
     expect(
       parseTaskCreateBody({ kind: 'feature', title: 'x', ask: TEST_ASK, workflow: 'research-first' }).workflow,
@@ -453,6 +462,20 @@ describe('markdown renders (a VIEW, never storage)', () => {
     ]);
     expect(md).toContain('⚠️ assignee-dead');
     expect(md).toContain('🔵 IN PROGRESS (2)');
+  });
+
+  test('the board folds research and design into in progress while detail keeps their audit phases', () => {
+    const md = renderTaskBoardMd([
+      summary({ id: 'F1', status: 'researched', phase: 'research' }),
+      summary({ id: 'F2', status: 'designed', phase: 'design' }),
+      summary({ id: 'F3', status: 'in_progress', phase: 'build' }),
+    ]);
+    expect(md).toContain('🔵 IN PROGRESS (3)');
+    expect(md).not.toContain('🟠 RESEARCHED');
+    expect(md).not.toContain('🟣 DESIGNED');
+    expect(renderTaskMd({ task: task({ status: 'researched', phase: 'research' }), activity: [] })).toContain(
+      'phase: research',
+    );
   });
 
   test('pipes in a title cannot break the table', () => {

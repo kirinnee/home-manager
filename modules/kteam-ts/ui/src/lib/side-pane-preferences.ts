@@ -15,9 +15,12 @@ export const SIDE_PANE_PREFERENCES_VERSION = 1;
 /** Absolute desktop bounds. The effective maximum is lower when necessary to
  * preserve SIDE_PANE_MIN_CHAT_WIDTH beside the pane. */
 export const SIDE_PANE_MIN_WIDTH = 320;
-export const SIDE_PANE_MAX_WIDTH = 760;
+export const SIDE_PANE_MAX_WIDTH = 1024;
 export const SIDE_PANE_DEFAULT_WIDTH = 520;
-export const SIDE_PANE_MIN_CHAT_WIDTH = 360;
+// The pane is the reader's active surface while open. Keep enough chat visible
+// for context and controls, but let a tablet/landscape reader pull the divider
+// materially farther left. Portrait phones use the full-width sheet instead.
+export const SIDE_PANE_MIN_CHAT_WIDTH = 280;
 export const SIDE_PANE_WORKSPACE_GAP = 8;
 
 export interface SidePanePreferences {

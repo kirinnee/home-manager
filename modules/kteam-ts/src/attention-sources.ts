@@ -152,6 +152,11 @@ export class AttentionSources {
   private readonly blocked = new Map<string, Set<string>>();
   /** Stable provider source-ref → per-session board anchor. */
   private readonly providerAnchors = new Map<string, string>();
+  /** Per-session task snapshots must reconcile in event order. File-backed
+   *  Attention mutations are async; without this chain, a fast unblock can
+   *  inspect the old empty blocker set while the preceding add is still in
+   *  flight, then leave that stale add active forever. */
+  private readonly taskReconciliations = new Map<string, Promise<void>>();
   private readonly queued: KTeamEvent[] = [];
   private unsubSessions: (() => void) | undefined;
   private unsubTasks: (() => void) | undefined;
@@ -264,7 +269,7 @@ export class AttentionSources {
     }
     const snapshot = await this.tasks.sessionTaskList(id).catch(() => null);
     if (snapshot) {
-      await this.applyTaskSnapshot(id, snapshot, { actor: 'daemon' }, canReconcile).catch(error =>
+      await this.reconcileTaskSnapshot(id, snapshot, { actor: 'daemon' }, canReconcile).catch(error =>
         this.report(id, 'task baseline', error),
       );
     }
@@ -284,7 +289,7 @@ export class AttentionSources {
     if (event.type === 'tasks.updated') {
       const snapshot = event.data as SessionTaskListResponse;
       if (snapshot && snapshot.sessionId === event.sessionId && Array.isArray(snapshot.tasks)) {
-        await this.applyTaskSnapshot(event.sessionId, snapshot, eventActor(event), true);
+        await this.reconcileTaskSnapshot(event.sessionId, snapshot, eventActor(event), true);
       }
       return;
     }
@@ -424,6 +429,24 @@ export class AttentionSources {
         .catch(error => this.report(sessionId, `task blocker ${task.id}`, error));
     }
     this.blocked.set(sessionId, current);
+  }
+
+  private async reconcileTaskSnapshot(
+    sessionId: string,
+    snapshot: SessionTaskListResponse,
+    actor: AttentionActor,
+    resolveDeparted: boolean,
+  ): Promise<void> {
+    const previous = this.taskReconciliations.get(sessionId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(() => this.applyTaskSnapshot(sessionId, snapshot, actor, resolveDeparted));
+    this.taskReconciliations.set(sessionId, next);
+    try {
+      await next;
+    } finally {
+      if (this.taskReconciliations.get(sessionId) === next) this.taskReconciliations.delete(sessionId);
+    }
   }
 
   private report(sessionId: string, operation: string, error: unknown): void {

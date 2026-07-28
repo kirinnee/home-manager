@@ -173,18 +173,38 @@ export class AttentionService {
     };
 
     const mutation = await this.store.mutateWithResult(sessionId, current => {
-      const duplicate = current.items.some(existing => {
-        if (sourceRef !== null) return existing.source === source && existing.sourceRef === sourceRef;
-        return (
+      if (sourceRef !== null) {
+        const existing = current.items.find(item => item.source === source && item.sourceRef === sourceRef);
+        if (existing) {
+          if (
+            sameText(existing.subject, subject) &&
+            sameText(existing.why, why) &&
+            sameText(existing.howToResolve, howToResolve)
+          ) {
+            return current;
+          }
+          // A stable source is one request whose explanation may evolve. Keep
+          // its id, original wait clock, and provenance while refreshing the
+          // human-facing decision context in place.
+          return {
+            ...current,
+            items: current.items.map(item =>
+              item.id === existing.id ? { ...item, subject, why, howToResolve } : item,
+            ),
+          };
+        }
+      }
+      const duplicate = current.items.some(
+        existing =>
+          sourceRef === null &&
           existing.source === source &&
           existing.sourceRef === null &&
           existing.raisedBy === provenance.by &&
           existing.raisedBySession === provenance.session &&
           sameText(existing.subject, subject) &&
           sameText(existing.why, why) &&
-          sameText(existing.howToResolve, howToResolve)
-        );
-      });
+          sameText(existing.howToResolve, howToResolve),
+      );
       if (duplicate) return current;
       if (current.nextId >= Number.MAX_SAFE_INTEGER) {
         throw new AttentionError('full', 'this session has exhausted its attention id sequence');

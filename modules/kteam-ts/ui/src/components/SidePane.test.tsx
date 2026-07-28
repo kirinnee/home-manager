@@ -20,11 +20,23 @@ import {
   SidePaneBento,
   SidePaneWorkspace,
   SIDE_PANE_SURFACES,
+  useSidePane,
   writeSidePaneState,
+  type SidePaneHost,
 } from './SidePane';
 import { browserDestination } from './InAppBrowser';
 
-afterEach(() => resetSidePaneStates());
+let capturedHost: SidePaneHost | null = null;
+
+function HostProbe() {
+  capturedHost = useSidePane();
+  return <span data-host-probe="ready" />;
+}
+
+afterEach(() => {
+  resetSidePaneStates();
+  capturedHost = null;
+});
 
 describe('per-session memory', () => {
   test('remembers the open surface per session id and never across ids', () => {
@@ -80,6 +92,16 @@ describe('retention policy', () => {
   });
 });
 
+test('the host exposes the same cwd used by Files and task/pin prose', async () => {
+  const source = await Bun.file(new URL('./SidePane.tsx', import.meta.url)).text();
+  expect(source).toContain('surface: state.surface, cwd, open');
+  expect(source).toContain('<SessionTasksSurface');
+  expect(source).toContain('cwd={cwd}');
+  expect(source).toContain('<PinSurface');
+  expect(source).toContain('onTaskOpen={onTaskOpen}');
+  expect(source).toContain('onCodeReferenceOpen={onCodeReferenceOpen}');
+});
+
 describe('tool bento', () => {
   test('renders the exact registry, including an honestly unavailable MCP entry', () => {
     const html = renderToStaticMarkup(
@@ -91,6 +113,8 @@ describe('tool bento', () => {
           open: () => undefined,
           close: () => undefined,
           toggle: () => undefined,
+          openTask: () => undefined,
+          openCodeReference: () => undefined,
         }}
         onSelect={() => undefined}
         badges={{ pins: 3, attention: 2 }}
@@ -115,7 +139,7 @@ describe('desktop pane shell', () => {
     expect(html).toContain('aria-labelledby="side-pane-title"');
     expect(html).toContain('width:520px');
     expect(html).toContain('min-width:320px');
-    expect(html).toContain('max-width:min(760px, calc(100% - 368px))');
+    expect(html).toContain('max-width:min(1024px, calc(100% - 288px))');
     expect(html).toContain('role="separator"');
     expect(html).toContain('aria-label="Resize session side pane"');
     expect(html).not.toContain('aria-modal');
@@ -135,6 +159,26 @@ describe('desktop pane shell', () => {
 });
 
 describe('workspace', () => {
+  test('publishes task and code-reference openers from the same atomic host', () => {
+    const html = renderToStaticMarkup(
+      <SidePaneWorkspace sessionId="session-a" compact={false}>
+        <HostProbe />
+      </SidePaneWorkspace>,
+    );
+    expect(html).toContain('data-host-probe="ready"');
+    expect(capturedHost).not.toBeNull();
+    expect(typeof capturedHost?.openTask).toBe('function');
+    expect(typeof capturedHost?.openCodeReference).toBe('function');
+  });
+
+  test('code-reference delivery stays monotonic and clears only the handled sequence', async () => {
+    const source = await Bun.file(new URL('./SidePane.tsx', import.meta.url)).text();
+    expect(source).toContain('const codeReferenceSequence = useRef(0);');
+    expect(source).toContain('sequence: ++codeReferenceSequence.current');
+    expect(source).toContain('requestedReference={requestedCodeReference}');
+    expect(source).toContain('current?.sequence === sequence ? null : current');
+  });
+
   test('desktop keeps the conversation rendered beside an open surface and steals no focus', () => {
     writeSidePaneState('session-a', { surface: 'tasks', browser: null });
     const html = renderToStaticMarkup(

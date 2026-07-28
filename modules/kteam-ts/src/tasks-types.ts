@@ -88,6 +88,13 @@ export const TASK_PHASES: readonly TaskPhase[] = [
   'dropped',
 ];
 
+/** Human-facing board lanes. Workflow checkpoints remain in `TaskPhase` for
+ * audit and transition policy, while research/design/build share the one
+ * active-work lane the reader uses to scan the board. */
+export type TaskBoardLane = 'todo' | 'in_progress' | 'built' | 'live' | 'done' | 'dropped';
+
+export const TASK_BOARD_LANES: readonly TaskBoardLane[] = ['todo', 'in_progress', 'built', 'live', 'done', 'dropped'];
+
 export type TaskWorkflow = 'quick' | 'design-first' | 'research-first' | 'investigate';
 
 export const TASK_WORKFLOWS: readonly TaskWorkflow[] = ['quick', 'design-first', 'research-first', 'investigate'];
@@ -101,8 +108,8 @@ export const TASK_WORKFLOW_PATHS: Readonly<Record<TaskWorkflow, readonly TaskPha
   investigate: ['todo', 'research', 'done'],
 };
 
-/** Board display order (design §7): shipped work first, the things needing a
- *  human last-but-loudest (`blocked` gets its own pinned strip in the UI). */
+/** Stable list/markdown priority: shipped work first, the things needing a
+ *  human last-but-loudest (`blocked` gets its own pinned strip). */
 export const TASK_BOARD_ORDER: readonly TaskStatus[] = [
   'live',
   'done',
@@ -286,6 +293,11 @@ export type TaskStaleness = 'assignee-dead' | 'maybe-finished' | 'quiet';
 /** DERIVED at read time from session state. Never written to disk, never allowed
  *  to change `Task.status`. */
 export interface TaskLive {
+  /** Canonical read-time identity of the resolved assignee session. The stored
+   * assignee remains untouched as historical attribution. */
+  assigneeSessionId?: string | null;
+  /** Human-facing teammate/session name resolved from the live fleet. */
+  assigneeName?: string | null;
   /** The assignee session's SessionStatus, or null when there is no assignee or
    *  it no longer resolves to a session. */
   assigneeStatus: string | null;
@@ -303,6 +315,8 @@ export interface TaskLive {
  *  annotator (an `in_progress` task whose assignee vanished IS `assignee-dead`);
  *  this is only the neutral starting point. */
 export const unknownTaskLive = (): TaskLive => ({
+  assigneeSessionId: null,
+  assigneeName: null,
   assigneeStatus: null,
   assigneeHealth: null,
   assigneeDoneMarker: false,

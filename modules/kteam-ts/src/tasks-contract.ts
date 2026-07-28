@@ -40,7 +40,8 @@ import {
 } from './tasks-types';
 import { normalizeTaskId } from './tasks-store';
 import { isSafeTaskSessionId } from './session-tasks-store';
-import { taskPhaseFromStatus } from './tasks-workflow';
+import { taskBoardLaneFromPhase, taskPhaseFromStatus } from './tasks-workflow';
+import { taskTitleIssue } from './task-title';
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -208,6 +209,8 @@ export function parseTaskCreateBody(body: unknown): TaskCreateInput {
   if (typeof kind !== 'string') throw new TaskError('invalid', `kind is required (${TASK_KINDS.join(', ')})`);
   const title = raw['title'];
   if (typeof title !== 'string') throw new TaskError('invalid', 'title is required');
+  const titleIssue = taskTitleIssue(title);
+  if (titleIssue !== null) throw new TaskError('invalid', titleIssue);
   const linksRaw = raw['links'];
   const input: TaskCreateInput = {
     kind: kind as TaskKind,
@@ -432,8 +435,9 @@ const cell = (value: string | null | undefined): string => (value ?? '').replace
 
 /** Render summaries as the old STATUS-BOARD table: the blocked strip first
  *  (design §7 — "What I need from you" is what the user acts on), then one
- *  section per status in board order. This is `kteam task list --md`, an escape
- *  hatch and a terminal view, NEVER written back to a file. */
+ *  section per human-facing board lane. Research/design/build retain their raw
+ *  phase in detail/history but share IN PROGRESS here. This is a view, NEVER
+ *  written back to a file. */
 export function renderTaskBoardMd(tasks: readonly TaskSummary[]): string {
   const lines: string[] = ['# Tasks', ''];
   const blocked = tasks.filter(task => task.blocked);
@@ -446,8 +450,15 @@ export function renderTaskBoardMd(tasks: readonly TaskSummary[]): string {
     lines.push('');
   }
   for (const status of TASK_BOARD_ORDER) {
-    if (status === 'blocked') continue; // already shown, loudly, at the top
-    const rows = tasks.filter(task => task.status === status && !blockedIds.has(task.id));
+    if (status === 'blocked' || status === 'researched' || status === 'designed') continue;
+    const rows = tasks.filter(
+      task =>
+        !blockedIds.has(task.id) &&
+        // Declared status is authoritative for non-blocked records. This also
+        // keeps a compatibility caller's contradictory legacy phase from
+        // making otherwise-readable work disappear from the board.
+        taskBoardLaneFromPhase(taskPhaseFromStatus(task.status)) === status,
+    );
     if (rows.length === 0) continue;
     lines.push(
       `## ${TASK_STATUS_LABEL[status]} (${rows.length})`,

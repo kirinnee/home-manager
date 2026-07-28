@@ -11,10 +11,12 @@ export const TASK_STATUSES = [
   'dropped',
 ] as const;
 export const TASK_PHASES = ['todo', 'research', 'design', 'build', 'built', 'live', 'done', 'dropped'] as const;
+export const TASK_BOARD_LANES = ['todo', 'in_progress', 'built', 'live', 'done', 'dropped'] as const;
 export const TASK_WORKFLOWS = ['quick', 'design-first', 'research-first', 'investigate'] as const;
 
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 export type TaskPhase = (typeof TASK_PHASES)[number];
+export type TaskBoardLane = (typeof TASK_BOARD_LANES)[number];
 export type TaskWorkflow = (typeof TASK_WORKFLOWS)[number];
 export type TaskKind = 'bug' | 'feature' | 'infra' | 'chore';
 export type TaskStaleness = 'assignee-dead' | 'maybe-finished' | 'quiet';
@@ -27,6 +29,8 @@ export interface TaskLinks {
   docs: string[];
 }
 export interface TaskLive {
+  assigneeSessionId?: string | null;
+  assigneeName?: string | null;
   assigneeStatus: string | null;
   assigneeHealth: TaskHealth | null;
   assigneeDoneMarker: boolean;
@@ -64,6 +68,9 @@ export interface TaskSummary {
   askChars: number;
   askSource: string | null;
   clarificationCount: number;
+  /** A session id means agent-created; null means human-created; omission is a
+   * legacy record whose provenance cannot be proved. */
+  createdBy?: string | null;
   /** Owning storage session. Aggregate `/v1/tasks` rows carry it; `null` names a
    *  legacy-unassigned record. Session-scoped reads leave it null harmlessly. */
   sessionId: string | null;
@@ -119,6 +126,8 @@ const ACTIVITY_SET = new Set<TaskActivityType>([
 
 const emptyLinks = (): TaskLinks => ({ prs: [], branch: null, commits: [], docs: [] });
 const emptyLive = (): TaskLive => ({
+  assigneeSessionId: null,
+  assigneeName: null,
   assigneeStatus: null,
   assigneeHealth: null,
   assigneeDoneMarker: false,
@@ -172,6 +181,8 @@ export function parseTaskLive(value: unknown): TaskLive {
   if (!raw) return emptyLive();
   const staleness = raw['staleness'];
   return {
+    assigneeSessionId: text(raw['assigneeSessionId']),
+    assigneeName: text(raw['assigneeName']),
     assigneeStatus: text(raw['assigneeStatus']),
     assigneeHealth: ['active', 'waiting', 'dead', 'unknown'].includes(String(raw['assigneeHealth']))
       ? (raw['assigneeHealth'] as TaskHealth)
@@ -223,6 +234,7 @@ export function parseTaskSummary(value: unknown): TaskSummary | null {
   const blockedBy = strings(raw['blockedBy']);
   const blocked = raw['blocked'] === true || status === 'blocked';
   const kind = raw['kind'];
+  const createdBy = raw['createdBy'] === null ? null : text(raw['createdBy']);
   return {
     id,
     title,
@@ -248,6 +260,7 @@ export function parseTaskSummary(value: unknown): TaskSummary | null {
       typeof raw['clarificationCount'] === 'number' && raw['clarificationCount'] >= 0
         ? raw['clarificationCount']
         : parseClarifications(raw['clarifications']).length,
+    ...(createdBy !== null || raw['createdBy'] === null ? { createdBy } : {}),
     sessionId: text(raw['sessionId']),
     files: strings(raw['files']),
     live: parseTaskLive(raw['live']),
@@ -325,6 +338,17 @@ export const TASK_PHASE_META: Record<TaskPhase, { label: string; tone: 'ok' | 'w
   research: { label: 'Research', tone: 'warn' },
   design: { label: 'Design', tone: 'accent' },
   build: { label: 'Build', tone: 'warn' },
+  built: { label: 'Built', tone: 'accent' },
+  live: { label: 'Live', tone: 'ok' },
+  done: { label: 'Done', tone: 'ok' },
+  dropped: { label: 'Dropped', tone: 'err' },
+};
+export const TASK_BOARD_LANE_META: Record<
+  TaskBoardLane,
+  { label: string; tone: 'ok' | 'warn' | 'err' | 'pend' | 'accent' }
+> = {
+  todo: { label: 'To do', tone: 'pend' },
+  in_progress: { label: 'In progress', tone: 'warn' },
   built: { label: 'Built', tone: 'accent' },
   live: { label: 'Live', tone: 'ok' },
   done: { label: 'Done', tone: 'ok' },
@@ -419,10 +443,25 @@ export function sortTasksForList(tasks: readonly TaskSummary[]): TaskSummary[] {
     return aOrder - bOrder || a.id.localeCompare(b.id);
   });
 }
+/** Presentation-only collapse: raw workflow phases remain on every record and
+ * in activity history, while active work scans as one board lane. */
+export function taskBoardLane(phase: TaskPhase): TaskBoardLane {
+  if (phase === 'research' || phase === 'design' || phase === 'build') return 'in_progress';
+  return phase;
+}
+export function groupTasksByBoardLane(
+  tasks: readonly TaskSummary[],
+): Array<{ lane: TaskBoardLane; tasks: TaskSummary[] }> {
+  return TASK_BOARD_LANES.map(lane => ({
+    lane,
+    tasks: sortTasksForList(tasks.filter(task => taskBoardLane(task.phase) === lane)),
+  }));
+}
+/** Raw audit-phase projection retained for non-board consumers. */
 export function groupTasksByPhase(tasks: readonly TaskSummary[]): Array<{ phase: TaskPhase; tasks: TaskSummary[] }> {
   return TASK_PHASES.map(phase => ({ phase, tasks: sortTasksForList(tasks.filter(task => task.phase === phase)) }));
 }
-/** Legacy named export retained for consumers while the grouping axis is phase. */
+/** Legacy named export retains its original raw-phase shape. */
 export const groupTasks = groupTasksByPhase;
 
 /** Rows owned by one session, derived from the single fleet array. The List and

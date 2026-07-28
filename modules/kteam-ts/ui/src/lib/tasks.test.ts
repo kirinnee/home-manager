@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildTaskDag,
   computeFileConflicts,
+  groupTasksByBoardLane,
   groupTasksByPhase,
   parseTaskActivity,
   parseTaskList,
@@ -37,13 +38,23 @@ const raw = {
 
 describe('task-v2 UI parsing', () => {
   test('keeps v2 summary fields while dropping malformed and duplicate records', () => {
-    const tasks = parseTaskList([raw, { ...raw, title: 'duplicate' }, { id: 'x', title: '', status: 'todo' }]);
+    const tasks = parseTaskList([
+      {
+        ...raw,
+        createdBy: 'ms-agent-12345678',
+        live: { ...raw.live, assigneeSessionId: 'ms-live-12345678', assigneeName: 'ines' },
+      },
+      { ...raw, title: 'duplicate' },
+      { id: 'x', title: '', status: 'todo' },
+    ]);
     expect(tasks).toHaveLength(1);
     expect(tasks[0]).toMatchObject({
       phase: 'build',
       workflow: 'research-first',
       dependsOn: ['B2'],
       blockedBy: ['B2'],
+      createdBy: 'ms-agent-12345678',
+      live: { assigneeSessionId: 'ms-live-12345678', assigneeName: 'ines' },
     });
   });
   test('parses ask, clarifications, and the new activity types defensively', () => {
@@ -114,7 +125,7 @@ describe('task-v2 UI parsing', () => {
 });
 
 describe('task-v2 pure projections', () => {
-  test('uses one id set while list puts oldest blocked/stalled work first and kanban groups by phase', () => {
+  test('uses one id set while list prioritises blockers and kanban collapses active workflow phases', () => {
     const tasks = parseTaskList([
       { ...raw, id: 'F1', blockedSince: '2026-07-24T00:00:00.000Z' },
       { ...raw, id: 'B2', status: 'researched', phase: 'research', blockedSince: '2026-07-19T00:00:00.000Z' },
@@ -131,8 +142,15 @@ describe('task-v2 pure projections', () => {
       },
     ]);
     expect(sortTasksForList(tasks).map(task => task.id)).toEqual(['B2', 'F1', 'C3']);
-    const columns = groupTasksByPhase(tasks);
-    expect(columns.find(column => column.phase === 'research')?.tasks.map(task => task.id)).toEqual(['B2']);
+    const columns = groupTasksByBoardLane(tasks);
+    expect(columns.find(column => column.lane === 'in_progress')?.tasks.map(task => task.id)).toEqual(['B2', 'F1']);
+    expect(columns.some(column => (column.lane as string) === 'research')).toBe(false);
+    expect(columns.some(column => (column.lane as string) === 'design')).toBe(false);
+    expect(
+      groupTasksByPhase(tasks)
+        .find(column => column.phase === 'research')
+        ?.tasks.map(task => task.id),
+    ).toEqual(['B2']);
     expect(
       columns
         .flatMap(column => column.tasks)
@@ -172,6 +190,8 @@ describe('fleet-record parser defaults and the status/phase invariant', () => {
     const bare = parseTaskSummary({ id: 'F1', title: 'x', status: 'todo' });
     expect(bare?.sessionId).toBeNull();
     expect(bare?.files).toEqual([]);
+    expect(bare).not.toHaveProperty('createdBy');
+    expect(parseTaskSummary({ id: 'F0', title: 'human', status: 'todo', createdBy: null })?.createdBy).toBeNull();
     const scoped = parseTaskSummary({
       id: 'F2',
       title: 'x',

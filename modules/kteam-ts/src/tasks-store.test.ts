@@ -181,6 +181,13 @@ describe('v2 fields parse additively and round-trip exactly', () => {
     expect(parsed?.ask).toEqual({ text: 'the old brief', source: 'legacy:F1' });
   });
 
+  test('creation enforces five words without rejecting a legacy stored title', () => {
+    expect(validateTaskTitle('One two three four five')).toBe('One two three four five');
+    expect(() => validateTaskTitle('One two three four five six')).toThrow(/6 words.*description/);
+    const legacyTitle = 'A deliberately long existing task title remains available';
+    expect(parseTaskRecord({ ...record(), title: legacyTitle })?.title).toBe(legacyTitle);
+  });
+
   test('v1 inference walks status → phase → workflow for the other lanes', () => {
     expect(parseTaskRecord({ ...record(), phase: undefined, workflow: undefined, status: 'designed' })?.phase).toBe(
       'design',
