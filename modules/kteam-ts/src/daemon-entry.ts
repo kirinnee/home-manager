@@ -14,6 +14,7 @@ import { TaskService } from './tasks';
 import { TaskApi } from './tasks-api';
 import { AnalyticsIndex } from './analytics-index';
 import { loadDaemonSecretsEnvironment } from './daemon-secrets';
+import { PushService } from './push-service';
 
 const secretsStatus = loadDaemonSecretsEnvironment();
 if (secretsStatus === 'failed') {
@@ -102,6 +103,7 @@ const pinApi = new PinApi(
   }),
 );
 const stt = createSttService({ paths });
+const pushService = await PushService.create(paths, manager);
 let analytics: AnalyticsIndex | undefined;
 // Keep the bind ahead of analytics cold materialization. On a missing index,
 // session/event rows are folded by SQLite after the API is already reachable;
@@ -116,11 +118,13 @@ const apiOptions = {
   stt,
   tasks: taskApi,
   pins: pinApi,
+  push: pushService.api,
   analytics,
 };
 // Retry EADDRINUSE: a dying predecessor (service-manager restart) can hold the
 // port for seconds while it drains; give it up to 30 s before failing.
 const server = await bindWithRetry(() => startApiServer(apiOptions)).catch(async error => {
+  await pushService.close();
   await Promise.allSettled([manager.close(), stt.close()]);
   throw error;
 });
@@ -148,7 +152,13 @@ const stop = async (reason: string) => {
   // and a shutdown that outlives the service manager's timeout is SIGKILLed
   // mid-write. Give the drain a deadline and exit cleanly either way.
   const drained = await Promise.race([
-    Promise.all([manager.close(), stt.close(), ...(analytics ? [analytics.close()] : [])]).then(() => true),
+    (async () => {
+      // Stop accepting status events before the manager closes; then drain any
+      // already-encrypted outbound attempts within the shared grace period.
+      await pushService.close();
+      await Promise.all([manager.close(), stt.close(), ...(analytics ? [analytics.close()] : [])]);
+      return true;
+    })(),
     Bun.sleep(SHUTDOWN_GRACE_MS).then(() => false),
   ]).catch(error => {
     console.error(`kteamd: shutdown drain failed: ${String(error)}`);
