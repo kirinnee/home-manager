@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   BrowseList,
@@ -39,6 +40,157 @@ const entry = (over: Partial<FsEntry> & { name: string }): FsEntry => ({ type: '
  *  not survive editors and formatters reliably, and these bytes ARE the test. */
 const BACKSLASH = String.fromCharCode(92);
 const NEWLINE = String.fromCharCode(10);
+
+type ElementLike = { type?: unknown; props?: Record<string, unknown> };
+type Effect = { deps: readonly unknown[] | undefined; create: () => void | (() => void); cleanup?: () => void };
+
+function visit(node: unknown, predicate: (element: ElementLike) => boolean): ElementLike | undefined {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const match = visit(child, predicate);
+      if (match) return match;
+    }
+    return undefined;
+  }
+  if (!node || typeof node !== 'object') return undefined;
+  const element = node as ElementLike;
+  if (predicate(element)) return element;
+  return visit(element.props?.children, predicate);
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function flush(times = 12): Promise<void> {
+  for (let index = 0; index < times; index += 1) await Promise.resolve();
+}
+
+const reactInternals = (
+  React as unknown as {
+    __CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE: { H: unknown };
+  }
+).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+
+/** The UI suite deliberately has no DOM dependency. This is the same small
+ *  hook harness used by the browser/terminal lifecycle suites: it mounts the
+ *  shipping FilesTab function, runs effects, and lets the test drive the real
+ *  callbacks while async fetches resolve in controlled order. */
+class HookHarness {
+  private slots: unknown[] = [];
+  private effects = new Map<number, Effect>();
+  private pendingEffects: number[] = [];
+  private index = 0;
+  private queued = false;
+  private tree: unknown;
+  private renderComponent: (() => unknown) | null = null;
+
+  constructor(private readonly assignRefs: (tree: unknown) => void) {}
+
+  useState<T>(initial: T): [T, React.Dispatch<React.SetStateAction<T>>] {
+    const index = this.index++;
+    if (!(index in this.slots)) this.slots[index] = initial;
+    const setState: React.Dispatch<React.SetStateAction<T>> = value => {
+      const current = this.slots[index] as T;
+      this.slots[index] = typeof value === 'function' ? (value as (previous: T) => T)(current) : value;
+      this.schedule();
+    };
+    return [this.slots[index] as T, setState];
+  }
+
+  useRef<T>(initial: T): React.RefObject<T> {
+    const index = this.index++;
+    if (!(index in this.slots)) this.slots[index] = { current: initial };
+    return this.slots[index] as React.RefObject<T>;
+  }
+
+  useMemo<T>(factory: () => T, deps: readonly unknown[]): T {
+    const index = this.index++;
+    const previous = this.slots[index] as { value: T; deps: readonly unknown[] } | undefined;
+    if (previous && deps.length === previous.deps.length && deps.every((value, i) => value === previous.deps[i]))
+      return previous.value;
+    const value = factory();
+    this.slots[index] = { value, deps };
+    return value;
+  }
+
+  useCallback<T extends (...args: never[]) => unknown>(callback: T, deps: readonly unknown[]): T {
+    return this.useMemo(() => callback, deps);
+  }
+
+  useEffect(create: () => void | (() => void), deps: readonly unknown[] | undefined): void {
+    const index = this.index++;
+    const previous = this.effects.get(index);
+    const changed =
+      !previous ||
+      !deps ||
+      !previous.deps ||
+      deps.length !== previous.deps.length ||
+      deps.some((value, i) => value !== previous.deps?.[i]);
+    this.effects.set(index, { deps, create, cleanup: previous?.cleanup });
+    if (changed) this.pendingEffects.push(index);
+  }
+
+  useSyncExternalStore<T>(getSnapshot: () => T): T {
+    this.index += 1;
+    const snapshot = getSnapshot();
+    // Exercise the keyboard-focus policy without inventing a viewport. This is
+    // the input-modality store's distinctive snapshot shape; fs-probe snapshots
+    // pass through unchanged.
+    if (snapshot && typeof snapshot === 'object' && 'touchAffected' in snapshot)
+      return { ...(snapshot as object), touchAffected: false } as T;
+    return snapshot;
+  }
+
+  render(renderComponent: () => unknown): void {
+    this.renderComponent = renderComponent;
+    this.index = 0;
+    this.pendingEffects = [];
+    const previousDispatcher = reactInternals.H;
+    reactInternals.H = {
+      useState: <T,>(initial: T) => this.useState(initial),
+      useRef: <T,>(initial: T) => this.useRef(initial),
+      useMemo: <T,>(factory: () => T, deps: readonly unknown[]) => this.useMemo(factory, deps),
+      useCallback: <T extends (...args: never[]) => unknown>(callback: T, deps: readonly unknown[]) =>
+        this.useCallback(callback, deps),
+      useEffect: (create: () => void | (() => void), deps?: readonly unknown[]) => this.useEffect(create, deps),
+      useSyncExternalStore: <T,>(_subscribe: unknown, getSnapshot: () => T) => this.useSyncExternalStore(getSnapshot),
+    };
+    try {
+      this.tree = renderComponent();
+    } finally {
+      reactInternals.H = previousDispatcher;
+    }
+    this.assignRefs(this.tree);
+    for (const index of this.pendingEffects) {
+      const effect = this.effects.get(index)!;
+      effect.cleanup?.();
+      effect.cleanup = effect.create() || undefined;
+    }
+  }
+
+  get output(): unknown {
+    return this.tree;
+  }
+
+  unmount(): void {
+    this.renderComponent = null;
+    for (const effect of this.effects.values()) effect.cleanup?.();
+  }
+
+  private schedule(): void {
+    if (this.queued) return;
+    this.queued = true;
+    queueMicrotask(() => {
+      this.queued = false;
+      if (this.renderComponent) this.render(this.renderComponent);
+    });
+  }
+}
 
 describe('change indicators', () => {
   test('a dot plus exact green/red counts replaces the separate changes row', () => {
@@ -361,23 +513,166 @@ describe('the tab shell', () => {
     expect(html).not.toContain('truncated');
   });
 
-  test('multiple open files are compact, independently closable tabs', () => {
+  test('same-basename files stay compact but have unambiguous path-based controls', () => {
     const html = renderToStaticMarkup(
       <OpenFileTabs
         tabs={[
-          { path: 'src/app.ts', view: 'normal' },
-          { path: 'README.md', view: 'raw' },
+          { path: 'src/index.ts', view: 'normal' },
+          { path: 'test/index.ts', view: 'raw' },
         ]}
-        activePath="src/app.ts"
+        activePath="src/index.ts"
         onActivate={() => {}}
         onClose={() => {}}
       />,
     );
     expect(html).toContain('aria-label="Open files"');
     expect(html).toContain('aria-pressed="true"');
-    expect(html).toContain('aria-label="Close app.ts"');
-    expect(html).toContain('aria-label="Close README.md"');
+    expect(html).toContain('aria-label="Show src/index.ts"');
+    expect(html).toContain('aria-label="Show test/index.ts"');
+    expect(html).toContain('aria-label="Close src/index.ts"');
+    expect(html).toContain('aria-label="Close test/index.ts"');
     // One activation + one close target per file.
     expect(html.match(/<button/g)).toHaveLength(4);
+  });
+
+  test('mounted tab state survives stale reads, view switches, activation, and both close positions', async () => {
+    const sessionId = 'ms2files-55555555';
+    await seedProbe(sessionId, { repo: true, changes: [] });
+
+    type PendingResponse = ReturnType<typeof deferred<Response>>;
+    const fileRequests = new Map<string, PendingResponse[]>();
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+
+    globalThis.fetch = (async input => {
+      const url = new URL(String(input), 'https://kteam.test');
+      if (url.pathname.endsWith('/fs/file')) {
+        const path = url.searchParams.get('path') ?? '';
+        const request = deferred<Response>();
+        fileRequests.set(path, [...(fileRequests.get(path) ?? []), request]);
+        return request.promise;
+      }
+      if (url.pathname.endsWith('/fs/diff')) {
+        return new Response('@@ -1 +1 @@\n-old\n+new\n', { headers: { 'content-type': 'text/plain' } });
+      }
+      if (url.pathname.endsWith('/fs')) {
+        return json({
+          entries: [
+            { name: 'src', type: 'dir' },
+            { name: 'test', type: 'dir' },
+          ],
+        });
+      }
+      throw new Error(`unexpected fetch ${url.pathname}`);
+    }) as typeof fetch;
+
+    let focusCalls = 0;
+    const pane = { focus: () => void (focusCalls += 1) };
+    const harness = new HookHarness(tree => {
+      const scroller = visit(tree, element => element.props?.tabIndex === -1);
+      const ref = scroller?.props?.ref as { current: unknown } | undefined;
+      if (ref) ref.current = pane;
+    });
+    const render = () => FilesTab({ sessionId, cwd: '/repo' });
+    const component = <P,>(type: unknown): P => {
+      const element = visit(harness.output, candidate => candidate.type === type);
+      expect(element).toBeDefined();
+      return element!.props as P;
+    };
+    const click = (label: string) => {
+      const button = visit(
+        harness.output,
+        element => element.type === 'button' && element.props?.['aria-label'] === label,
+      );
+      expect(button).toBeDefined();
+      (button!.props!.onClick as () => void)();
+    };
+    const resolveFile = (path: string, index: number, content: string) => {
+      const request = fileRequests.get(path)?.[index];
+      expect(request).toBeDefined();
+      request!.resolve(json({ path, content, lang: 'typescript' }));
+    };
+
+    try {
+      harness.render(render);
+      await flush();
+
+      component<{ onOpenFile: (path: string) => void }>(BrowseList).onOpenFile('src/index.ts');
+      await flush();
+      expect(focusCalls).toBe(1);
+
+      click('Back to the file list');
+      await flush();
+      component<{ onOpenFile: (path: string) => void }>(BrowseList).onOpenFile('test/index.ts');
+      await flush();
+      expect(focusCalls).toBe(2);
+
+      // The first file was superseded by the second. Resolving it late must not
+      // paint its bytes under the second file's title.
+      resolveFile('src/index.ts', 0, 'const stale = true;');
+      await flush();
+      expect(visit(harness.output, element => element.type === FileBody)).toBeUndefined();
+
+      resolveFile('test/index.ts', 0, 'const current = true;');
+      await flush();
+      expect(component<{ path: string }>(FileBody).path).toBe('test/index.ts');
+
+      click('Show raw bytes for test/index.ts');
+      await flush();
+      expect(
+        component<{ tabs: Array<{ path: string; view: string }> }>(OpenFileTabs).tabs.find(
+          tab => tab.path === 'test/index.ts',
+        )?.view,
+      ).toBe('raw');
+
+      click('Show git diff for test/index.ts');
+      await flush();
+      expect(
+        component<{ tabs: Array<{ path: string; view: string }> }>(OpenFileTabs).tabs.find(
+          tab => tab.path === 'test/index.ts',
+        )?.view,
+      ).toBe('diff');
+
+      const tabs = component<{
+        onActivate: (path: string) => void;
+        onClose: (path: string) => void;
+      }>(OpenFileTabs);
+      tabs.onActivate('src/index.ts');
+      await flush();
+      // Switching an existing tab preserves the reader's focus.
+      expect(focusCalls).toBe(2);
+      resolveFile('src/index.ts', 1, 'const fresh = true;');
+      await flush();
+      expect(component<{ path: string }>(FileBody).path).toBe('src/index.ts');
+
+      // Close the non-active, second-position tab: the active first tab stays.
+      component<{ onClose: (path: string) => void }>(OpenFileTabs).onClose('test/index.ts');
+      await flush();
+      expect(component<{ activePath: string; tabs: unknown[] }>(OpenFileTabs)).toMatchObject({
+        activePath: 'src/index.ts',
+        tabs: [{ path: 'src/index.ts' }],
+      });
+      expect(focusCalls).toBe(2);
+
+      // Re-open the second position, then close the active second and active
+      // first positions in turn. Each close affects only that file tab.
+      click('Back to the file list');
+      await flush();
+      component<{ onOpenFile: (path: string) => void }>(BrowseList).onOpenFile('test/index.ts');
+      await flush();
+      resolveFile('test/index.ts', 1, 'const reopened = true;');
+      await flush();
+      component<{ onClose: (path: string) => void }>(OpenFileTabs).onClose('test/index.ts');
+      await flush();
+      expect(component<{ activePath: string; tabs: unknown[] }>(OpenFileTabs)).toMatchObject({
+        activePath: 'src/index.ts',
+        tabs: [{ path: 'src/index.ts' }],
+      });
+      component<{ onClose: (path: string) => void }>(OpenFileTabs).onClose('src/index.ts');
+      await flush();
+      expect(visit(harness.output, element => element.type === OpenFileTabs)).toBeUndefined();
+    } finally {
+      harness.unmount();
+    }
   });
 });

@@ -50,16 +50,19 @@ export interface FsChange {
   status: string;
   /** Rename/copy origin. */
   from?: string;
+  /** Exact tracked line counts from the daemon's one cwd-wide numstat pass.
+   *  Binary and untracked files intentionally omit them. */
+  additions?: number;
+  deletions?: number;
 }
 
 export interface FsChanges {
   repo: boolean;
   branch?: string;
   changes: FsChange[];
-  /** git's own status output hit the daemon's byte cap, so this list is a
-   *  PREFIX of the real one. The tab has to say so: a silently short list reads
-   *  as "that is everything the agent touched", which is the one thing the
-   *  Changes pane exists to answer. */
+  /** git's own status output hit the daemon's byte cap, so inline markers are a
+   *  PREFIX of reality. The browser says so rather than silently presenting an
+   *  incomplete tree as clean. */
   truncated?: boolean;
 }
 
@@ -153,11 +156,11 @@ export function describeFsError(error: unknown): string {
   return String(error);
 }
 
-/* ---- capability probe + changes cache ------------------------------------
-   `fs/changes` is both the capability probe and the Changes list's data, so it
-   is fetched ONCE per session and shared: SessionChatPage reads it to decide
-   whether the Files tab exists at all, and the tab itself reads the same record
-   instead of issuing a second identical request on mount. */
+/* ---- capability probe + change-marker cache ------------------------------
+   `fs/changes` is both the capability probe and every listing row's marker
+   data, so it is fetched ONCE per session and shared: SessionChatPage reads it
+   to decide whether Files exists at all, and the browser consumes that same
+   record instead of issuing a git request per row. */
 
 export type FsProbeState = 'probing' | 'ready' | 'absent' | 'error';
 
@@ -195,7 +198,7 @@ function publish(record: ProbeRecord, next: Partial<FsProbeSnapshot>): void {
   for (const listener of record.listeners) listener();
 }
 
-/** Fetch (or re-fetch) the session's changes. Safe to call redundantly: a
+/** Fetch (or re-fetch) the session's change markers. Safe to call redundantly: a
  *  probe already in flight is not duplicated unless `force` says so. */
 export async function loadFsChanges(sessionId: string, force = false): Promise<void> {
   const record = recordFor(sessionId);

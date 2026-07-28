@@ -113,7 +113,7 @@ describe('relative paths never escape the session root', () => {
     ]);
   });
 
-  test('markdown detection drives the Rendered/Source affordance', () => {
+  test('markdown detection drives the default rendered file view', () => {
     expect(isMarkdownPath('docs/DESIGN.md')).toBe(true);
     expect(isMarkdownPath('a/b/notes.MDX')).toBe(true);
     expect(isMarkdownPath('src/markdown.ts')).toBe(false);

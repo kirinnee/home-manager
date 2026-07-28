@@ -176,7 +176,12 @@ function Failed({ what, error, onRetry }: { what: string; error: string; onRetry
       <span>
         Could not load {what}: {error}
       </span>
-      <button type="button" className="kt-btn kt-btn--sm" onClick={onRetry} aria-label={`Retry loading ${what}`}>
+      <button
+        type="button"
+        className="kt-btn kt-btn--sm kt-fs-retry"
+        onClick={onRetry}
+        aria-label={`Retry loading ${what}`}
+      >
         <RefreshCw size={13} aria-hidden="true" />
         Retry
       </button>
@@ -484,6 +489,7 @@ export function OpenFileTabs({
               type="button"
               className="kt-fs-tab-open"
               aria-pressed={active}
+              aria-label={`Show ${tab.path}`}
               onClick={() => onActivate(tab.path)}
               title={tab.path}
             >
@@ -494,7 +500,7 @@ export function OpenFileTabs({
               type="button"
               className="kt-fs-tab-close"
               onClick={() => onClose(tab.path)}
-              aria-label={`Close ${baseName(tab.path)}`}
+              aria-label={`Close ${tab.path}`}
               title={`Close ${tab.path}`}
             >
               <X size={14} aria-hidden="true" />
@@ -619,9 +625,7 @@ export function FilesTab({ sessionId, cwd }: Props) {
               data-active={rawActive || undefined}
               aria-pressed={rawActive}
               onClick={() => setActiveView(rawActive ? 'normal' : 'raw')}
-              aria-label={
-                rawActive ? `Show ${baseName(active.path)} normally` : `Show raw bytes for ${baseName(active.path)}`
-              }
+              aria-label={rawActive ? `Show ${active.path} normally` : `Show raw bytes for ${active.path}`}
               title={rawActive ? 'Show normally' : 'Show raw'}
             >
               <Code2 size={17} aria-hidden="true" />
@@ -634,9 +638,7 @@ export function FilesTab({ sessionId, cwd }: Props) {
               data-active={diffActive || undefined}
               aria-pressed={diffActive}
               onClick={() => setActiveView(diffActive ? 'normal' : 'diff')}
-              aria-label={
-                diffActive ? `Show ${baseName(active.path)} normally` : `Show git diff for ${baseName(active.path)}`
-              }
+              aria-label={diffActive ? `Show ${active.path} normally` : `Show git diff for ${active.path}`}
               title={diffActive ? 'Show file' : 'Show git diff'}
             >
               <GitCompareArrows size={17} aria-hidden="true" />

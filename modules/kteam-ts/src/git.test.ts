@@ -40,6 +40,10 @@ function statusOf(changes: { path: string; status: string }[], target: string): 
   return changes.find(change => change.path === target)?.status;
 }
 
+function changeOf<T extends { path: string }>(changes: T[], target: string): T | undefined {
+  return changes.find(change => change.path === target);
+}
+
 describe('gitRepoInfo', () => {
   let root: string;
 
@@ -104,6 +108,32 @@ describe('gitChanges', () => {
     expect(statusOf(view.changes, 'fresh.txt')).toBe('??');
   });
 
+  test('adds exact line counts with one cwd-wide stats pass', async () => {
+    await write(root, 'sub/edited.txt', 'two\nthree\n');
+    await write(root, 'staged.txt', 'alpha\nbeta\n');
+    await git(root, 'add', 'staged.txt');
+    await rm(path.join(root, 'top.txt'));
+    await write(root, 'fresh.txt', 'untracked\nlines\n');
+
+    const view = await gitChanges(root);
+    expect(changeOf(view.changes, 'sub/edited.txt')).toMatchObject({ additions: 2, deletions: 1 });
+    expect(changeOf(view.changes, 'staged.txt')).toMatchObject({ additions: 2, deletions: 0 });
+    expect(changeOf(view.changes, 'top.txt')).toMatchObject({ additions: 0, deletions: 1 });
+    // Git has no batched numstat for untracked files. The status/dot remains,
+    // but the API does not invent a line count or read every untracked file.
+    expect(changeOf(view.changes, 'fresh.txt')?.additions).toBeUndefined();
+    expect(changeOf(view.changes, 'fresh.txt')?.deletions).toBeUndefined();
+  });
+
+  test('numstat keeps tabs and newlines inside a literal filename', async () => {
+    const weird = 'sub/tab\tline\nname.txt';
+    await write(root, weird, 'one\ntwo\n');
+    await git(root, 'add', weird);
+
+    const change = changeOf((await gitChanges(root)).changes, weird);
+    expect(change).toMatchObject({ path: weird, status: 'A ', additions: 2, deletions: 0 });
+  });
+
   test('forces untracked reporting even when the repo config hides it', async () => {
     // This checkout sets status.showUntrackedFiles=no; the argv must override it
     // or the Changes list silently omits every new file the agent wrote.
@@ -148,6 +178,9 @@ describe('gitChanges', () => {
     const change = (await gitChanges(root)).changes.find(entry => entry.path === 'renamed.txt');
     expect(change?.status).toBe('R ');
     expect(change?.from).toBe('top.txt');
+    // The hardened stats pass disables rename detection, then folds its delete
+    // and add halves back onto this single status row.
+    expect(change).toMatchObject({ additions: 1, deletions: 1 });
   });
 
   test('parses a rename inside a subdir cwd relative to that cwd', async () => {
@@ -177,6 +210,7 @@ describe('gitChanges', () => {
       const view = await gitChanges(fresh);
       expect(view.repo).toBe(true);
       expect(statusOf(view.changes, 'a.txt')).toBe('A ');
+      expect(changeOf(view.changes, 'a.txt')).toMatchObject({ additions: 1, deletions: 0 });
     } finally {
       await rm(fresh, { recursive: true, force: true });
     }

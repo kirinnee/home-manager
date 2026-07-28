@@ -284,6 +284,11 @@ export interface GitChange {
   /** Rename/copy source, relative to the session cwd. Omitted when the source
    *  sits outside the cwd — reporting it would leak a sibling path. */
   from?: string;
+  /** Line counts from one batched `git diff --numstat` for the whole cwd.
+   *  Omitted when git cannot count the pair (binary/untracked) or the optional
+   *  stats pass fails; status remains the authoritative change signal. */
+  additions?: number;
+  deletions?: number;
 }
 
 export interface GitChangesView {
@@ -306,6 +311,59 @@ function parseBranchHeader(header: string): string | undefined {
 function underPrefix(repoPath: string, prefix: string): string | undefined {
   if (!prefix) return repoPath;
   return repoPath.startsWith(prefix) ? repoPath.slice(prefix.length) : undefined;
+}
+
+interface GitLineStats {
+  additions: number;
+  deletions: number;
+}
+
+/** Parse `--numstat -z` without ever treating a tab/newline in a filename as
+ *  structure. Rename detection is disabled by {@link DIFF_SAFETY}, so every
+ *  complete NUL record has exactly two numeric fields followed by one literal
+ *  path; binary pairs use `-` and intentionally receive no made-up count. */
+function parseNumstat(stdout: string, truncated: boolean): Map<string, GitLineStats> {
+  const records = stdout.split('\0');
+  if (truncated && !stdout.endsWith('\0')) records.pop();
+  const stats = new Map<string, GitLineStats>();
+  for (const record of records) {
+    if (!record) continue;
+    const firstTab = record.indexOf('\t');
+    const secondTab = firstTab < 0 ? -1 : record.indexOf('\t', firstTab + 1);
+    if (firstTab < 1 || secondTab < firstTab + 2) continue;
+    const addedText = record.slice(0, firstTab);
+    const deletedText = record.slice(firstTab + 1, secondTab);
+    const rel = record.slice(secondTab + 1);
+    if (!/^\d+$/.test(addedText) || !/^\d+$/.test(deletedText) || !rel) continue;
+    const additions = Number(addedText);
+    const deletions = Number(deletedText);
+    if (!Number.isSafeInteger(additions) || !Number.isSafeInteger(deletions)) continue;
+    stats.set(rel, { additions, deletions });
+  }
+  return stats;
+}
+
+/** One fixed-cost stats pass for every changed row — never one git spawn per
+ *  file. `--relative=<session prefix>` both filters siblings out at git and
+ *  rewrites the returned paths to the same cwd-relative namespace as status.
+ *
+ *  This is optional enrichment: a status list is still useful if numstat is
+ *  unavailable, so a non-zero stats command degrades to dot-only indicators
+ *  instead of taking the whole file browser down. */
+async function gitChangeLineStats(cwd: string, info: GitRepoInfo): Promise<Map<string, GitLineStats>> {
+  try {
+    const revision = info.hasHead ? 'HEAD' : EMPTY_TREE_OID;
+    const { result, stdout } = await runGitText(
+      [...DIFF_SAFETY, '--numstat', '-z', `--relative=${info.prefix}`, revision, '--'],
+      { cwd },
+    );
+    if (result.code !== 0) return new Map();
+    return parseNumstat(stdout, result.truncated);
+  } catch {
+    // Status already succeeded. Counts are optional metadata, so a timeout or
+    // spawn failure must not turn a readable directory into an error screen.
+    return new Map();
+  }
 }
 
 /**
@@ -362,6 +420,21 @@ export async function gitChanges(cwd: string): Promise<GitChangesView> {
     if (rel === undefined || rel === '') continue;
     const from = source === undefined ? undefined : underPrefix(source, info.prefix);
     changes.push({ path: rel, status, ...(from ? { from } : {}) });
+  }
+
+  // Untracked-only trees cannot appear in `git diff`, so avoid an empty spawn.
+  // Everything else is enriched by ONE cwd-wide numstat call. With rename
+  // detection disabled for security, a rename becomes a deletion at `from`
+  // plus an addition at `path`; fold both halves back onto its one status row.
+  if (changes.some(change => change.status !== '??' && change.status !== '!!')) {
+    const stats = await gitChangeLineStats(cwd, info);
+    for (const change of changes) {
+      const own = stats.get(change.path);
+      const source = /R/.test(change.status) && change.from ? stats.get(change.from) : undefined;
+      if (!own && !source) continue;
+      change.additions = (own?.additions ?? 0) + (source?.additions ?? 0);
+      change.deletions = (own?.deletions ?? 0) + (source?.deletions ?? 0);
+    }
   }
 
   return {
