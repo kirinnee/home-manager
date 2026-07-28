@@ -52,19 +52,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
-import {
-  ChartNoAxesCombined,
-  ChevronLeft,
-  FolderGit2,
-  ListTodo,
-  Pause,
-  Play,
-  StopCircle,
-  Users,
-  ZapOff,
-  MoreHorizontal,
-  Settings,
-} from 'lucide-react';
+import { ChevronLeft, Pause, Play, StopCircle, Users, ZapOff, MoreHorizontal, Settings } from 'lucide-react';
 import type { SessionView } from '../types';
 import { Button, ActionGroup } from './Primitives';
 import { displayCallsign } from '../lib/callsign';
@@ -80,8 +68,8 @@ import { PinSheet, PinsTrigger } from './PinSheet';
 import { usePinCount, useDeclareForeground } from '../hooks/usePins';
 import { AttentionSheet, AttentionTrigger } from './AttentionPanel';
 import { useAttentionCount } from '../hooks/useAttention';
-import { SidePaneTrigger, useSidePane } from './SidePane';
-import { fsTabAvailable, useFsProbe } from './files-api';
+import { SidePaneLauncher, useSidePane } from './SidePane';
+import { useFsProbe } from './files-api';
 
 const COMPACT_CALLSIGN_TITLE_RATIO = 0.6;
 
@@ -255,10 +243,11 @@ export const SessionHeader = memo(function SessionHeader({
   // replacing it; the legacy standalone PinSheet below remains only for
   // hostless callers.
   const sidePane = useSidePane();
-  // Files capability: same probe (and cached answer) that used to gate the
-  // center Files tab — an `unknown_route` daemon simply has no Files trigger.
+  // Files capability: same cached probe the surface consumes. An
+  // `unknown_route` daemon keeps Files visible in the all-tools bento, labelled
+  // honestly as unsupported instead of silently removing it.
   const fsProbe = useFsProbe(config.id);
-  const filesAvailable = fsTabAvailable(fsProbe.state);
+  const filesUnavailable = fsProbe.state === 'absent';
   const pinsTrigger = (
     <PinsTrigger
       id={pinsTriggerId}
@@ -283,18 +272,13 @@ export const SessionHeader = memo(function SessionHeader({
       controls={sidePane ? (sidePane.surface === 'attention' ? sidePane.paneId : undefined) : attentionPanelId}
     />
   );
-  const surfaceTriggers = sidePane && (
-    <>
-      {filesAvailable && (
-        <SidePaneTrigger surface="files" label="Files" icon={<FolderGit2 size={16} aria-hidden="true" />} />
-      )}
-      <SidePaneTrigger
-        surface="analytics"
-        label="Analytics"
-        icon={<ChartNoAxesCombined size={16} aria-hidden="true" />}
-      />
-      <SidePaneTrigger surface="tasks" label="Tasks" icon={<ListTodo size={16} aria-hidden="true" />} />
-    </>
+  const toolLauncher = sidePane && (
+    <SidePaneLauncher
+      compact={Boolean(compact)}
+      active={active}
+      badges={{ pins: pinCount, attention: attentionCount }}
+      disabled={filesUnavailable ? { files: 'Files are not supported by this daemon.' } : undefined}
+    />
   );
 
   // A retained background pane must not keep an invisible modal or its
@@ -370,57 +354,6 @@ export const SessionHeader = memo(function SessionHeader({
   const compactActions = (
     <>
       {actions}
-      {/* Files and Tasks on a phone: the top row has no width for two more
-          44px targets, so they live here with Settings — one deliberate tap
-          into the sheet the reader already uses for everything non-continuous.
-          Same two-step as Settings: let this sheet's focus trap restore first,
-          THEN open the surface sheet, so the closing dialog cannot steal focus
-          back from the opening one. */}
-      {sidePane && filesAvailable && (
-        <button
-          type="button"
-          onClick={() => {
-            setDetailsOpen(false);
-            requestAnimationFrame(() => sidePane.open('files'));
-          }}
-          aria-label="Open files"
-          title="This session's working tree: changes and browser"
-          className="kt-btn inline-flex min-h-[44px] items-center gap-sm"
-        >
-          <FolderGit2 size={14} aria-hidden="true" />
-          Files
-        </button>
-      )}
-      {sidePane && (
-        <button
-          type="button"
-          onClick={() => {
-            setDetailsOpen(false);
-            requestAnimationFrame(() => sidePane.open('analytics'));
-          }}
-          aria-label="Open analytics"
-          title="Session and parent-tree usage and cost"
-          className="kt-btn inline-flex min-h-[44px] items-center gap-sm"
-        >
-          <ChartNoAxesCombined size={14} aria-hidden="true" />
-          Analytics
-        </button>
-      )}
-      {sidePane && (
-        <button
-          type="button"
-          onClick={() => {
-            setDetailsOpen(false);
-            requestAnimationFrame(() => sidePane.open('tasks'));
-          }}
-          aria-label="Open tasks"
-          title="Tasks this session has recorded"
-          className="kt-btn inline-flex min-h-[44px] items-center gap-sm"
-        >
-          <ListTodo size={14} aria-hidden="true" />
-          Tasks
-        </button>
-      )}
       <button
         type="button"
         onClick={() => {
@@ -566,8 +499,12 @@ export const SessionHeader = memo(function SessionHeader({
             </span>
           </Link>
 
-          {attentionTrigger}
-          {pinsTrigger}
+          {toolLauncher ?? (
+            <>
+              {attentionTrigger}
+              {pinsTrigger}
+            </>
+          )}
 
           <Button
             id={detailsId}
@@ -639,9 +576,12 @@ export const SessionHeader = memo(function SessionHeader({
 
       <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-sm">
         {tabs}
-        {surfaceTriggers}
-        {attentionTrigger}
-        {pinsTrigger}
+        {toolLauncher ?? (
+          <>
+            {attentionTrigger}
+            {pinsTrigger}
+          </>
+        )}
         <ActionGroup>
           {actions}
           <Button

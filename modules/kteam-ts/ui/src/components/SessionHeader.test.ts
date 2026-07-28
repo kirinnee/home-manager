@@ -52,12 +52,13 @@ describe('mobile Settings entry', () => {
   });
 });
 
-describe('analytics side-pane entry', () => {
-  test('is directly reachable on desktop and through the phone details sheet', async () => {
+describe('registry-driven tool launcher', () => {
+  test('replaces individual surface entries on desktop and phone', async () => {
     const source = await Bun.file(new URL('./SessionHeader.tsx', import.meta.url).pathname).text();
-    expect(source).toContain('surface="analytics"');
-    expect(source).toContain("requestAnimationFrame(() => sidePane.open('analytics'))");
-    expect(source).toContain('aria-label="Open analytics"');
+    expect(source).toContain('<SidePaneLauncher');
+    expect(source).toContain('badges={{ pins: pinCount, attention: attentionCount }}');
+    expect(source).not.toContain('<SidePaneTrigger');
+    expect(source).not.toContain("sidePane.open('analytics')");
   });
 });
 

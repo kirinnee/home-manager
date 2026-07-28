@@ -1,6 +1,16 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { BrowseList, ChangesList, DiffBody, FileBody, FilesTab, entryRefusal, fileRefusal } from './FilesTab';
+import {
+  BrowseList,
+  ChangeIndicator,
+  DiffBody,
+  FileBody,
+  FilesTab,
+  OpenFileTabs,
+  changeDescription,
+  entryRefusal,
+  fileRefusal,
+} from './FilesTab';
 import { loadFsChanges, resetFsProbes } from './files-api';
 import type { FsChanges, FsEntry, FsFile } from './files-api';
 import { parseUnifiedDiff } from './files-model';
@@ -30,75 +40,24 @@ const entry = (over: Partial<FsEntry> & { name: string }): FsEntry => ({ type: '
 const BACKSLASH = String.fromCharCode(92);
 const NEWLINE = String.fromCharCode(10);
 
-describe('changes list', () => {
-  const changes = [
-    { path: 'modules/kteam-ts/src/api-server.ts', status: ' M' },
-    { path: 'docs/new.md', status: '??' },
-    { path: 'src/api.ts', status: 'R ', from: 'src/old-api.ts' },
-  ];
-
-  test('every row is a labelled target that states the status in words', () => {
-    const html = renderToStaticMarkup(<ChangesList changes={changes} onOpen={() => {}} />);
-    expect(html).toContain('aria-label="Modified (unstaged): modules/kteam-ts/src/api-server.ts. Open diff"');
-    expect(html).toContain('aria-label="Untracked: docs/new.md. Open diff"');
-    expect(html).toContain('from src/old-api.ts');
-    // Three rows, three buttons — the whole row is the target, not an icon.
-    expect(html.match(/<button/g)).toHaveLength(3);
+describe('change indicators', () => {
+  test('a dot plus exact green/red counts replaces the separate changes row', () => {
+    const change = { path: 'src/app.ts', status: ' M', additions: 12, deletions: 3 };
+    const html = renderToStaticMarkup(<ChangeIndicator change={change} />);
+    expect(html).toContain('kt-fs-change-dot');
+    expect(html).toContain('data-tone="warn"');
+    expect(html).toContain('>+12</span>');
+    expect(html).toContain('>−3</span>');
+    expect(html).toContain('aria-label="Modified (unstaged) · +12 · −3"');
+    expect(changeDescription(change)).toBe('Modified (unstaged) · +12 · −3');
   });
 
-  test('the colour chip is redundant, not the message', () => {
-    const html = renderToStaticMarkup(<ChangesList changes={changes} onOpen={() => {}} />);
-    // Every chip is hidden from AT (the row name carries the word) and carries
-    // its own letter, so a monochrome or colour-blind read still classifies.
-    expect(html.match(/kt-badge[^>]*aria-hidden="true"/g)).toHaveLength(3);
-    expect(html).toContain('>M</span>');
-    expect(html).toContain('>?</span>');
-    expect(html).toContain('>R</span>');
-  });
-
-  test('the long-path half that matters is kept — the tail is never truncated away', () => {
-    const html = renderToStaticMarkup(<ChangesList changes={changes} onOpen={() => {}} />);
-    expect(html).toContain('modules/kteam-ts/src/');
-    expect(html).toContain('api-server.ts');
-    expect(html).not.toContain('truncate');
-  });
-
-  test('a name the daemon cannot address is inert, verbatim, and still listed', () => {
-    const hostile = [
-      { path: `dir/a${BACKSLASH}b.ts`, status: ' M' },
-      { path: `line${NEWLINE}break.ts`, status: '??' },
-      { path: 'ok.ts', status: ' M' },
-    ];
-    const html = renderToStaticMarkup(<ChangesList changes={hostile} onOpen={() => {}} />);
-    // Only the addressable row is a control — the other two cannot fire a diff
-    // request the daemon would refuse.
-    expect(html.match(/<button/g)).toHaveLength(1);
-    expect(html.match(/data-inert="true"/g)).toHaveLength(2);
-    expect(html).toContain('name cannot be opened by this viewer');
-    // Shown as git named it. The normalised `dir/a/b.ts` is a DIFFERENT file.
-    expect(html).toContain(`dir/a${BACKSLASH}b.ts`);
-    expect(html).not.toContain('dir/a/b.ts');
-    // Not silently dropped: the newline row is present, and so is the good one.
-    expect(html).toContain('break.ts');
-    expect(html).toContain('aria-label="Modified (unstaged): ok.ts. Open diff"');
-  });
-
-  test('an inert change row still announces its status to a screen reader', () => {
-    const html = renderToStaticMarkup(
-      <ChangesList changes={[{ path: `a${BACKSLASH}b.ts`, status: ' M' }]} onOpen={() => {}} />,
-    );
-    // The chip is aria-hidden, so the word has to be in the row's text.
-    expect(html).toContain('sr-only');
-    expect(html).toContain('Modified');
-  });
-
-  test('a capped change list admits it, and an uncapped one stays quiet', () => {
-    const capped = renderToStaticMarkup(<ChangesList changes={changes} truncated onOpen={() => {}} />);
-    expect(capped).toContain('Change list truncated by the daemon');
-    // Still a note, not a fourth row pretending to be a file.
-    expect(capped.match(/<button/g)).toHaveLength(3);
-    const plain = renderToStaticMarkup(<ChangesList changes={changes} onOpen={() => {}} />);
-    expect(plain).not.toContain('Change list truncated');
+  test('untracked files keep an honest plus without inventing an unavailable count', () => {
+    const html = renderToStaticMarkup(<ChangeIndicator change={{ path: 'new.txt', status: '??' }} />);
+    expect(html).toContain('aria-label="Untracked"');
+    expect(html).toContain('data-kind="add"');
+    expect(html).toContain('>+</span>');
+    expect(html).not.toContain('+0');
   });
 });
 
@@ -119,6 +78,18 @@ describe('browse list', () => {
     const html = renderToStaticMarkup(<BrowseList listing={listing} dir="" onEnter={() => {}} onOpenFile={() => {}} />);
     expect(html.indexOf('src/')).toBeLessThan(html.indexOf('README.md'));
     expect(html).toContain('2.0 KB');
+  });
+
+  test('change counts sit on the filename and opening still means opening the file', () => {
+    const changes = new Map([['README.md', { path: 'README.md', status: ' M', additions: 4, deletions: 2 }]]);
+    const html = renderToStaticMarkup(
+      <BrowseList listing={listing} dir="" changes={changes} onEnter={() => {}} onOpenFile={() => {}} />,
+    );
+    expect(html).toContain('kt-fs-name-line');
+    expect(html).toContain('>+4</span>');
+    expect(html).toContain('>−2</span>');
+    expect(html).toContain('aria-label="Open file README.md, 2.0 KB, Modified (unstaged) · +4 · −2"');
+    expect(html).not.toContain('Open diff');
   });
 
   test('a refused entry is an inert row that says why — never a button that fails', () => {
@@ -280,45 +251,41 @@ describe('file view', () => {
   });
 
   test('a refusal renders as a note, never as an empty viewer', () => {
-    const html = renderToStaticMarkup(
-      <FileBody file={file({ binary: true, path: 'logo.png' })} path="logo.png" render="source" />,
-    );
+    const html = renderToStaticMarkup(<FileBody file={file({ binary: true, path: 'logo.png' })} path="logo.png" />);
     expect(html).toContain('binary');
     expect(html).not.toContain('kt-fs-pre');
   });
 
   test('source is highlighted through the shared registry and never inserted raw', () => {
     const html = renderToStaticMarkup(
-      <FileBody file={file({ content: 'const x: number = 1;', lang: 'typescript' })} path="a.ts" render="source" />,
+      <FileBody file={file({ content: 'const x: number = 1;', lang: 'typescript' })} path="a.ts" />,
     );
     expect(html).toContain('hljs language-typescript');
     expect(html).toContain('hljs-keyword');
+
+    const raw = renderToStaticMarkup(
+      <FileBody file={file({ content: 'const x: number = 1;', lang: 'typescript' })} path="a.ts" raw />,
+    );
+    expect(raw).toContain('const x: number = 1;');
+    expect(raw).not.toContain('hljs-keyword');
   });
 
   test('an unknown language falls back to escaped text', () => {
     const html = renderToStaticMarkup(
-      <FileBody
-        file={file({ content: '<b>not markup</b>', path: 'notes.unknownext' })}
-        path="notes.unknownext"
-        render="source"
-      />,
+      <FileBody file={file({ content: '<b>not markup</b>', path: 'notes.unknownext' })} path="notes.unknownext" />,
     );
     expect(html).toContain('&lt;b&gt;not markup&lt;/b&gt;');
     expect(html).not.toContain('<b>not markup</b>');
   });
 
-  test('markdown renders as prose when asked and as source when not', () => {
+  test('markdown renders as prose by default and raw bytes only when asked', () => {
     const rendered = renderToStaticMarkup(
-      <FileBody
-        file={file({ content: '# Title\n\n- a\n- b', path: 'DESIGN.md' })}
-        path="DESIGN.md"
-        render="rendered"
-      />,
+      <FileBody file={file({ content: '# Title\n\n- a\n- b', path: 'DESIGN.md' })} path="DESIGN.md" />,
     );
     expect(rendered).toContain('<h1>Title</h1>');
     expect(rendered).toContain('<li>a</li>');
     const source = renderToStaticMarkup(
-      <FileBody file={file({ content: '# Title', path: 'DESIGN.md' })} path="DESIGN.md" render="source" />,
+      <FileBody file={file({ content: '# Title', path: 'DESIGN.md' })} path="DESIGN.md" raw />,
     );
     expect(source).not.toContain('<h1>');
     expect(source).toContain('# Title');
@@ -326,11 +293,7 @@ describe('file view', () => {
 
   test('rendered markdown cannot smuggle raw HTML in', () => {
     const html = renderToStaticMarkup(
-      <FileBody
-        file={file({ content: 'hello <img src=x onerror=alert(1)>', path: 'README.md' })}
-        path="README.md"
-        render="rendered"
-      />,
+      <FileBody file={file({ content: 'hello <img src=x onerror=alert(1)>', path: 'README.md' })} path="README.md" />,
     );
     // react-markdown has no rehype-raw here, so the tag is TEXT: it survives as
     // escaped characters and never becomes an element that could fire.
@@ -339,15 +302,13 @@ describe('file view', () => {
   });
 
   test('an empty file says so', () => {
-    const html = renderToStaticMarkup(<FileBody file={file({ content: '' })} path="a.ts" render="source" />);
+    const html = renderToStaticMarkup(<FileBody file={file({ content: '' })} path="a.ts" />);
     expect(html).toContain('This file is empty.');
   });
 
   test('a file over the highlight cap still renders, as plain text, and says why', () => {
     const huge = 'const x = 1;\n'.repeat(6000); // > 60,000 chars
-    const html = renderToStaticMarkup(
-      <FileBody file={file({ content: huge, lang: 'typescript' })} path="a.ts" render="source" />,
-    );
+    const html = renderToStaticMarkup(<FileBody file={file({ content: huge, lang: 'typescript' })} path="a.ts" />);
     expect(html).toContain('Syntax highlighting is off above');
     expect(html).not.toContain('hljs-keyword');
     expect(html).toContain('kt-fs-pre');
@@ -355,13 +316,13 @@ describe('file view', () => {
 });
 
 describe('the tab shell', () => {
-  test('opens on Changes, probing, with both sections reachable', () => {
+  test('opens directly on the normal directory browser with no section picker', () => {
     resetFsProbes();
     const html = renderToStaticMarkup(<FilesTab sessionId="ms2files-11111111" cwd="/home/kirin/repo" />);
-    expect(html).toContain('Loading changes…');
-    expect(html).toContain('aria-label="Files section"');
-    expect(html).toContain('>Changes</button>');
-    expect(html).toContain('>Browse</button>');
+    expect(html).toContain('Loading the session root…');
+    expect(html).not.toContain('aria-label="Files section"');
+    expect(html).not.toContain('>Changes</button>');
+    expect(html).not.toContain('>Browse</button>');
     expect(html).toContain('aria-label="Refresh files"');
     // The session's own root is stated, so it is never ambiguous WHICH tree.
     expect(html).toContain('/home/kirin/repo');
@@ -373,7 +334,7 @@ describe('the tab shell', () => {
     expect(html).toContain('tabindex="-1"');
   });
 
-  test('a capped changes answer never prints its length as the total', async () => {
+  test('a capped changes answer admits that some inline dots may be missing', async () => {
     await seedProbe('ms2files-22222222', {
       repo: true,
       branch: 'main',
@@ -381,21 +342,42 @@ describe('the tab shell', () => {
       truncated: true,
     });
     const html = renderToStaticMarkup(<FilesTab sessionId="ms2files-22222222" />);
-    expect(html).toContain('First 1 changed file vs HEAD');
-    expect(html).toContain('Change list truncated by the daemon');
+    expect(html).toContain('Some change dots may be missing');
+    expect(html).not.toContain('changed file vs HEAD');
   });
 
-  test('a cap that swallowed every row does not read as "nothing changed"', async () => {
+  test('a cap that swallowed every status row stays honest', async () => {
     await seedProbe('ms2files-33333333', { repo: true, changes: [], truncated: true });
     const html = renderToStaticMarkup(<FilesTab sessionId="ms2files-33333333" />);
-    expect(html).toContain('incomplete, not empty');
-    expect(html).not.toContain('No uncommitted changes');
+    expect(html).toContain('Some change dots may be missing');
+    expect(html).not.toContain('working tree matches HEAD');
   });
 
-  test('an ordinary empty answer still says the tree matches HEAD', async () => {
+  test('an ordinary empty status answer adds no ceremony above the browser', async () => {
     await seedProbe('ms2files-44444444', { repo: true, changes: [] });
     const html = renderToStaticMarkup(<FilesTab sessionId="ms2files-44444444" />);
-    expect(html).toContain('No uncommitted changes');
+    expect(html).toContain('Loading the session root…');
+    expect(html).not.toContain('working tree matches HEAD');
     expect(html).not.toContain('truncated');
+  });
+
+  test('multiple open files are compact, independently closable tabs', () => {
+    const html = renderToStaticMarkup(
+      <OpenFileTabs
+        tabs={[
+          { path: 'src/app.ts', view: 'normal' },
+          { path: 'README.md', view: 'raw' },
+        ]}
+        activePath="src/app.ts"
+        onActivate={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    expect(html).toContain('aria-label="Open files"');
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain('aria-label="Close app.ts"');
+    expect(html).toContain('aria-label="Close README.md"');
+    // One activation + one close target per file.
+    expect(html.match(/<button/g)).toHaveLength(4);
   });
 });
