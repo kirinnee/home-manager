@@ -49,6 +49,17 @@ describe('announcements', () => {
     expect(sidePaneAnnouncement('browser', 'pane', destination)).toContain('https://example.com/docs');
   });
   test('every surface has a label and a close label', () => {
+    expect(Object.keys(SIDE_PANE_SURFACES)).toEqual([
+      'browser',
+      'files',
+      'tasks',
+      'pins',
+      'terminals',
+      'skills',
+      'lineage',
+      'analytics',
+      'attention',
+    ]);
     for (const meta of Object.values(SIDE_PANE_SURFACES)) {
       expect(meta.label.length).toBeGreaterThan(0);
       expect(meta.closeLabel.length).toBeGreaterThan(0);
@@ -60,7 +71,7 @@ describe('retention policy', () => {
   test('browser and terminals survive tab switches; transient surfaces remount', () => {
     expect(RETAINED_SURFACES.has('browser')).toBe(true);
     expect(RETAINED_SURFACES.has('terminals')).toBe(true);
-    for (const surface of ['files', 'tasks', 'pins', 'skills', 'lineage', 'analytics'] as const) {
+    for (const surface of ['files', 'tasks', 'pins', 'skills', 'lineage', 'analytics', 'attention'] as const) {
       expect(RETAINED_SURFACES.has(surface)).toBe(false);
     }
   });
@@ -149,6 +160,18 @@ describe('workspace', () => {
     expect(html).toContain('No shell terminals open');
     expect(html).toContain('/repo/worktree');
     expect(html).not.toContain('Terminals are not available in this build.');
+    expect(html).not.toContain('autofocus');
+  });
+
+  test('the Attention tab hosts the durable attention ledger without taking focus', () => {
+    writeSidePaneState('session-a', { surface: 'attention', browser: null });
+    const html = renderToStaticMarkup(
+      <SidePaneWorkspace sessionId="session-a" compact={false}>
+        <main>Conversation</main>
+      </SidePaneWorkspace>,
+    );
+    expect(html).toContain('Nothing needs attention.');
+    expect(html).toContain('Close attention');
     expect(html).not.toContain('autofocus');
   });
 
