@@ -2,10 +2,10 @@
 //
 // It runs Parakeet TDT 0.6B v3 (int8) entirely inside the page via
 // `parakeet.js@1.4.4` on `onnxruntime-web@1.24.1`. Nothing leaves the device,
-// not even to the reader's own box. It is a whole-buffer engine and may produce
-// no word-level partials at all. Live dictation therefore feeds it
-// SILENCE-ALIGNED utterances and labels the newest completed result
-// provisional; this file never pretends Parakeet itself is streaming.
+// not even to the reader's own box. The hosted model is an offline TDT
+// transducer. Live dictation therefore re-runs bounded audio snapshots and
+// stabilises their timestamped word hypotheses; this file never pretends the
+// encoder itself is streaming.
 //
 // ── WHY THE BACKEND IS PINNED TO WASM, even where WebGPU exists ────────────
 //
@@ -434,7 +434,58 @@ interface LoadedModel {
     audio: Float32Array | null,
     sampleRate?: number,
     opts?: Record<string, unknown>,
-  ): Promise<{ utterance_text: string }>;
+  ): Promise<ModelTranscriptResult>;
+  transcribeLongAudio?(
+    audio: Float32Array,
+    sampleRate?: number,
+    opts?: Record<string, unknown>,
+  ): Promise<ModelLongTranscriptResult>;
+}
+
+interface ModelTranscriptWord {
+  text?: unknown;
+  start_time?: unknown;
+  end_time?: unknown;
+  confidence?: unknown;
+}
+
+interface ModelTranscriptResult {
+  utterance_text?: unknown;
+  words?: unknown;
+  confidence_scores?: { word_avg?: unknown } | null;
+  metrics?: { total_ms?: unknown } | null;
+}
+
+interface ModelLongTranscriptResult {
+  text?: unknown;
+  words?: unknown;
+  metrics?: { total_ms?: unknown } | null;
+}
+
+export interface LocalTranscriptWord {
+  text: string;
+  /** Seconds from the beginning of the supplied audio buffer. */
+  startTime: number;
+  /** Seconds from the beginning of the supplied audio buffer. */
+  endTime: number;
+  /** Greedy-decoder probability, when parakeet.js returned one. */
+  confidence?: number;
+}
+
+export interface LocalTranscript {
+  text: string;
+  words: LocalTranscriptWord[];
+  /** `true` only when every runtime word had a complete numeric timing pair.
+   * `false` means at least one record was malformed; `null` means the runtime
+   * supplied no word sequence. Live agreement may still use the text, but it
+   * must never trim audio from a partial/corrupt timing sequence. */
+  timestampsValid: boolean | null;
+  /** Mean word confidence, or null when the runtime did not expose one. */
+  confidence: number | null;
+  /** Audio presented to the model, excluding queue time. */
+  audioMs: number;
+  /** Wall-clock model time measured around the package call. */
+  processingMs: number;
 }
 
 let loaded: LoadedModel | null = null;
@@ -539,6 +590,150 @@ export function unloadLocalEngine(): void {
   loading = null;
 }
 
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function transcriptWords(value: unknown): { words: LocalTranscriptWord[]; timestampsValid: boolean | null } {
+  if (!Array.isArray(value) || value.length === 0) return { words: [], timestampsValid: null };
+  const words: LocalTranscriptWord[] = [];
+  let timestampsValid = true;
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      timestampsValid = false;
+      continue;
+    }
+    const word = item as ModelTranscriptWord;
+    const text = typeof word.text === 'string' ? word.text.trim() : '';
+    const startTime = finiteNumber(word.start_time);
+    const endTime = finiteNumber(word.end_time);
+    if (!text || startTime === null || endTime === null) {
+      timestampsValid = false;
+      continue;
+    }
+    const confidence = finiteNumber(word.confidence);
+    words.push({
+      text,
+      startTime,
+      endTime,
+      ...(confidence === null ? {} : { confidence }),
+    });
+  }
+  return { words, timestampsValid };
+}
+
+function meanWordConfidence(words: readonly LocalTranscriptWord[], preferred: unknown): number | null {
+  const aggregate = finiteNumber(preferred);
+  if (aggregate !== null) return aggregate;
+  const values = words.flatMap(word => (word.confidence === undefined ? [] : [word.confidence]));
+  if (values.length === 0) return null;
+  return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+function localTranscript(
+  text: unknown,
+  rawWords: unknown,
+  preferredConfidence: unknown,
+  samples: Float32Array,
+  processingMs: number,
+): LocalTranscript {
+  const { words, timestampsValid } = transcriptWords(rawWords);
+  return {
+    text: typeof text === 'string' ? text.trim() : '',
+    words,
+    timestampsValid,
+    confidence: meanWordConfidence(words, preferredConfidence),
+    audioMs: (samples.length / 16_000) * 1_000,
+    processingMs,
+  };
+}
+
+function emptyLocalTranscript(): LocalTranscript {
+  return { text: '', words: [], timestampsValid: null, confidence: null, audioMs: 0, processingMs: 0 };
+}
+
+/** Serialize every use of the shared ONNX sessions. Abort is logical: queued
+ * work is skipped and an in-flight result is suppressed at publication. */
+function runLocalDecode<T>(options: LoadLocalOptions, decode: (model: LoadedModel) => Promise<T>): Promise<T> {
+  const run = localDecodeTail.then(async () => {
+    if (options.signal?.aborted) throw new PrepareError('aborted', 'Transcription was cancelled.');
+    const model = await loadLocalEngine(options);
+    if (options.signal?.aborted) throw new PrepareError('aborted', 'Transcription was cancelled.');
+    const result = await decode(model);
+    if (options.signal?.aborted) throw new PrepareError('aborted', 'Transcription was cancelled.');
+    return result;
+  });
+  localDecodeTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/** Rich snapshot decode for live hypothesis agreement. Timestamps and
+ * confidences are opt-in in parakeet.js; this is the one application seam that
+ * turns them on. */
+export async function transcribeLocalDetailed(
+  samples: Float32Array,
+  options: LoadLocalOptions = {},
+): Promise<LocalTranscript> {
+  if (samples.length === 0) return emptyLocalTranscript();
+  return runLocalDecode(options, async model => {
+    const started = performance.now();
+    const result = await model.transcribe(samples, 16_000, {
+      returnTimestamps: true,
+      returnConfidences: true,
+      enableProfiling: false,
+    });
+    const elapsed = Math.max(0, performance.now() - started);
+    return localTranscript(
+      result?.utterance_text,
+      result?.words,
+      result?.confidence_scores?.word_avg,
+      samples,
+      elapsed,
+    );
+  });
+}
+
+/** One clean batch pass after capture stops. parakeet.js' long-audio helper
+ * windows and merges long recordings internally, so this is O(n) once rather
+ * than repeatedly decoding the full growing utterance. */
+export async function transcribeLocalFinal(
+  samples: Float32Array,
+  options: LoadLocalOptions = {},
+): Promise<LocalTranscript> {
+  if (samples.length === 0) return emptyLocalTranscript();
+  return runLocalDecode(options, async model => {
+    const started = performance.now();
+    if (typeof model.transcribeLongAudio === 'function') {
+      const result = await model.transcribeLongAudio(samples, 16_000, {
+        returnTimestamps: 'word',
+        returnConfidences: true,
+        enableProfiling: false,
+      });
+      const elapsed = Math.max(0, performance.now() - started);
+      return localTranscript(result?.text, result?.words, null, samples, elapsed);
+    }
+    // Compatibility for an older cached package surface. The installed 1.4.4
+    // build has `transcribeLongAudio`; falling back keeps a package mismatch
+    // from throwing away an otherwise usable short recording.
+    const result = await model.transcribe(samples, 16_000, {
+      returnTimestamps: true,
+      returnConfidences: true,
+      enableProfiling: false,
+    });
+    const elapsed = Math.max(0, performance.now() - started);
+    return localTranscript(
+      result?.utterance_text,
+      result?.words,
+      result?.confidence_scores?.word_avg,
+      samples,
+      elapsed,
+    );
+  });
+}
+
 /** Transcribe one finished utterance. 16 kHz mono float, straight from
  *  `audio-capture`.
  *
@@ -552,20 +747,8 @@ export function unloadLocalEngine(): void {
  *  it would look like it worked. */
 export async function transcribeLocal(samples: Float32Array, options: LoadLocalOptions = {}): Promise<string> {
   if (samples.length === 0) return '';
-  const run = localDecodeTail.then(async () => {
-    if (options.signal?.aborted) throw new PrepareError('aborted', 'Transcription was cancelled.');
-    const model = await loadLocalEngine(options);
-    if (options.signal?.aborted) throw new PrepareError('aborted', 'Transcription was cancelled.');
+  return runLocalDecode(options, async model => {
     const result = await model.transcribe(samples, 16_000, { returnTimestamps: false, returnConfidences: false });
-    // The WASM call above cannot be interrupted. This check is what makes a
-    // cancellation real at the publication boundary: the CPU may have finished
-    // old work, but old words cannot enter a new recording.
-    if (options.signal?.aborted) throw new PrepareError('aborted', 'Transcription was cancelled.');
     return typeof result?.utterance_text === 'string' ? result.utterance_text.trim() : '';
   });
-  localDecodeTail = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
 }

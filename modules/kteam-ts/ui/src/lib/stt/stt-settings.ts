@@ -19,16 +19,22 @@
 //     each other's changes. This file broadcasts its own event as well, and
 //     `useSttSettings` listens to both.
 //
-// DEFAULTS: browser-local transcription, enhancement ON, empty dictionary. Version 2 is
-// the local-only migration: v1's daemon/local choice is accepted so a reader's
-// dictionary and context survive, but it is normalised to local and is never
-// used to route microphone audio to the daemon.
+// DEFAULTS: browser-local transcription, enhancement ON, empty dictionary, and
+// either Alt for push-to-talk. Version 2 was the local-only migration; version
+// 3 adds the shortcut. v1/v2 payloads are accepted so a reader's dictionary and
+// context survive, but old execution choices are never used to route microphone
+// audio to the daemon.
 
 import { useCallback, useSyncExternalStore } from 'react';
 import { MAX_USER_CONTEXT_CHARS, parseDictionary, type DictionaryEntry, type DictionaryParse } from './enhancement';
+import {
+  DEFAULT_DICTATION_SHORTCUT,
+  parseDictationShortcut,
+  type DictationShortcutBinding,
+} from './dictation-shortcut';
 
 export const STT_SETTINGS_KEY = 'kteam-stt-v1';
-export const STT_SETTINGS_VERSION = 2;
+export const STT_SETTINGS_VERSION = 3;
 
 /** Same-tab change notification. `storage` only crosses tabs. */
 export const STT_SETTINGS_EVENT = 'kteam:stt-settings';
@@ -53,6 +59,9 @@ export interface SttSettings {
   /** Free text mined for extra vocabulary — project jargon, names, a pasted
    *  glossary. Stored verbatim; extraction happens on use. */
   userContext: string;
+  /** Browser-local push-to-talk binding. Alt (either side) is the default, but
+   * it is data, never a hardcoded event-handler special case. */
+  shortcut: DictationShortcutBinding;
 }
 
 export const DEFAULT_STT_SETTINGS: SttSettings = Object.freeze({
@@ -60,6 +69,7 @@ export const DEFAULT_STT_SETTINGS: SttSettings = Object.freeze({
   enhancement: true,
   dictionary: [] as string[],
   userContext: '',
+  shortcut: DEFAULT_DICTATION_SHORTCUT as DictationShortcutBinding,
 });
 
 /** Defensive parse. Never throws, always returns a usable object. */
@@ -73,9 +83,11 @@ export function parseSttSettings(raw: string | null | undefined): SttSettings {
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ...DEFAULT_STT_SETTINGS };
   const obj = parsed as Record<string, unknown>;
-  // v1 is migrated explicitly below. Unknown/future payloads are still a clean
+  // v1/v2 are migrated explicitly below. Unknown/future payloads are still a clean
   // reset, but removing the execution choice must not discard someone's jargon.
-  if (obj['v'] !== STT_SETTINGS_VERSION && obj['v'] !== 1) return { ...DEFAULT_STT_SETTINGS };
+  if (obj['v'] !== STT_SETTINGS_VERSION && obj['v'] !== 2 && obj['v'] !== 1) {
+    return { ...DEFAULT_STT_SETTINGS };
+  }
 
   const enhancement = typeof obj['enhancement'] === 'boolean' ? obj['enhancement'] : DEFAULT_STT_SETTINGS.enhancement;
 
@@ -90,10 +102,14 @@ export function parseSttSettings(raw: string | null | undefined): SttSettings {
   }
 
   const userContext = typeof obj['userContext'] === 'string' ? obj['userContext'].slice(0, MAX_USER_CONTEXT_CHARS) : '';
+  const shortcut =
+    obj['v'] === STT_SETTINGS_VERSION
+      ? parseDictationShortcut(obj['shortcut'])
+      : { ...DEFAULT_DICTATION_SHORTCUT, modifiers: [] };
 
   // v1's `mode` and `language`, plus either field injected into v2, are ignored:
   // there is one local engine and parakeet.js exposes no language input.
-  return { v: STT_SETTINGS_VERSION, enhancement, dictionary, userContext };
+  return { v: STT_SETTINGS_VERSION, enhancement, dictionary, userContext, shortcut };
 }
 
 /** Normalise before writing, so a caller cannot persist an out-of-range shape

@@ -125,9 +125,64 @@ describe('rendering', () => {
       expect(theButton(html)).toContain('aria-label="Dictate a message"');
     });
 
-    test('says out loud that dictation never sends', () => {
+    test('says out loud that dictation never sends, and that words drop into the draft', () => {
       withNavigator(NAV);
-      expect(theButton(render()).toLowerCase()).toContain('nothing is ever sent for you');
+      const button = theButton(render()).toLowerCase();
+      expect(button).toContain('nothing is ever sent for you');
+      // The promise the redesign makes: no manual insert, words land in the draft.
+      expect(button).toContain('drop into your draft');
     });
+
+    test('shows the current push-to-talk binding in the mic tooltip', () => {
+      withNavigator(NAV);
+      const button = theButton(render());
+      expect(button).toContain('Alt (either side)');
+      expect(button).toContain('aria-keyshortcuts="Alt"');
+    });
+  });
+});
+
+// These behaviours run inside the hook's async capture flow, which this project
+// has no DOM/act harness to drive (the hook's own tests likewise only exercise
+// pure exports). Following the DictationSheet source-inspection precedent, the
+// integration wiring is asserted against the component source instead.
+describe('useDictationBundle wiring — the integration contract', () => {
+  async function source(): Promise<string> {
+    return Bun.file(new URL('./DictationControl.tsx', import.meta.url).pathname).text();
+  }
+
+  test('passes the real draft and selection through to the hook', async () => {
+    const src = await source();
+    expect(src).toContain('draft,');
+    expect(src).toContain('selectionRef,');
+    // Both are forwarded to useDictation (the hook now reads them at insert time).
+    expect(src).toMatch(/useDictation\(\{[\s\S]*selectionRef,[\s\S]*\}\)/u);
+  });
+
+  test('adapts the single final onDraft result to onDraftChange, then closes the flow', async () => {
+    const src = await source();
+    // onDraft is the ONE output: forward it, then auto-close. No review step.
+    expect(src).toMatch(/onDraft:\s*result\s*=>\s*\{[\s\S]*onDraftChange\(result\)[\s\S]*closePanel\(\)[\s\S]*\}/u);
+  });
+
+  test('there is no manual transcript editing, review, or Insert logic left', async () => {
+    const src = await source();
+    expect(src).not.toContain('editCommittedTranscript');
+    expect(src).not.toContain('editProvisionalTranscript');
+    expect(src).not.toContain('insertTranscript');
+    expect(src).not.toContain('onInsert');
+    expect(src).not.toContain("'review'");
+    // Only a read-only live snapshot is retained for the panel caption.
+    expect(src).toContain('reduceLiveTranscript');
+    expect(src).toContain('completeTranscriptText');
+  });
+
+  test('the returned handle wraps start() so push-to-talk opens the panel first', async () => {
+    const src = await source();
+    // start() is replaced with the panel-opening entry point; the rest of the
+    // handle contract (phase, stop, cancel, …) is preserved by the spread.
+    expect(src).toMatch(/\{\s*\.\.\.dictation,\s*start:\s*openAndRecord\s*\}/u);
+    // openAndRecord makes the panel visible before delegating to capture.
+    expect(src).toMatch(/openAndRecord[\s\S]*setOpen\(true\)/u);
   });
 });

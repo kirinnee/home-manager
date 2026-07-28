@@ -14,6 +14,7 @@ import {
   type SttSettings,
   type SttStorage,
 } from './stt-settings';
+import { DEFAULT_DICTATION_SHORTCUT } from './dictation-shortcut';
 
 function memoryStorage(initial?: string): SttStorage & { value: string | null; writes: number } {
   return {
@@ -31,12 +32,13 @@ function memoryStorage(initial?: string): SttStorage & { value: string | null; w
 }
 
 describe('defaults', () => {
-  test('are browser-local, enhancement on, empty dictionary and context', () => {
+  test('are browser-local, enhancement on, empty vocabulary, and either Alt', () => {
     expect(DEFAULT_STT_SETTINGS).toEqual({
       v: STT_SETTINGS_VERSION,
       enhancement: true,
       dictionary: [],
       userContext: '',
+      shortcut: DEFAULT_DICTATION_SHORTCUT,
     });
   });
 });
@@ -73,6 +75,7 @@ describe('parseSttSettings — never throws, always usable', () => {
       enhancement: false,
       dictionary: ['tmux'],
       userContext: '',
+      shortcut: DEFAULT_DICTATION_SHORTCUT,
     });
   });
 
@@ -90,6 +93,7 @@ describe('parseSttSettings — never throws, always usable', () => {
       enhancement: false,
       dictionary: ['kteam'],
       userContext: 'nitroso and diene',
+      shortcut: DEFAULT_DICTATION_SHORTCUT,
     });
   });
 
@@ -99,9 +103,21 @@ describe('parseSttSettings — never throws, always usable', () => {
     expect(parsed.v).toBe(STT_SETTINGS_VERSION);
     expect(parsed.dictionary).toEqual(['kteam']);
     expect(parsed.userContext).toBe('');
+    expect(parsed.shortcut).toEqual(DEFAULT_DICTATION_SHORTCUT);
   });
 
-  test('ignores obsolete mode/language fields even when injected into v2', () => {
+  test('migrates v2 by preserving enhancement vocabulary and adding the default shortcut', () => {
+    const parsed = parseSttSettings(
+      JSON.stringify({ v: 2, enhancement: true, dictionary: ['kteam'], userContext: 'nitroso' }),
+    );
+    expect(parsed).toEqual({
+      ...DEFAULT_STT_SETTINGS,
+      dictionary: ['kteam'],
+      userContext: 'nitroso',
+    });
+  });
+
+  test('ignores obsolete mode/language fields even when injected into v3', () => {
     const parsed = parseSttSettings(
       JSON.stringify({ ...DEFAULT_STT_SETTINGS, mode: 'daemon', language: 'ja', dictionary: ['tmux'] }),
     );
@@ -115,6 +131,21 @@ describe('parseSttSettings — never throws, always usable', () => {
     expect(parseSttSettings(raw).userContext).toHaveLength(MAX_USER_CONTEXT_CHARS);
     const hostile = JSON.stringify({ ...DEFAULT_STT_SETTINGS, userContext: ['not', 'a', 'string'] });
     expect(parseSttSettings(hostile).userContext).toBe('');
+  });
+
+  test('defensively parses a custom shortcut and rejects a hostile one', () => {
+    const custom = parseSttSettings(
+      JSON.stringify({
+        ...DEFAULT_STT_SETTINGS,
+        shortcut: { code: 'KeyV', key: 'v', modifiers: ['Shift', 'Alt', 'Alt', 'Telepathy'] },
+      }),
+    );
+    expect(custom.shortcut).toEqual({ code: 'KeyV', key: 'v', modifiers: ['Alt', 'Shift'] });
+
+    const hostile = parseSttSettings(
+      JSON.stringify({ ...DEFAULT_STT_SETTINGS, shortcut: { code: 'KeyK', key: 'k', modifiers: ['Control'] } }),
+    );
+    expect(hostile.shortcut).toEqual(DEFAULT_DICTATION_SHORTCUT);
   });
 
   test('falls back per FIELD, not per document, when one field is hostile', () => {
@@ -174,6 +205,7 @@ describe('storage', () => {
       enhancement: false,
       dictionary: ['tmux'],
       userContext: 'nitroso and diene',
+      shortcut: { code: 'KeyV', key: 'v', modifiers: ['Alt', 'Shift'] },
     };
     expect(saveSttSettings(next, storage)).toBe(true);
     expect(loadSttSettings(storage)).toEqual(next);

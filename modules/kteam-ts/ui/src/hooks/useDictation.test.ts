@@ -11,7 +11,6 @@ import {
   type LiveAudioRun,
 } from './useDictation';
 import type { ChatRecord } from '../types';
-import { LiveTranscriptionError, LocalSegmentQueue, type SegmentTranscript } from '../lib/stt/live-transcription';
 
 function user(text: string): ChatRecord {
   return { source: 'claude', type: 'chat.user', data: { text } } as ChatRecord;
@@ -88,10 +87,9 @@ describe('local dictation failures', () => {
     expect(
       dictationErrorFromFailure(Object.assign(new Error('Prepare this device first.'), { code: 'not-prepared' })),
     ).toEqual({ code: 'not-prepared', message: 'Prepare this device first.' });
-    expect(dictationErrorFromFailure(new LiveTranscriptionError('backlog', 'This device is falling behind.'))).toEqual({
-      code: 'backlog',
-      message: 'This device is falling behind.',
-    });
+    expect(
+      dictationErrorFromFailure(Object.assign(new Error('This device is falling behind.'), { code: 'backlog' })),
+    ).toEqual({ code: 'backlog', message: 'This device is falling behind.' });
   });
 
   test('logical cancellation is silent', () => {
@@ -100,51 +98,78 @@ describe('local dictation failures', () => {
 });
 
 describe('live capture orchestration', () => {
-  test('observes the worklet flush tail before flushing VAD and closing the queue', async () => {
-    const sampleRate = 16_000;
-    const samples = (ms: number, amplitude: number) =>
-      new Float32Array(Math.round((ms / 1_000) * sampleRate)).fill(amplitude);
+  test('observes the worklet flush tail before freezing the live preview', async () => {
     const order: string[] = [];
-    const decoded: Float32Array[] = [];
-    const transcripts: SegmentTranscript[] = [];
-    const queue = new LocalSegmentQueue({
-      sampleRate,
-      transcribe: async pcm => {
-        order.push('decode');
-        decoded.push(pcm.slice());
-        return 'tail kept';
-      },
-      onTranscript: result => transcripts.push(result),
-    });
-    const run: LiveAudioRun = { segmenter: null, inputSampleRate: null, queue };
-
-    // At 340 ms this phrase is still below the product's 360 ms voiced floor.
-    // The final 40 ms lives only in capture's flush tail; closing the VAD first
-    // would drop the whole phrase and this regression would fail.
-    observeLiveSamples(run, samples(180, 0), sampleRate);
-    observeLiveSamples(run, samples(340, 0.1), sampleRate);
-    const capture = {
-      async stop() {
-        order.push('capture-stop');
-        observeLiveSamples(run, samples(40, 0.1), sampleRate);
-        order.push('capture-tail');
-        return new Float32Array(0);
+    const pushed: number[][] = [];
+    const run: LiveAudioRun = {
+      inputSampleRate: null,
+      transcriber: {
+        push(samples) {
+          order.push('preview-push');
+          pushed.push(Array.from(samples));
+        },
+        stop() {
+          order.push('preview-stop');
+          return {
+            committed: 'hello',
+            provisional: 'there',
+            text: 'hello there',
+            complete: false,
+            stats: {
+              decodeCount: 1,
+              discardedPasses: 0,
+              forcedAudioDropMs: 0,
+              maxDecodedAudioMs: 1_500,
+              maxModelInputAudioMs: 1_740,
+              firstVisibleAudioMs: 1_500,
+              firstVisibleProcessingMs: 12,
+              committedRevisionCount: 0,
+              provisionalRewriteCount: 0,
+              iterationAudioMs: [1_500],
+              iterationModelInputAudioMs: [1_740],
+              iterationProcessingMs: [12],
+            },
+          };
+        },
       },
     };
 
-    await finishLiveAudioRun(capture, run);
+    observeLiveSamples(run, new Float32Array([0.1, 0.2]), 16_000);
+    const capture = {
+      async stop() {
+        order.push('capture-stop');
+        // `CaptureSession.stop()` flushes this last worklet batch through the
+        // normal callback before it returns the exact full utterance.
+        observeLiveSamples(run, new Float32Array([0.3, 0.4]), 16_000);
+        order.push('capture-tail');
+        return new Float32Array([0.1, 0.2, 0.3, 0.4]);
+      },
+    };
 
-    expect(order).toEqual(['capture-stop', 'capture-tail', 'decode']);
-    expect(decoded).toHaveLength(1);
-    expect(decoded[0]?.filter(sample => sample > 0.09).length).toBe(samples(380, 0.1).length);
-    expect(transcripts).toEqual([{ id: 0, text: 'tail kept', attempts: 1 }]);
+    const finished = await finishLiveAudioRun(capture, run);
+
+    expect(order).toEqual(['preview-push', 'capture-stop', 'preview-push', 'capture-tail', 'preview-stop']);
+    expect(pushed).toEqual([
+      [0.10000000149011612, 0.20000000298023224],
+      [0.30000001192092896, 0.4000000059604645],
+    ]);
+    expect(Array.from(finished.samples)).toEqual([
+      0.10000000149011612, 0.20000000298023224, 0.30000001192092896, 0.4000000059604645,
+    ]);
+    expect(finished.preview.text).toBe('hello there');
   });
 
   test('rejects a sample-rate transition instead of corrupting segment timing', () => {
-    const queue = new LocalSegmentQueue({ transcribe: async () => 'unused', onTranscript: () => {} });
-    const run: LiveAudioRun = { segmenter: null, inputSampleRate: null, queue };
+    const run: LiveAudioRun = {
+      inputSampleRate: null,
+      transcriber: {
+        push() {},
+        stop() {
+          throw new Error('unused');
+        },
+      },
+    };
     observeLiveSamples(run, new Float32Array(320), 16_000);
     expect(() => observeLiveSamples(run, new Float32Array(320), 48_000)).toThrow(/sample rate changed/i);
-    queue.cancel();
   });
 });

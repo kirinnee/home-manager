@@ -91,10 +91,26 @@ describe('one local engine', () => {
   test('states that microphone audio never goes to the box or a third party', () => {
     expect(text).toContain(LOCAL_MODE_SUMMARY);
     expect(LOCAL_MODE_SUMMARY).toContain('never sent to your box or a third party');
+    expect(LOCAL_MODE_SUMMARY).toContain('without waiting for a pause');
   });
 
   test('states why WebGPU is not used, rather than leaving it unexplained', () => {
     expect(text).toContain('runs on the CPU');
+  });
+});
+
+describe('push to talk', () => {
+  test('shows the customizable default and the hold/tap interaction', () => {
+    expect(text).toContain('Push to talk');
+    expect(text).toContain('Alt (either side)');
+    expect(text).toContain('Hold to record and release to finish');
+    expect(text).toContain('tap once to latch');
+    expect(text).toContain('Change shortcut');
+  });
+
+  test('warns up front that a desktop may intercept bare Alt', () => {
+    expect(text).toContain('Bare Alt can be intercepted');
+    expect(text).toContain('window manager');
   });
 });
 
@@ -183,6 +199,8 @@ describe('the touch and focus rules', () => {
 describe('the safety note', () => {
   test('leads with the promise that nothing is ever sent', () => {
     expect(text).toContain(DICTATION_SAFETY_NOTE);
+    expect(DICTATION_SAFETY_NOTE).toContain('one final local decode and enhancement pass');
+    expect(DICTATION_SAFETY_NOTE).toContain('current caret');
     expect(DICTATION_SAFETY_NOTE).toContain('Nothing is ever sent for you.');
   });
 });

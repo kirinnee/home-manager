@@ -6,10 +6,11 @@ import {
   formatElapsed,
   dictationFailureCopy,
   type DictationSheetProps,
+  type DictationStage,
 } from './DictationSheet';
 
 describe('dictationStage — what the reader sees, derived from the phase', () => {
-  const base = { phase: 'idle' as const, hasTranscript: false, hasError: false, wasCapturing: false };
+  const base = { phase: 'idle' as const, hasError: false, wasCapturing: false };
 
   test('a fresh open, before the mic answers, is "starting" not "empty"', () => {
     expect(dictationStage(base)).toBe('starting');
@@ -24,8 +25,13 @@ describe('dictationStage — what the reader sees, derived from the phase', () =
     expect(dictationStage({ ...base, phase: 'transcribing' })).toBe('transcribing');
   });
 
-  test('a landed transcript is review, even once the phase has gone back to idle', () => {
-    expect(dictationStage({ ...base, phase: 'idle', hasTranscript: true, wasCapturing: true })).toBe('review');
+  test('there is NO review stage — a landed transcript inserts itself and the panel closes', () => {
+    // Once a transcript lands the hook inserts it and returns to idle, and the
+    // bundle closes the panel. The reader never sits on a manual review step, so
+    // an idle-with-capture state is only ever the "too short" dead end.
+    const stages: DictationStage[] = ['starting', 'recording', 'transcribing', 'empty', 'error'];
+    expect(stages).not.toContain('review' as DictationStage);
+    expect(dictationStage({ ...base, phase: 'idle', wasCapturing: true })).toBe('empty');
   });
 
   test('idle with nothing AFTER capturing is a too-short dead end, shown honestly', () => {
@@ -35,9 +41,7 @@ describe('dictationStage — what the reader sees, derived from the phase', () =
   test('an error wins over every other signal', () => {
     expect(dictationStage({ ...base, hasError: true })).toBe('error');
     expect(dictationStage({ ...base, phase: 'error' })).toBe('error');
-    expect(dictationStage({ phase: 'recording', hasTranscript: true, hasError: true, wasCapturing: true })).toBe(
-      'error',
-    );
+    expect(dictationStage({ phase: 'recording', hasError: true, wasCapturing: true })).toBe('error');
   });
 });
 
@@ -79,28 +83,32 @@ function render(overrides: Partial<DictationSheetProps> = {}): string {
     stage: 'recording',
     elapsedMs: 3200,
     inputMonitor: null,
-    committedText: '',
-    provisionalText: '',
+    liveText: '',
     pendingSegments: 0,
-    onCommittedTextChange: () => {},
-    onProvisionalTextChange: () => {},
     onDismiss: () => {},
     onStop: () => {},
     onCancel: () => {},
     onRetry: () => {},
-    onInsert: () => {},
     ...overrides,
   };
   return renderToStaticMarkup(<DictationSheet {...props} />);
 }
 
 describe('DictationSheet rendering', () => {
-  test('the panel source contains no focus trap or mount-time focus call', async () => {
+  test('the panel source is a read-only caption — no focus trap, no editor, no Insert', async () => {
     const source = await Bun.file(new URL('./DictationSheet.tsx', import.meta.url).pathname).text();
+    // Non-modal invariants from the original redesign.
     expect(source).not.toContain('<BottomSheet');
     expect(source).not.toContain('useDialogFocus');
     expect(source).not.toContain('.focus(');
     expect(source).not.toContain('autoFocus');
+    // The panel no longer owns or edits a transcript: no textarea/contenteditable,
+    // no committed-vs-provisional editors, and no manual Insert action.
+    expect(source).not.toContain('<Textarea');
+    expect(source).not.toContain('contentEditable');
+    expect(source).not.toContain('onInsert');
+    expect(source).not.toContain('onCommittedTextChange');
+    expect(source).not.toContain('onProvisionalTextChange');
   });
 
   test('a closed panel paints nothing', () => {
@@ -108,51 +116,61 @@ describe('DictationSheet rendering', () => {
     expect(html).toBe('');
   });
 
-  test('recording uses a non-modal mini panel with a waveform, clock, and Stop target', () => {
+  test('recording is a non-modal mini panel with a waveform, clock, read-only caption and Stop', () => {
     const html = render({ stage: 'recording', elapsedMs: 5000 });
     expect(html).toContain('0:05');
     expect(html).toContain('data-dictation-panel="non-modal"');
     expect(html).toContain('role="region"');
     expect(html).toContain('<canvas');
-    expect(html).toContain('Stop &amp; finish');
+    // Stop now finishes AND inserts automatically — there is no separate Insert.
+    expect(html).toContain('Stop &amp; insert');
     expect(html).toContain('Audio stays on this device');
     expect(html).toContain('Cancel');
     expect(html).toContain('Hide dictation panel; recording continues');
+    // Non-modal, and read-only: no dialog, no scrim, and NO editable field.
     expect(html).not.toContain('role="dialog"');
     expect(html).not.toContain('aria-modal');
     expect(html).not.toContain('data-bottom-sheet');
     expect(html).not.toContain('bg-scrim');
+    expect(html).not.toContain('<textarea');
   });
 
-  test('recording distinguishes editable committed text from editable provisional text', () => {
-    const html = render({
-      stage: 'recording',
-      committedText: 'reader corrected this',
-      provisionalText: 'latest phrase',
-      pendingSegments: 1,
-    });
-    expect(html).toContain('Committed · yours to edit');
-    expect(html).toContain('Provisional · still settling');
-    expect(html).toContain('aria-label="Committed dictated text"');
-    expect(html).toContain('aria-label="Provisional dictated text"');
-    expect(html).toContain('reader corrected this');
-    expect(html).toContain('latest phrase');
-    expect(html).toContain('Recognising one local phrase');
+  test('recording copy promises words appear as you speak, without waiting for a pause', () => {
+    const html = render({ stage: 'recording' }).toLowerCase();
+    expect(html).toContain('words appear as you speak');
+    // The whole point of the migration: no silence boundary needed.
+    expect(html).toContain('never have to pause');
   });
 
-  test('finishing keeps both transcript editors available and says it is local', () => {
-    const html = render({ stage: 'transcribing', committedText: 'kept', provisionalText: 'settling' });
-    expect(html).toContain('Finishing the last phrase on this device');
-    expect(html).toContain('Committed · yours to edit');
-    expect(html).toContain('Provisional · still settling');
+  test('the live caption is a single read-only surface, not a committed/provisional editor', () => {
+    const html = render({ stage: 'recording', liveText: 'hello there world', pendingSegments: 1 });
+    // The preview text is shown, verbatim, in a read-only region.
+    expect(html).toContain('hello there world');
+    expect(html).toContain('data-live-transcript="preview"');
+    expect(html).not.toContain('<textarea');
+    // No committed-vs-provisional split labels or styling anymore.
+    expect(html).not.toContain('Committed · yours to edit');
+    expect(html).not.toContain('Provisional · still settling');
+    expect(html).not.toContain('aria-label="Committed dictated text"');
+    expect(html).not.toContain('aria-label="Provisional dictated text"');
   });
 
-  test('review shows the editable transcript, an explicit Insert, and the never-sent promise', () => {
-    const html = render({ stage: 'review', committedText: 'hello there' });
-    expect(html).toContain('hello there');
-    expect(html).toContain('Insert into message');
-    expect(html).toContain('Re-record');
-    expect(html.toLowerCase()).toContain('nothing is sent');
+  test('finishing says a final decode and enhancement run, then auto-insert into the draft', () => {
+    const html = render({ stage: 'transcribing', liveText: 'nearly done' });
+    expect(html).toContain('final on-device decode and enhancement');
+    expect(html.toLowerCase()).toContain('inserting the result into your draft automatically');
+    // Still a read-only preview, still no Insert button.
+    expect(html).toContain('nearly done');
+    expect(html).not.toContain('<textarea');
+    expect(html).not.toContain('Insert');
+  });
+
+  test('the empty dead end offers a fresh record, no review', () => {
+    const html = render({ stage: 'empty' });
+    expect(html).toContain('No speech was captured');
+    expect(html).toContain('Record again');
+    expect(html).not.toContain('Insert');
+    expect(html).not.toContain('<textarea');
   });
 
   test('an error stage speaks the real local-model reason plus Try again', () => {
@@ -163,26 +181,29 @@ describe('DictationSheet rendering', () => {
     });
     expect(html).toContain('The local speech model has not been prepared.');
     expect(html).toContain('Try again');
+    // No recovery-by-insert path: the transcript was disposable.
+    expect(html).not.toContain('Insert');
+    expect(html).not.toContain('<textarea');
   });
 
-  test('a local queue error keeps captured text editable and insertable', () => {
+  test('an error can still show the captured words read-only, but never lets you edit or insert them', () => {
     const html = render({
       stage: 'error',
       errorCode: 'backlog',
       errorMessage: 'This device is falling behind.',
-      committedText: 'safe earlier phrase',
-      provisionalText: 'safe latest phrase',
+      liveText: 'safe earlier words',
     });
-    expect(html).toContain('safe earlier phrase');
-    expect(html).toContain('safe latest phrase');
-    expect(html).toContain('Insert captured text');
+    expect(html).toContain('safe earlier words');
+    expect(html).toContain('data-live-transcript="preview"');
+    expect(html).not.toContain('<textarea');
+    expect(html).not.toContain('Insert');
   });
 
   test('NO stage implies that microphone audio goes to a daemon or cloud service', () => {
-    for (const stage of ['starting', 'recording', 'transcribing', 'review', 'empty', 'error'] as const) {
+    for (const stage of ['starting', 'recording', 'transcribing', 'empty', 'error'] as const) {
       const html = render({
         stage,
-        committedText: 'sample',
+        liveText: 'sample',
         errorCode: 'unknown',
         errorMessage: 'x',
       }).toLowerCase();

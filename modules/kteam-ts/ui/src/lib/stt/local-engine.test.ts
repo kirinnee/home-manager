@@ -30,6 +30,8 @@ const {
   prepareLocalModel,
   selectLocalBackend,
   transcribeLocal,
+  transcribeLocalDetailed,
+  transcribeLocalFinal,
   unloadLocalEngine,
 } = await import('./local-engine');
 const { resetOrtRuntimeConfiguration } = await import('./ort-assets');
@@ -330,6 +332,81 @@ describe('loading uses the PREPARED bytes, not the network', () => {
     await transcribeLocal(new Float32Array([0.1]));
     const config = fromUrls.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(Object.keys(config).some(key => key.toLowerCase().includes('lang'))).toBe(false);
+  });
+
+  test('live snapshots opt into word timestamps and confidence', async () => {
+    const transcribe = mock(async (..._args: unknown[]) => ({
+      utterance_text: '  hello world  ',
+      words: [
+        { text: ' hello ', start_time: 0.1, end_time: 0.4, confidence: 0.8 },
+        { text: 'world', start_time: 0.45, end_time: 0.8, confidence: 0.7 },
+      ],
+      confidence_scores: { word_avg: 0.75 },
+    }));
+    fromUrls.mockImplementationOnce(async () => ({ transcribe }));
+
+    const result = await transcribeLocalDetailed(new Float32Array(1_600).fill(0.1));
+
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect(transcribe.mock.calls[0]?.[1]).toBe(16_000);
+    expect(transcribe.mock.calls[0]?.[2]).toEqual({
+      returnTimestamps: true,
+      returnConfidences: true,
+      enableProfiling: false,
+    });
+    expect(result.text).toBe('hello world');
+    expect(result.words).toEqual([
+      { text: 'hello', startTime: 0.1, endTime: 0.4, confidence: 0.8 },
+      { text: 'world', startTime: 0.45, endTime: 0.8, confidence: 0.7 },
+    ]);
+    expect(result.timestampsValid).toBe(true);
+    expect(result.confidence).toBe(0.75);
+    expect(result.audioMs).toBe(100);
+    expect(result.processingMs).toBeGreaterThanOrEqual(0);
+  });
+
+  test('one malformed runtime word invalidates the whole timing sequence', async () => {
+    const transcribe = mock(async (..._args: unknown[]) => ({
+      utterance_text: 'hello world',
+      words: [
+        { text: 'hello', start_time: 0.1, end_time: 0.4, confidence: 0.8 },
+        { text: 'world', start_time: '0.45', end_time: 0.8, confidence: 0.7 },
+      ],
+    }));
+    fromUrls.mockImplementationOnce(async () => ({ transcribe }));
+
+    const result = await transcribeLocalDetailed(new Float32Array(1_600).fill(0.1));
+
+    expect(result.words).toEqual([{ text: 'hello', startTime: 0.1, endTime: 0.4, confidence: 0.8 }]);
+    expect(result.timestampsValid).toBe(false);
+  });
+
+  test('the final pass uses the long-audio merger exactly once', async () => {
+    const transcribe = mock(async (..._args: unknown[]) => ({ utterance_text: 'wrong fallback' }));
+    const transcribeLongAudio = mock(async (..._args: unknown[]) => ({
+      text: '  complete utterance  ',
+      words: [
+        { text: 'complete', start_time: 0, end_time: 0.4, confidence: 0.9 },
+        { text: 'utterance', start_time: 0.45, end_time: 0.9, confidence: 0.7 },
+      ],
+    }));
+    fromUrls.mockImplementationOnce(async () => ({ transcribe, transcribeLongAudio }));
+
+    const result = await transcribeLocalFinal(new Float32Array(16_000).fill(0.1));
+
+    expect(transcribeLongAudio).toHaveBeenCalledTimes(1);
+    expect(transcribe).not.toHaveBeenCalled();
+    expect(transcribeLongAudio.mock.calls[0]?.[1]).toBe(16_000);
+    expect(transcribeLongAudio.mock.calls[0]?.[2]).toEqual({
+      returnTimestamps: 'word',
+      returnConfidences: true,
+      enableProfiling: false,
+    });
+    expect(result.text).toBe('complete utterance');
+    expect(result.timestampsValid).toBe(true);
+    expect(result.confidence).toBeCloseTo(0.8);
+    expect(result.audioMs).toBe(1_000);
+    expect(result.processingMs).toBeGreaterThanOrEqual(0);
   });
 
   test('loads once and reuses the model for a second utterance', async () => {

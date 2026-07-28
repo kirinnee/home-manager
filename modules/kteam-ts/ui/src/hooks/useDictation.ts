@@ -1,10 +1,10 @@
-// The dictation controller — one local engine, silence-aligned live segments,
-// and exactly one way for text to leave it.
+// The dictation controller — one local engine, a pause-independent rolling
+// preview, and exactly one way for text to leave it.
 //
-// THE ONLY OUTPUTS ARE EDIT EVENTS. `onTranscriptEvent` publishes ordered local
-// segments into the editable dictation panel; `onDraft` remains the fallback
-// for a caller without that panel. There is no `onSubmit`, no `onSend`, and no
-// path from a model result to a message send.
+// `onTranscriptEvent` publishes a read-only live preview. On stop, one clean
+// batch decode replaces that disposable preview, enhancement runs exactly once,
+// and `onDraft` inserts the result at the reader's CURRENT caret. There is no
+// `onSubmit`, no `onSend`, and no path from model output to message sending.
 //
 // TAP CONTROL. `start()` is called synchronously from the mic button so the
 // permission prompt is attributable to that gesture; `stop()` is the panel's
@@ -34,12 +34,11 @@ import { readSttCapabilities } from '../lib/stt/capabilities';
 import { insertTranscript, readSelection, type SelectionLike } from '../lib/stt/draft';
 import { enhance } from '../lib/stt/enhancement';
 import {
-  LiveTranscriptionError,
-  LocalSegmentQueue,
-  appendTranscriptSegment,
+  LocalAgreementTranscriber,
+  unreadableTranscriptReason,
   type LiveTranscriptEvent,
+  type LiveTranscriptSnapshot,
 } from '../lib/stt/live-transcription';
-import { SilenceSegmenter, type SpeechSegment } from '../lib/stt/silence-segmenter';
 import { verifyWordOnly } from '../lib/stt/word-only-verifier';
 import { sttDictionary, useSttSettings, type SttSettings } from '../lib/stt/stt-settings';
 
@@ -102,9 +101,8 @@ export interface UseDictationOptions {
    *  appended at the end, which is the right fallback. */
   selectionRef?: { current: SelectionLike | null };
   onDraft: (result: DictationDraftResult) => void;
-  /** Ordered local transcript events for an editable live panel. When present,
-   * this consumer owns reconciliation and `onDraft` is not called: only its
-   * explicit Insert may touch the composer. */
+  /** Read-only rolling preview. The final transcript still leaves only through
+   * `onDraft`, once, after stop and enhancement. */
   onTranscriptEvent?: (event: LiveTranscriptEvent) => void;
   disabled?: boolean;
   /** Injected in tests. */
@@ -124,7 +122,7 @@ export interface DictationHandle {
   error: DictationError | null;
   /** Non-null while a transcript is being produced, for the status line. */
   busy: boolean;
-  /** Local utterances waiting for or currently inside the one model decode. */
+  /** A local snapshot currently inside the one model decode (always 0 or 1). */
   pendingSegments: number;
   /** Call SYNCHRONOUSLY from a pointerdown/keydown handler. */
   start: () => void;
@@ -136,58 +134,49 @@ export interface DictationHandle {
 }
 
 export interface LiveAudioRun {
-  segmenter: SilenceSegmenter | null;
   inputSampleRate: number | null;
-  queue: LocalSegmentQueue;
+  transcriber: Pick<LocalAgreementTranscriber, 'push' | 'stop'>;
 }
 
 interface ActiveLiveRun extends LiveAudioRun {
+  transcriber: LocalAgreementTranscriber;
   token: number;
-  transcripts: string[];
-  usesLiveConsumer: boolean;
+  finalController: AbortController;
   failed: boolean;
 }
 
-function enqueueSpeechSegments(run: LiveAudioRun, segments: readonly SpeechSegment[]): void {
-  const inputRate = run.inputSampleRate;
-  if (inputRate === null) return;
-  for (const segment of segments) {
-    const samples =
-      inputRate === TARGET_SAMPLE_RATE ? segment.samples : resample(segment.samples, inputRate, TARGET_SAMPLE_RATE);
-    run.queue.enqueue({ id: segment.id, samples });
-  }
-}
-
-/** Feed the exact copied PCM accepted by capture into one rate-stable VAD.
- * Exported because this seam and `finishLiveAudioRun` are the critical hook
- * wiring: the final capture tail must pass here before the queue is closed. */
+/** Feed every copied worklet batch into the rolling decoder immediately. The
+ * input rate is stable for one AudioContext; a transition is rejected rather
+ * than corrupting timestamp math. */
 export function observeLiveSamples(run: LiveAudioRun, samples: Float32Array, inputSampleRate: number): void {
-  if (run.segmenter === null) {
+  if (run.inputSampleRate === null) {
     run.inputSampleRate = inputSampleRate;
-    run.segmenter = new SilenceSegmenter({ sampleRate: inputSampleRate });
   } else if (run.inputSampleRate !== inputSampleRate) {
     throw new Error('The microphone sample rate changed during recording.');
   }
-  enqueueSpeechSegments(run, run.segmenter.push(samples));
+  const localSamples =
+    inputSampleRate === TARGET_SAMPLE_RATE ? samples : resample(samples, inputSampleRate, TARGET_SAMPLE_RATE);
+  run.transcriber.push(localSamples);
 }
 
-/** Finish capture first (which synchronously observes its worklet flush tail),
- * then flush the VAD, then wait for the one serialized decode queue. Keeping
- * this ordering in one tested helper prevents a refactor from clipping the last
- * word or closing the queue before it is enqueued. */
-export async function finishLiveAudioRun(capture: Pick<CaptureLike, 'stop'>, run: LiveAudioRun): Promise<void> {
-  await capture.stop();
-  if (run.segmenter) enqueueSpeechSegments(run, run.segmenter.flush());
-  await run.queue.finish();
+/** Stop capture first: its worklet flush synchronously delivers the last PCM to
+ * `observeLiveSamples` and returns the exact full 16 kHz utterance. Then freeze
+ * preview publication before handing that complete buffer to the final pass. */
+export async function finishLiveAudioRun(
+  capture: Pick<CaptureLike, 'stop'>,
+  run: LiveAudioRun,
+): Promise<{ samples: Float32Array; preview: LiveTranscriptSnapshot }> {
+  const samples = await capture.stop();
+  const preview = run.transcriber.stop();
+  return { samples, preview };
 }
 
 /** Local model/queue failures use stable codes just like capture failures. */
 export function dictationErrorFromFailure(failure: unknown): DictationError | null {
   const code = (failure as { code?: unknown } | null)?.code;
   if (code === 'aborted') return null;
-  if (failure instanceof LiveTranscriptionError) return { code: failure.code, message: failure.message };
   const message =
-    failure instanceof Error ? failure.message : 'Local transcription failed before the phrase could be kept.';
+    failure instanceof Error ? failure.message : 'Local transcription failed before the recording could be kept.';
   if (code === 'not-prepared') return { code: 'not-prepared', message };
   return { code: typeof code === 'string' ? code : 'unknown', message };
 }
@@ -231,12 +220,12 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
     (updateState = true) => {
       const run = runRef.current;
       runRef.current = null;
-      run?.segmenter?.reset();
       // Invalidate first so the queue's pending callback is suppressed. This is
       // important during unmount, where even a harmless setState is teardown work
       // React should never receive.
       latch.cancel();
-      run?.queue.cancel();
+      run?.transcriber.cancel();
+      run?.finalController.abort();
       releaseRequested.current = false;
       if (updateState) setPendingSegments(0);
     },
@@ -309,8 +298,8 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
       const nextError = dictationErrorFromFailure(failure);
       if (nextError === null) return;
       run.failed = true;
-      run.segmenter?.reset();
-      run.queue.cancel();
+      run.transcriber.cancel();
+      run.finalController.abort();
       latch.abort(run.token);
       releaseRequested.current = false;
       setPendingSegments(0);
@@ -321,10 +310,9 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
     [latch],
   );
 
-  /** Claim and finish this generation exactly once. The capture's flush first
-   * delivers its final PCM through `onSamples`; only then do we flush the VAD
-   * and close the SAME queue. A second whole-recording decode would duplicate
-   * speech and could replace reader edits, so there is intentionally none. */
+  /** Claim and finish this generation exactly once. Live text is deliberately
+   * disposable: after capture flushes, stop its publisher, run ONE clean batch
+   * decode of the complete utterance, enhance once, then insert once. */
   const finish = useCallback(
     async (token: number): Promise<void> => {
       const capture = latch.claim(token);
@@ -338,7 +326,7 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
       setInputMonitor(null);
       setPhase('transcribing');
       try {
-        await finishLiveAudioRun(
+        const { samples, preview } = await finishLiveAudioRun(
           {
             stop: async () => {
               try {
@@ -352,15 +340,28 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
         );
         if (!latch.isCurrent(token) || run.failed) return;
 
-        if (!latch.isCurrent(token) || run.failed) return;
-
-        const current = optionsRef.current;
-        if (run.usesLiveConsumer) {
-          current.onTranscriptEvent?.({ type: 'complete', generation: token });
-        } else {
-          const complete = run.transcripts.reduce(appendTranscriptSegment, '');
-          commit(complete);
+        let raw = preview.text.trim();
+        if (samples.length > 0) {
+          try {
+            const engine = await import('../lib/stt/local-engine');
+            const final = await engine.transcribeLocalFinal(samples, {
+              capabilities,
+              signal: run.finalController.signal,
+            });
+            if (unreadableTranscriptReason(final, { requireTimestamps: false }) === null) raw = final.text.trim();
+          } catch (failure) {
+            // VoiceInk uses the inverse fallback (live → batch). Here a usable
+            // live hypothesis is still safer than throwing it away because the
+            // final batch helper failed. With no preview, surface the real error.
+            if (!raw) throw failure;
+          }
         }
+        if (!latch.isCurrent(token) || run.failed) return;
+        const finalText = raw ? await enhanceTranscript(raw, token) : '';
+        if (!latch.isCurrent(token) || run.failed) return;
+        const current = optionsRef.current;
+        current.onTranscriptEvent?.({ type: 'complete', generation: token, text: finalText });
+        commit(finalText);
         setPendingSegments(0);
         setPhase('idle');
       } catch (failure) {
@@ -369,7 +370,7 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
         latch.settle(capture);
       }
     },
-    [commit, latch, reportRunFailure],
+    [capabilities, commit, enhanceTranscript, latch, reportRunFailure],
   );
 
   const start = useCallback(() => {
@@ -377,26 +378,24 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
     if (phase === 'requesting' || phase === 'recording') return;
 
     const previous = runRef.current;
-    previous?.segmenter?.reset();
-    previous?.queue.cancel();
+    previous?.transcriber.cancel();
+    previous?.finalController.abort();
     const token = latch.begin();
     let localEnginePromise: Promise<typeof import('../lib/stt/local-engine')> | null = null;
     let run!: ActiveLiveRun;
-    const queue = new LocalSegmentQueue({
+    const finalController = new AbortController();
+    const transcriber = new LocalAgreementTranscriber({
       transcribe: async (samples, signal) => {
         const engine = await (localEnginePromise ??= import('../lib/stt/local-engine'));
-        const raw = await engine.transcribeLocal(samples, { capabilities, signal });
-        if (raw.trim().length === 0) return raw;
-        return enhanceTranscript(raw, token);
+        return engine.transcribeLocalDetailed(samples, { capabilities, signal });
       },
-      onTranscript: result => {
+      onUpdate: snapshot => {
         if (!latch.isCurrent(token) || run.failed) return;
-        run.transcripts.push(result.text);
         optionsRef.current.onTranscriptEvent?.({
-          type: 'segment',
+          type: 'hypothesis',
           generation: token,
-          id: result.id,
-          text: result.text,
+          committed: snapshot.committed,
+          provisional: snapshot.provisional,
         });
       },
       onPendingChange: pending => {
@@ -406,11 +405,9 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
     });
     run = {
       token,
-      segmenter: null,
       inputSampleRate: null,
-      queue,
-      transcripts: [],
-      usesLiveConsumer: typeof optionsRef.current.onTranscriptEvent === 'function',
+      transcriber,
+      finalController,
       failed: false,
     };
     runRef.current = run;
@@ -439,8 +436,8 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
         // control to idle — otherwise the button stays pressed-looking and the
         // next `start()` is refused for an utterance that no longer exists.
         if (!latch.abort(token)) return;
-        run.segmenter?.reset();
-        run.queue.cancel();
+        run.transcriber.cancel();
+        run.finalController.abort();
         releaseRequested.current = false;
         setPendingSegments(0);
         setInputMonitor(null);
@@ -480,8 +477,8 @@ export function useDictation(options: UseDictationOptions): DictationHandle {
       .catch(failure => {
         if (!latch.isCurrent(token)) return;
         run.failed = true;
-        run.segmenter?.reset();
-        run.queue.cancel();
+        run.transcriber.cancel();
+        run.finalController.abort();
         const captureFailure = captureErrorFrom(failure);
         setPendingSegments(0);
         setInputMonitor(null);
