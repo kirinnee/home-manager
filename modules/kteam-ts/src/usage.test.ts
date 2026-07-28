@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   authFailureRemedy,
   compactUsageQuota,
+  providerUnavailableDetail,
   quotaFromUsage,
   USAGE_REFRESH_MS,
   UsageFeed,
@@ -154,6 +155,66 @@ describe('session usage projection', () => {
     expect(usageEventData(state as SessionState)).toEqual({ usageAuthOk: false });
   });
 
+  test('keeps a transport/probe failure unknown instead of inventing auth failure', () => {
+    expect(
+      quotaFromUsage({
+        binary: 'claude-auto-atomi',
+        provider: 'anthropic',
+        usageBased: true,
+        ok: false,
+        atLimit: false,
+      }),
+    ).toEqual({ usageBased: true, provider: 'anthropic' });
+  });
+
+  test('carries confirmed CLIProxy cooldown without fabricating numerical quota', () => {
+    const quota = quotaFromUsage({
+      binary: 'claude-auto-loge',
+      provider: 'cliproxy',
+      usageBased: false,
+      ok: true,
+      availability: 'unavailable',
+      unavailable: true,
+      unavailableReason: 'cooldown',
+      retryAt: 1_785_259_371_000,
+      authOk: true,
+      atLimit: true,
+      fiveHourPercent: 100,
+    });
+    expect(quota).toEqual({
+      usageBased: false,
+      availability: 'unavailable',
+      unavailable: true,
+      unavailableReason: 'cooldown',
+      retryAt: 1_785_259_371_000,
+      atLimit: true,
+      authOk: true,
+      provider: 'cliproxy',
+    });
+  });
+
+  test('carries generic provider-down independently from atLimit', () => {
+    expect(
+      quotaFromUsage({
+        binary: 'claude-auto-loge',
+        provider: 'cliproxy',
+        usageBased: false,
+        ok: true,
+        availability: 'unavailable',
+        unavailable: true,
+        unavailableReason: 'provider',
+        authOk: true,
+        atLimit: false,
+      }),
+    ).toMatchObject({ unavailable: true, unavailableReason: 'provider', atLimit: false, authOk: true });
+  });
+
+  test('formats provider-down preflight detail with cause and retry time', () => {
+    expect(
+      providerUnavailableDetail({ unavailableReason: 'cooldown', retryAt: Date.parse('2026-07-28T08:00:00Z') }),
+    ).toBe('all proxy credentials are cooling down; retry after 2026-07-28T08:00:00.000Z');
+  });
+
   test('omits null windows from partially reported account usage', () => {
     expect(
       quotaFromUsage({
@@ -195,6 +256,12 @@ describe('auth-failure remedy is achievable per account kind', () => {
     const remedy = authFailureRemedy('zai');
     expect(remedy).toContain('z.ai');
     expect(remedy).toContain('sops');
+    expect(remedy).not.toContain('kfleet login');
+  });
+
+  test('CLIProxy auth failure points to the credential pool, not kfleet OAuth login', () => {
+    const remedy = authFailureRemedy('cliproxy');
+    expect(remedy).toContain('kloge pull');
     expect(remedy).not.toContain('kfleet login');
   });
 

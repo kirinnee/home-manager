@@ -131,8 +131,13 @@ export function ineligibilityReason(
     return 'not installed in ~/.kfleet/bin';
   }
   const usage = input.usage.find(item => item.binary === account.wrapper);
+  if (usage?.authOk === false) return 'credentials rejected (kfleet feed)';
+  if (usage?.unavailable === true) {
+    const cause = usage.unavailableReason?.replaceAll('_', ' ') ?? 'provider';
+    const retry = typeof usage.retryAt === 'number' ? `; retry after ${new Date(usage.retryAt).toISOString()}` : '';
+    return `CLIProxy unavailable: ${cause}${retry} (kfleet feed)`;
+  }
   if (usage?.atLimit === true) return 'at its usage limit (kfleet feed)';
-  if (usage?.authOk === false || usage?.ok === false) return 'credentials rejected (kfleet feed)';
   if (isDemoted(input.state, account.wrapper, input.nowMs)) {
     return `demoted until ${input.state.demotedUntil?.[account.wrapper]}`;
   }
@@ -205,7 +210,7 @@ export function selectWardenAccount(input: WardenSelectionInput): WardenSelectio
  *  feed-corroborated at the source (kfleet triple-probes) and demote in ONE
  *  strike; `generic` (tmux error, wrapper crash, anything else start() threw)
  *  is raw and needs `failureThreshold` consecutive strikes. */
-export type WardenFailureKind = 'quota' | 'auth' | 'generic';
+export type WardenFailureKind = 'quota' | 'auth' | 'provider' | 'generic';
 
 /** Classify a start() error by its message. The preflight throws distinctive
  *  wording for both corroborated classes (session-manager start() preflight);
@@ -215,6 +220,8 @@ export type WardenFailureKind = 'quota' | 'auth' | 'generic';
 export function classifyWardenFailure(message: string): WardenFailureKind {
   if (/at its usage limit/i.test(message)) return 'quota';
   if (/credentials were rejected|auth failure/i.test(message)) return 'auth';
+  if (/CLI\/provider is unavailable|CLIProxy unavailable|proxy\/provider is unavailable/i.test(message))
+    return 'provider';
   return 'generic';
 }
 

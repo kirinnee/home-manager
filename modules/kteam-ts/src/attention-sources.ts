@@ -8,11 +8,15 @@ import type { KTeamEvent, PendingQuestion } from './types';
 import type { ScopedTaskSummary, SessionTaskListResponse } from './tasks-types';
 import type { AddAttentionInput, AttentionService } from './attention-service';
 import type { AttentionActor } from './attention-types';
+import type { WardenAnomaly } from './warden-detect';
 
 export interface AttentionSessionSource {
   list(): Promise<SessionView[]>;
   get(sessionId: string): Promise<SessionView>;
   subscribe(listener: (event: KTeamEvent) => void): () => void;
+  /** Lightweight durable anomaly snapshot; unlike full wardenStatus this does
+   *  not refresh account usage during daemon bootstrap. */
+  wardenAnomalies?(): Promise<WardenAnomaly[]>;
 }
 
 export interface AttentionTaskSource {
@@ -121,6 +125,8 @@ const PERMISSION_RESOLVED_EVENTS = new Set([
   'interaction.permission_cancelled',
 ]);
 
+const PROVIDER_ATTENTION_PREFIX = 'provider-unavailable:';
+
 async function forEachConcurrent<T>(
   values: readonly T[],
   limit: number,
@@ -144,6 +150,8 @@ async function forEachConcurrent<T>(
  * status drift never clears the board. */
 export class AttentionSources {
   private readonly blocked = new Map<string, Set<string>>();
+  /** Stable provider source-ref → per-session board anchor. */
+  private readonly providerAnchors = new Map<string, string>();
   private readonly queued: KTeamEvent[] = [];
   private unsubSessions: (() => void) | undefined;
   private unsubTasks: (() => void) | undefined;
@@ -173,6 +181,13 @@ export class AttentionSources {
     });
     // Avoid a fleet-sized burst of simultaneous task/file reads at daemon boot.
     await forEachConcurrent(views, 16, view => this.seedSession(view));
+    if (this.sessions.wardenAnomalies) {
+      const anomalies = await this.sessions.wardenAnomalies().catch(error => {
+        this.report('<fleet>', 'provider anomaly baseline', error);
+        return [] as WardenAnomaly[];
+      });
+      await this.applyProviderAnomalies(anomalies);
+    }
     this.seeding = false;
     for (const event of this.queued.splice(0)) this.dispatch(event);
   }
@@ -192,6 +207,13 @@ export class AttentionSources {
       return null;
     });
     const canReconcile = persisted !== null && persisted.parseErrors === 0;
+
+    if (canReconcile) {
+      for (const item of persisted.items) {
+        if (item.source !== 'agent-raised' || !item.sourceRef?.startsWith(PROVIDER_ATTENTION_PREFIX)) continue;
+        if (!this.providerAnchors.has(item.sourceRef)) this.providerAnchors.set(item.sourceRef, id);
+      }
+    }
 
     // These are explicit actions that may have completed while kteamd was
     // stopped. Reconcile only against a fully parsed board and retain the
@@ -253,6 +275,12 @@ export class AttentionSources {
   }
 
   private async handle(event: KTeamEvent): Promise<void> {
+    if (event.type === 'fleet.anomaly') {
+      const anomalies = record(event.data)['anomalies'];
+      if (Array.isArray(anomalies)) await this.applyProviderAnomalies(anomalies as WardenAnomaly[]);
+      return;
+    }
+
     if (event.type === 'tasks.updated') {
       const snapshot = event.data as SessionTaskListResponse;
       if (snapshot && snapshot.sessionId === event.sessionId && Array.isArray(snapshot.tasks)) {
@@ -324,6 +352,46 @@ export class AttentionSources {
         waitingSince: event.time,
         howToResolve: 'Inspect the session and explicitly resolve this attention item after acting.',
       });
+    }
+  }
+
+  /** One provider outage produces one durable item on one deterministic session
+   *  board. Attention is intentionally not auto-resolved on recovery: its
+   *  contract requires the human to act and explicitly clear the request. */
+  private async applyProviderAnomalies(anomalies: readonly WardenAnomaly[]): Promise<void> {
+    const seen = new Set<string>();
+    for (const anomaly of anomalies) {
+      if (anomaly.kind !== 'provider_unavailable' || !anomaly.fleetKey) continue;
+      const sourceRef = `${PROVIDER_ATTENTION_PREFIX}${anomaly.fleetKey}:${anomaly.generation ?? 1}`;
+      if (seen.has(sourceRef)) continue;
+      seen.add(sourceRef);
+      const candidates = [
+        this.providerAnchors.get(sourceRef),
+        anomaly.sessionId,
+        ...(anomaly.affectedSessionIds ?? []),
+      ].filter((value, index, all): value is string => Boolean(value) && all.indexOf(value) === index);
+      const affected = anomaly.affectedSessionIds?.length ?? 1;
+      const provider = anomaly.provider ?? anomaly.fleetKey;
+      let lastError: unknown;
+      for (const sessionId of candidates) {
+        try {
+          await this.attention.addFromSource(sessionId, {
+            source: 'agent-raised',
+            sourceRef,
+            subject: `Provider ${provider} is unavailable (${affected} session${affected === 1 ? '' : 's'})`,
+            why: anomaly.detail,
+            waitingSince: anomaly.since,
+            howToResolve:
+              'Check `kteam warden status` and `kfleet usage`; wait for cooldown, top up spend, or re-authenticate as indicated, reroute affected work, then explicitly resolve this item.',
+          });
+          this.providerAnchors.set(sourceRef, sessionId);
+          lastError = undefined;
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (lastError !== undefined) throw lastError;
     }
   }
 

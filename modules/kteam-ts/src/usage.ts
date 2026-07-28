@@ -133,6 +133,8 @@ const OAUTH_PROVIDERS = new Set(['anthropic', 'codex']);
  *  provider → name both paths rather than guess wrong. */
 export function authFailureRemedy(provider?: string): string {
   if (provider && OAUTH_PROVIDERS.has(provider)) return 'run `kfleet login`';
+  if (provider === 'cliproxy')
+    return 'restore the CLIProxyAPI credential pool with `kloge pull`, then re-check `kfleet usage`';
   if (provider === 'minimax') return 'rotate $MINIMAX_API_KEY in sops (secrets.yaml), then run `kfleet apply`';
   if (provider === 'zai') return "rotate the account's z.ai API key in sops (secrets.yaml), then run `kfleet apply`";
   return 'for an API-key account rotate its key in sops then `kfleet apply`; for an OAuth account run `kfleet login`';
@@ -143,23 +145,61 @@ const percent = (value: unknown): number | undefined =>
 const timestamp = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 
+const unavailableReason = (
+  value: unknown,
+): NonNullable<NonNullable<SessionState['quota']>['unavailableReason']> | undefined =>
+  value === 'cooldown' ||
+  value === 'spend_limit' ||
+  value === 'auth' ||
+  value === 'provider' ||
+  value === 'no_credentials'
+    ? value
+    : undefined;
+
+/** Actionable provider-down wording shared by launch preflight and status paths. */
+export function providerUnavailableDetail(quota: NonNullable<SessionState['quota']>): string {
+  const reason =
+    quota.unavailableReason === 'cooldown'
+      ? 'all proxy credentials are cooling down'
+      : quota.unavailableReason === 'spend_limit'
+        ? 'the monthly spend limit was reached'
+        : quota.unavailableReason === 'auth'
+          ? 'the proxy rejected every credential'
+          : quota.unavailableReason === 'no_credentials'
+            ? 'the proxy has no active credentials'
+            : 'the proxy/provider is unavailable';
+  const retry = quota.retryAt ? `; retry after ${new Date(quota.retryAt).toISOString()}` : '';
+  return `${reason}${retry}`;
+}
+
 /** Normalize one wrapper record without ever turning absent/error data into 0%.
- *  `ok:false` records are treated as authentication failures, matching the
- *  launch preflight contract, and their placeholder usage numbers are hidden. */
+ *  Transport/probe failure (`ok:false`) stays unknown; only explicit
+ *  `authOk:false` is authentication evidence. Runtime proxy availability is
+ *  carried independently of numerical subscription windows. */
 export function quotaFromUsage(account: AgentUsage): NonNullable<SessionState['quota']> {
-  // kfleet emits raw API-metered rows as `usageBased:false, ok:false`: no
-  // quota probe was attempted because there is no subscription window. That
-  // is positive billing evidence, not an authentication failure.
-  const authOk = account.usageBased === false ? account.authOk : account.ok === false ? false : account.authOk;
-  const usable = account.ok !== false && account.usageBased !== false && authOk !== false;
-  const fiveHourPercent = usable ? percent(account.fiveHourPercent) : undefined;
-  const weeklyPercent = usable ? percent(account.weeklyPercent) : undefined;
-  const fiveHourResetAt = usable ? timestamp(account.fiveHourResetAt) : undefined;
-  const weeklyResetAt = usable ? timestamp(account.weeklyResetAt) : undefined;
+  const authOk = account.authOk;
+  const feedOk = account.ok !== false;
+  const numerical = feedOk && account.usageBased !== false && authOk !== false;
+  const availability =
+    feedOk && (account.availability === 'available' || account.availability === 'unavailable')
+      ? account.availability
+      : undefined;
+  const unavailable = feedOk && typeof account.unavailable === 'boolean' ? account.unavailable : undefined;
+  const reason = unavailable === true ? unavailableReason(account.unavailableReason) : undefined;
+  const retryAt = availability !== undefined ? timestamp(account.retryAt) : undefined;
+  const availabilityKnown = availability !== undefined || unavailable !== undefined;
+  const fiveHourPercent = numerical ? percent(account.fiveHourPercent) : undefined;
+  const weeklyPercent = numerical ? percent(account.weeklyPercent) : undefined;
+  const fiveHourResetAt = numerical ? timestamp(account.fiveHourResetAt) : undefined;
+  const weeklyResetAt = numerical ? timestamp(account.weeklyResetAt) : undefined;
   const resets = [fiveHourResetAt, weeklyResetAt].filter((value): value is number => value !== undefined);
   return {
     ...(typeof account.usageBased === 'boolean' ? { usageBased: account.usageBased } : {}),
-    ...(usable && typeof account.atLimit === 'boolean' ? { atLimit: account.atLimit } : {}),
+    ...(availability !== undefined ? { availability } : {}),
+    ...(unavailable !== undefined ? { unavailable } : {}),
+    ...(reason !== undefined ? { unavailableReason: reason } : {}),
+    ...(retryAt !== undefined ? { retryAt } : {}),
+    ...((numerical || availabilityKnown) && typeof account.atLimit === 'boolean' ? { atLimit: account.atLimit } : {}),
     ...(authOk !== undefined ? { authOk } : {}),
     ...(account.provider ? { provider: account.provider } : {}),
     ...(fiveHourPercent !== undefined ? { fiveHourPercent } : {}),

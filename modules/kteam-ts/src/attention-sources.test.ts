@@ -9,6 +9,7 @@ import type { ScopedTaskSummary, SessionTaskListResponse } from './tasks-types';
 import { AttentionService } from './attention-service';
 import { AttentionSources } from './attention-sources';
 import type { AttentionSnapshot } from './attention-types';
+import type { WardenAnomaly } from './warden-detect';
 
 const SID = 'ms3g6a8p-71542ce1';
 const LEAD = 'ms2bkdxy-c845508e';
@@ -107,18 +108,20 @@ const taskV2Snapshot = (blockedBy: string[]): SessionTaskListResponse => ({
 
 class Sessions {
   current = view();
+  anomalies: WardenAnomaly[] = [];
   listeners = new Set<(event: KTeamEvent) => void>();
   list = async () => [this.current];
   get = async () => this.current;
+  wardenAnomalies = async () => this.anomalies;
   subscribe = (listener: (event: KTeamEvent) => void) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   };
-  emit(type: string, data: Record<string, unknown>, source: KTeamEvent['source'] = 'client'): void {
+  emit(type: string, data: Record<string, unknown>, source: KTeamEvent['source'] = 'client', sessionId = SID): void {
     const event: KTeamEvent = {
       sequence: 1,
       time: '2026-07-28T00:03:00.000Z',
-      sessionId: SID,
+      sessionId,
       turn: 1,
       type,
       source,
@@ -182,6 +185,21 @@ async function harness(initialTasks?: SessionTaskListResponse) {
   return { sessions, tasks, service, sources, errors };
 }
 
+const providerAnomaly = (sessionId = SID): WardenAnomaly => ({
+  kind: 'provider_unavailable',
+  fleetKey: 'provider:claude',
+  generation: 1,
+  provider: 'claude',
+  affectedSessionIds: [sessionId, 'other-session'],
+  failureClasses: ['cooling_down'],
+  models: ['claude-fable-5'],
+  sessionId,
+  teammate: 'zoe',
+  status: 'running',
+  detail: 'provider claude is unavailable in 2 active auto sessions after two deterministic sweeps',
+  since: '2026-07-28T00:00:00.000Z',
+});
+
 async function boardWhen(
   service: AttentionService,
   accepts: (snapshot: AttentionSnapshot) => boolean,
@@ -198,6 +216,65 @@ async function boardWhen(
 }
 
 describe('AttentionSources', () => {
+  test('a fleet provider anomaly raises one idempotent Attention item on its anchor', async () => {
+    const h = await harness();
+    const anomaly = providerAnomaly();
+    h.sessions.emit('fleet.anomaly', { anomalies: [anomaly] }, 'daemon', 'fleet');
+    h.sessions.emit('fleet.anomaly', { anomalies: [anomaly] }, 'daemon', 'fleet');
+    const snapshot = await boardWhen(h.service, value =>
+      value.items.some(item => item.sourceRef === 'provider-unavailable:provider:claude:1'),
+    );
+    const providerItems = snapshot.items.filter(item => item.sourceRef === 'provider-unavailable:provider:claude:1');
+    expect(providerItems).toHaveLength(1);
+    expect(providerItems[0]).toMatchObject({
+      source: 'agent-raised',
+      subject: 'Provider claude is unavailable (2 sessions)',
+      raisedBy: 'daemon',
+    });
+    h.sources.close();
+  });
+
+  test('startup baselines a provider anomaly that fired before Attention subscribed', async () => {
+    const sessions = new Sessions();
+    sessions.anomalies = [providerAnomaly()];
+    const tasks = new Tasks();
+    tasks.current = taskSnapshot('in_progress');
+    const service = new AttentionService(
+      paths,
+      { resolve: async ref => (ref === SID ? { id: SID, name: 'zoe' } : null) },
+      { role: 'daemon' },
+    );
+    const sources = new AttentionSources(service, sessions, tasks);
+    await sources.start();
+    expect((await service.list(SID)).items).toContainEqual(
+      expect.objectContaining({ sourceRef: 'provider-unavailable:provider:claude:1' }),
+    );
+    sources.close();
+  });
+
+  test('a recovered provider can raise a fresh Attention generation', async () => {
+    const h = await harness();
+    h.sessions.emit('fleet.anomaly', { anomalies: [providerAnomaly()] }, 'daemon', 'fleet');
+    await boardWhen(h.service, value =>
+      value.items.some(item => item.sourceRef === 'provider-unavailable:provider:claude:1'),
+    );
+    await h.service.resolveFromSource(
+      SID,
+      'agent-raised',
+      'provider-unavailable:provider:claude:1',
+      'Provider recovered.',
+      { actor: 'user' },
+    );
+    h.sessions.emit('fleet.anomaly', { anomalies: [{ ...providerAnomaly(), generation: 2 }] }, 'daemon', 'fleet');
+    const snapshot = await boardWhen(h.service, value =>
+      value.items.some(item => item.sourceRef === 'provider-unavailable:provider:claude:2'),
+    );
+    expect(snapshot.items).toContainEqual(
+      expect.objectContaining({ sourceRef: 'provider-unavailable:provider:claude:2' }),
+    );
+    h.sources.close();
+  });
+
   test('startup baselines a pending question and blocked task without conflating them', async () => {
     const h = await harness();
     const snapshot = await h.service.list(SID);

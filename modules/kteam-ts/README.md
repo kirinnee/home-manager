@@ -68,5 +68,41 @@ daemon checks its own timer lateness and reconciles that index against the
 session directories, reindexing or re-adopting what drifted; an index that will
 not heal in place asks the service manager for a clean restart.
 
+Fleet analytics use that SQLite index, including terminal and archived sessions:
+
+```text
+kteam analytics
+kteam analytics "count by (wrapper)"
+kteam analytics "avg by (model, harness) {label=ui-r28-*}"
+kteam analytics "sum by (day) {status=completed}" --json
+```
+
+The command is named `analytics` rather than `metrics` because it describes
+fleet history and outcomes, while leaving run-local metrics terminology to
+`kloop`.
+
+The query language deliberately follows `kloop metrics`: `sum`, `avg`, `min`,
+`max`, or `count`; optional `by (label, ...)`; and `{label=value}` / glob-style
+`{label=~value-*}` filters. Labels are wrapper/binary, model, harness, mode,
+status, label, cwd/repo, parent, day, and week. Results include session count,
+tokens, turns, wall duration (unknown until a session records its finish), time
+to first output, last/end context percent, and stall/failure/completion rates.
+`/v1/analytics?q=...` returns the same contract as `--json`.
+
+`token_data` is an additional honesty label (`known` or `unknown`). The default
+keeps incomplete model groups blank; when a known-only sample is intentional,
+say so in the query: `avg by (model) {status=completed, token_data=known}`.
+
+Analytics metadata is materialized on every indexed config/state/event change;
+a missing analytics schema is rebuilt from `kteam.sqlite` without opening the
+1,000+ session directories. Exact token totals need transcript usage records,
+so a low-priority byte-cursor worker streams changed sources once and keeps the
+derived totals incremental. Queries never read transcripts. Until every source
+for a session has been indexed, its token count is unknown (`null` / `—`), not
+zero; an aggregate is likewise blank unless all sessions in that group know the
+measure, with `[known/total]` coverage shown. Raw output is capped at 200 rows,
+grouped output at 500 groups, query text at 2,048 characters, and transcript
+scanning at one bounded line plus a 32 MiB background batch.
+
 The daemon combines transcript activity, tmux/pane health, Git diffs, exit
 codes, markers, and `kfleet` quota data before classifying a stall.
