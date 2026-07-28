@@ -33,6 +33,9 @@ export interface SystemBlockInfo {
   status?: string;
   /** Derived chip tone. Set from status, or directly for interrupt notices. */
   tone?: 'ok' | 'warn' | 'err';
+  /** A context boundary gets full-width divider treatment while retaining the
+   *  same collapsed disclosure contract as every other system row. */
+  divider?: 'compaction' | 'clear';
   /** ALWAYS the full original text, untouched — the disclosure body. */
   raw: string;
 }
@@ -85,8 +88,11 @@ const TURN_PROMPT = new RegExp(
 // Harness interrupt notices. The raw IS the summary.
 const INTERRUPTED = /^\[Request interrupted by user( for tool use)?\]/;
 
-// The post-compaction opener (a long system narrative).
-const COMPACTED = /^This session is being continued from a previous conversation/;
+// Post-compaction openers. Claude writes the first form as a user record; Codex
+// writes the second inside its canonical top-level `compacted.payload.message`
+// record (normalized to chat.user by src/codex-transcript.ts).
+const COMPACTED =
+  /^(?:This session is being continued from a previous conversation|Another language model started to solve this problem and produced a summary)/;
 
 // Daemon-injected automode/liveness plumbing (see rules 6–10). These are emitted
 // by the kteam daemon into the user channel to steer an autonomous session; each
@@ -137,6 +143,32 @@ const CODEX_PROTOCOL = /^#\s*AGENTS\.md instructions\b/;
 // with attributes) and nothing else. `<tag>` or `<tag attr="…">`.
 const LEADING_TAG = /^<([a-zA-Z][\w:-]*)(\s[^>]*)?>\s*$/;
 
+/** A summary section title carries structure but no useful content. Real
+ *  Claude payloads use `1. **Primary Request and Intent:**`; real Codex payloads
+ *  use Markdown headings such as `## Checkpoint`. */
+function isCompactionHeading(line: string): boolean {
+  const trimmed = line.trim();
+  if (/^#{1,6}\s+\S/.test(trimmed)) return true;
+  const withoutListMarker = trimmed.replace(/^\d+[.)]\s+/, '').replace(/^[-*]\s+/, '');
+  const withoutEmphasis = withoutListMarker.replace(/^\*{1,2}/, '').replace(/\*{1,2}$/, '');
+  return withoutEmphasis.length <= 120 && /:\s*$/.test(withoutEmphasis);
+}
+
+function compactionSummary(text: string): string | undefined {
+  const lines = text.split('\n');
+  const explicitHeader = lines.findIndex(line => /^\s*summary\s*:?\s*$/i.test(line));
+  // Claude has an explicit `Summary:` line. Codex's first line is boilerplate
+  // ending in a colon, so start after that opener when no standalone header is
+  // present.
+  const start = explicitHeader >= 0 ? explicitHeader + 1 : 1;
+  for (let i = start; i < lines.length; i += 1) {
+    const candidate = lines[i]!.trim();
+    if (!candidate || isCompactionHeading(candidate)) continue;
+    return candidate.replace(/^(?:\d+[.)]|[-*])\s+/, '').trim() || undefined;
+  }
+  return undefined;
+}
+
 /** Returns block info when `text` is harness-injected system noise, or `null`
  *  when it should render as an ordinary user message. Rules are ordered;
  *  first match wins. */
@@ -185,23 +217,11 @@ export function classifySystemText(text: string): SystemBlockInfo | null {
   }
 
   // 5. compaction summary. Show the first useful line AFTER the `Summary`
-  //    header, never the literal header word (and never the boilerplate opener).
-  //    Leading list markers are stripped so a `1.`/`-` bullet reads cleanly.
+  //    header/opener, never a Markdown or numbered section heading. Leading
+  //    list markers are stripped so a `1.`/`-` bullet reads cleanly.
   if (COMPACTED.test(text)) {
-    const lines = text.split('\n');
-    const header = lines.findIndex(l => /^\s*summary\b/i.test(l));
-    let firstUseful: string | undefined;
-    if (header >= 0) {
-      for (let j = header + 1; j < lines.length; j++) {
-        const t = lines[j]!.trim().replace(/^(?:\d+\.|[-*])\s*/, '');
-        if (t) {
-          firstUseful = t;
-          break;
-        }
-      }
-    }
-    const summary = oneLine(firstUseful) ?? 'earlier conversation summarised';
-    return { label: 'context compacted', summary, raw: text };
+    const summary = oneLine(compactionSummary(text)) ?? 'earlier conversation summarised';
+    return { label: 'context compacted', divider: 'compaction', summary, raw: text };
   }
 
   // 6. daemon liveness nudge.

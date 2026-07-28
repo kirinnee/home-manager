@@ -54,6 +54,17 @@ const TONE_CLASS: Record<'ok' | 'warn' | 'err', string> = {
   err: 'text-err',
 };
 
+// Context boundaries stay in the established industrial/chrome language, but
+// earn a full-width rule and a compact raised disclosure so they cannot be
+// mistaken for ordinary harness noise. Exported only to pin the phone-width and
+// divider geometry in the DOM-free unit suite.
+export const SYSTEM_DIVIDER_LAYOUT = Object.freeze({
+  track: 'flex min-w-0 items-center gap-2 py-1',
+  rule: 'h-px min-w-3 flex-1 bg-border-soft',
+  button:
+    'max-w-[88%] rounded-control border border-border-soft bg-surface-2 px-2.5 py-0.5 text-fg-soft shadow-sm hover:border-accent-border',
+});
+
 function fmtDuration(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
@@ -652,38 +663,64 @@ function ThinkingLine({ text, durationMs }: { text: string; durationMs?: number 
 function SystemRow({ info, ts }: { info: SystemBlockInfo; ts?: string }) {
   const [open, setOpen] = useState(false);
   const toneClass = info.tone ? TONE_CLASS[info.tone] : undefined;
+  const divider = info.divider !== undefined;
   return (
-    <div className="kt-chrome" data-system-row={info.label}>
-      <button
-        type="button"
-        onClick={() => setOpen(v => !v)}
-        aria-expanded={open}
-        className="flex w-full min-w-0 items-center gap-1.5 rounded-control px-2 py-px text-left hover:bg-surface-2"
-      >
-        <Info size={10} className="shrink-0" aria-hidden="true" />
-        {/* Label and status are CAPPED and truncate: an unknown wrapper's tag
-            name (or a long status) can be arbitrarily long, and un-capped
-            shrink-0 spans would widen the row past a 390px viewport. Known
-            labels ("task notification", "environment_context") fit within 22ch,
-            so only genuinely long unknown tags ellipsize. The summary stays the
-            flexible line, and the raw body is fully readable on expand. */}
-        <span className="min-w-0 max-w-[22ch] shrink truncate font-medium">{info.label}</span>
-        {info.summary ? (
-          <>
-            <span className="shrink-0 opacity-50" aria-hidden="true">
-              ·
-            </span>
-            <span className="min-w-0 flex-1 truncate opacity-80">{info.summary}</span>
-          </>
-        ) : (
-          <span className="flex-1" aria-hidden="true" />
+    <div
+      className={cn('kt-chrome', divider && 'text-fg-soft')}
+      data-system-row={info.label}
+      data-divider={info.divider}
+    >
+      <div className={cn(divider && SYSTEM_DIVIDER_LAYOUT.track)}>
+        {divider && (
+          <span
+            role="separator"
+            aria-label={`${info.label} boundary`}
+            aria-orientation="horizontal"
+            className={SYSTEM_DIVIDER_LAYOUT.rule}
+          />
         )}
-        {info.status && (
-          <span className={cn('min-w-0 max-w-[14ch] shrink truncate font-medium', toneClass)}>{info.status}</span>
-        )}
-        {ts && <span className="mono shrink-0 whitespace-nowrap tabular-nums text-faint">{clockLabel(ts)}</span>}
-        <ChevronRight size={10} className={cn('shrink-0 transition-transform', open && 'rotate-90')} />
-      </button>
+        <button
+          type="button"
+          onClick={() => setOpen(v => !v)}
+          aria-expanded={open}
+          className={cn(
+            'flex min-w-0 items-center gap-1.5 text-left hover:bg-surface-2',
+            divider ? SYSTEM_DIVIDER_LAYOUT.button : 'w-full rounded-control px-2 py-px',
+          )}
+        >
+          <Info size={10} className={cn('shrink-0', divider && 'text-accent')} aria-hidden="true" />
+          {/* Label and status are CAPPED and truncate: an unknown wrapper's tag
+              name (or a long status) can be arbitrarily long, and un-capped
+              shrink-0 spans would widen the row past a 390px viewport. Known
+              labels ("task notification", "environment_context") fit within 22ch,
+              so only genuinely long unknown tags ellipsize. The summary stays the
+              flexible line, and the raw body is fully readable on expand. */}
+          <span
+            className={cn(
+              'min-w-0 max-w-[22ch] shrink truncate font-medium',
+              divider && 'mono uppercase tracking-label',
+            )}
+          >
+            {info.label}
+          </span>
+          {info.summary ? (
+            <>
+              <span className="shrink-0 opacity-50" aria-hidden="true">
+                ·
+              </span>
+              <span className="min-w-0 flex-1 truncate opacity-80">{info.summary}</span>
+            </>
+          ) : (
+            <span className="flex-1" aria-hidden="true" />
+          )}
+          {info.status && (
+            <span className={cn('min-w-0 max-w-[14ch] shrink truncate font-medium', toneClass)}>{info.status}</span>
+          )}
+          {ts && <span className="mono shrink-0 whitespace-nowrap tabular-nums text-faint">{clockLabel(ts)}</span>}
+          <ChevronRight size={10} className={cn('shrink-0 transition-transform', open && 'rotate-90')} />
+        </button>
+        {divider && <span aria-hidden="true" className={SYSTEM_DIVIDER_LAYOUT.rule} />}
+      </div>
       {open && (
         <pre className="m-0 ml-2 mt-0.5 max-h-80 max-w-full min-w-0 overflow-auto rounded-md border border-border-soft bg-surface-2 px-2.5 py-2 text-code leading-base mono whitespace-pre-wrap break-words text-fg-soft scroll-thin">
           {info.raw}
