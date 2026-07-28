@@ -172,7 +172,7 @@ import { ArrowDown, Pin, Quote } from 'lucide-react';
 import type { TranscriptBlock } from '../lib/transcript';
 import { TranscriptRow } from './TranscriptRow';
 import { useInputModality } from '../hooks/useInputModality';
-import { useTranscriptHold } from '../hooks/useLiveTick';
+import { SELECTION_RELEASE_SETTLE_MS, useTranscriptHold } from '../hooks/useLiveTick';
 import { registerJumpController, type JumpOutcome } from '../lib/pin-bridge';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { insertQuoteIntoComposer } from '../lib/quote';
@@ -214,15 +214,6 @@ const LOAD_OLDER_PX = 280;
  *  Erring long merely honours a detach the reader did ask for. */
 const INTENT_WINDOW_MS = 1500;
 
-/** How long after a finger/pointer is released to wait before resuming follow.
- *
- *  Long enough for a touch selection to actually EXIST: on a long-press the
- *  range materialises on or shortly after `touchend`, so a guard evaluated at the
- *  instant of release samples a collapsed selection and lets the pin through (see
- *  the round-8 note on the `up` handler). Short enough to be imperceptible — and
- *  it delays only the resumption of follow, never a scroll the reader asked for. */
-const SELECTION_SETTLE_MS = 220;
-
 /** How many older pages a pin jump will page in while LOCATING a message that
  *  is not in the loaded window, before it gives up honestly (pinning-design.md
  *  §6). Matches PinSheet's displayed cap. */
@@ -230,11 +221,16 @@ const LOCATE_PAGE_CAP = 10;
 
 /** The touch Quote/Pin pair's box, used to keep it on screen AND off the
  *  message's own chrome. Width is the measured pair at the reduced type ramp
- *  (was 176 for the larger buttons); height is one 44px touch target; the gap
- *  clears the selection handles that iOS/Android draw at the range edge. */
-const TOUCH_QUOTE_WIDTH = 148;
-const TOUCH_QUOTE_HEIGHT = 44;
-const TOUCH_QUOTE_GAP = 10;
+ *  (was 176 for the larger buttons); height is one 44px touch target.
+ *
+ *  HANDLE CLEARANCE IS A HIT-TEST LANE, NOT A VISUAL GAP. The old 10px gap put
+ *  these z-40, pointer-active buttons directly over both native handle targets:
+ *  at 390px wide, synthetic touches 10–44px below the selected line resolved to
+ *  Quote/Pin instead of the transcript. Reserve a full 44px touch target plus a
+ *  little separation so iOS/Android can own the drag from its first contact. */
+export const TOUCH_QUOTE_WIDTH = 148;
+export const TOUCH_QUOTE_HEIGHT = 44;
+export const TOUCH_SELECTION_HANDLE_CLEARANCE = 48;
 
 /** Where the touch Quote/Pin pair goes, as pure policy (exported for tests —
  *  this package has no DOM to measure in).
@@ -244,20 +240,32 @@ const TOUCH_QUOTE_GAP = 10;
  *  selected message's own timestamp: a user bubble draws its clock in a header
  *  row directly above the prose, so "above the selection" lands exactly on it
  *  (buttons at y=177–221 over a clock at y=203–222). Below the range there is
- *  only text the reader has already read past, and the OS selection handle gap
- *  is respected on both sides. */
+ *  only text the reader has already read past. Every placement preserves the
+ *  native handle lanes above the range start and below the range end. A very
+ *  long selection may place the controls in its middle, away from both ends; if
+ *  a tiny viewport has no safe slot at all, native selection wins and the
+ *  controls stay hidden rather than covering a handle. */
 export function touchQuotePlacement(
   anchor: { x: number; top: number; bottom: number },
   viewport: { width: number; height: number },
-): { left: number; top: number } {
+): { left: number; top: number } | null {
   const left = Math.min(
     Math.max(8, anchor.x - TOUCH_QUOTE_WIDTH / 2),
     Math.max(8, viewport.width - TOUCH_QUOTE_WIDTH - 8),
   );
-  const below = anchor.bottom + TOUCH_QUOTE_GAP;
-  const fitsBelow = below + TOUCH_QUOTE_HEIGHT <= viewport.height - 8;
-  const top = fitsBelow ? below : Math.max(8, anchor.top - TOUCH_QUOTE_GAP - TOUCH_QUOTE_HEIGHT);
-  return { left, top };
+  const below = anchor.bottom + TOUCH_SELECTION_HANDLE_CLEARANCE;
+  if (below + TOUCH_QUOTE_HEIGHT <= viewport.height - 8) return { left, top: below };
+
+  const above = anchor.top - TOUCH_SELECTION_HANDLE_CLEARANCE - TOUCH_QUOTE_HEIGHT;
+  if (above >= 8) return { left, top: above };
+
+  // A range spanning most of the viewport can have no room outside it while
+  // still leaving ample room BETWEEN its two endpoint handles. Centre the pair
+  // there; this keeps Quote/Pin available without sacrificing either handle.
+  const middle = anchor.top + (anchor.bottom - anchor.top - TOUCH_QUOTE_HEIGHT) / 2;
+  const clearsStart = middle >= anchor.top + TOUCH_SELECTION_HANDLE_CLEARANCE;
+  const clearsEnd = middle + TOUCH_QUOTE_HEIGHT <= anchor.bottom - TOUCH_SELECTION_HANDLE_CLEARANCE;
+  return clearsStart && clearsEnd ? { left, top: middle } : null;
 }
 /** How long to wait for an older page to settle into `blocks` before treating
  *  the load as stalled/exhausted during a locate. */
@@ -486,7 +494,7 @@ function Inner(props: Props) {
    *  Latched for the WHOLE gesture, which is the part a timestamp cannot express
    *  — a drag emits one `pointerdown` and then scrolls for as long as it lasts. */
   const pointerHeld = useRef(false);
-  /** Pending deferred re-pin after a gesture ends (see SELECTION_SETTLE_MS). */
+  /** Pending deferred re-pin after a gesture ends (see SELECTION_RELEASE_SETTLE_MS). */
   const repinTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const pin = useCallback(() => {
@@ -578,7 +586,7 @@ function Inner(props: Props) {
       repinTimer.current = setTimeout(() => {
         repinTimer.current = null;
         if (followRef.current) pin();
-      }, SELECTION_SETTLE_MS);
+      }, SELECTION_RELEASE_SETTLE_MS);
     };
     const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'Home', 'End', ' ', 'Spacebar']);
     const onKey = (e: KeyboardEvent) => {
@@ -1003,19 +1011,30 @@ function Inner(props: Props) {
     };
     const schedule = () => {
       if (timer !== null) clearTimeout(timer);
-      timer = setTimeout(evaluate, SELECTION_SETTLE_MS);
+      timer = setTimeout(evaluate, SELECTION_RELEASE_SETTLE_MS);
     };
     const hide = () => setTouchQuote(null);
     document.addEventListener('selectionchange', schedule, { passive: true });
     window.addEventListener('pointerup', schedule, { passive: true });
     window.addEventListener('touchend', schedule, { passive: true });
     const v = viewportRef.current;
+    // Dismiss the affordance on ordinary transcript taps and on any drag the
+    // page itself receives; release schedules it again from the final range.
+    // Native handles are OS/browser UI and may deliver no page pointer event at
+    // all, so this is convenience rather than the safety guarantee — the 48px
+    // hit-test lanes in touchQuotePlacement are what keep handles unobstructed.
+    // Passive capture changes no browser default, so scrolling stays native.
+    const gestureOptions = { capture: true, passive: true } as AddEventListenerOptions;
+    v?.addEventListener('pointerdown', hide, gestureOptions);
+    v?.addEventListener('touchstart', hide, gestureOptions);
     v?.addEventListener('scroll', hide, { passive: true });
     return () => {
       if (timer !== null) clearTimeout(timer);
       document.removeEventListener('selectionchange', schedule);
       window.removeEventListener('pointerup', schedule);
       window.removeEventListener('touchend', schedule);
+      v?.removeEventListener('pointerdown', hide, gestureOptions);
+      v?.removeEventListener('touchstart', hide, gestureOptions);
       v?.removeEventListener('scroll', hide);
     };
   }, [touchAffected, isForegroundViewport, readTranscriptSelection]);
