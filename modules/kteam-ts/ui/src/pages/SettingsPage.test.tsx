@@ -34,6 +34,19 @@ describe('SettingsPage', () => {
     }
   });
 
+  test('uses a quiet 44px icon-only back target instead of a raised text button', () => {
+    const html = renderToStaticMarkup(<SettingsPage />);
+    const back = html.match(/<a[^>]*aria-label="Back to sessions"[^>]*>/)?.[0] ?? '';
+
+    expect(back).toContain('href="/"');
+    expect(back).toContain('title="All sessions"');
+    expect(back).toContain('min-h-[44px]');
+    expect(back).toContain('min-w-[44px]');
+    expect(back).toContain('rounded-control');
+    expect(back).not.toContain('kt-btn');
+    expect(html).not.toContain('>Sessions</a>');
+  });
+
   test('renders the Warden & failover link row pointing at the warden page', () => {
     const html = renderToStaticMarkup(<SettingsPage />);
     expect(html).toContain('Warden &amp; failover');
@@ -61,6 +74,7 @@ describe('SettingsPage', () => {
     expect(html).toContain('data-bottom-sheet="kt-settings-sheet"');
     expect(html).toContain('role="dialog"');
     expect(html).toContain('aria-label="Close settings"');
+    expect(html).not.toContain('Back to sessions');
     expect(html).toContain('height:min(90dvh');
     expect(html).toContain('data-settings-sheet-scroller');
     expect(html).toContain('overflow-y-auto');

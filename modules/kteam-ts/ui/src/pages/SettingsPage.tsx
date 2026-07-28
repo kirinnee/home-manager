@@ -223,10 +223,10 @@ export function SettingsPage() {
           <Link
             to="/"
             aria-label="Back to sessions"
-            className="kt-btn inline-flex min-h-[44px] shrink-0 items-center gap-1"
+            title="All sessions"
+            className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-surface-2 hover:text-fg"
           >
-            <ChevronLeft size={16} aria-hidden="true" />
-            Sessions
+            <ChevronLeft size={18} aria-hidden="true" />
           </Link>
           <div className="min-w-0">
             <h1 className="m-0 font-display text-display font-bold tracking-display">Settings</h1>

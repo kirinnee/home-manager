@@ -361,29 +361,24 @@ export function quotableSelectionText(
   return sel.toString().trim();
 }
 
-/** FULL-BLEED TABLES — how wide a table may grow before it would push a page
- *  scroll. The pure geometry behind `--kt-table-bleed` (published below), kept
- *  as an exported unit so it is assertable without a DOM (this package has no
- *  DOM impl; see Transcript.test.ts).
+/** PANE-BOUNDED TABLES — the safe width for an intrinsically wide table before
+ *  it would push a page scroll. The pure geometry behind `--kt-table-bleed`
+ *  (published below) stays exported so it is assertable without a DOM (this
+ *  package has no DOM implementation; see Transcript.test.ts).
  *
- *  A wide markdown table is allowed to escape the 880px reading column and use
- *  the pane, but prose must stay at its measure — so the column keeps its cap and
- *  a table breaks out of it (index.css `.md-table-scroll`). Pure CSS cannot size
- *  that break-out: the column is a fixed max-width centred in the scroller, and
- *  `100vw` is WRONG because the shell has a sidebar. So the width is measured
- *  from the scroller and computed here.
+ *  This began as an escape hatch from a permanent centred 880px column. Chat
+ *  width now governs the column itself: full makes it pane-wide and readable
+ *  narrows the scroller, so both live modes normally have no centring gutter to
+ *  escape. The geometry remains a harmless exact ceiling and still covers a
+ *  future or out-of-chat embedding whose column is narrower than its pane.
  *
- *  The table is anchored at the column's LEFT edge (flush with the prose above
- *  it, never yanked to the pane edge or re-centred — narrow tables render exactly
- *  as before) and may grow RIGHTWARD across the column's own centring gutter,
- *  stopping one content-padding short of the pane's right edge so it keeps the
- *  same breathing room as prose. `paneWidth` is the scroller's inner width
- *  (`clientWidth`, already minus any vertical scrollbar and already reflecting the
- *  chat-width setting — in 'readable' the scroller IS the narrow surface, so a
- *  table fills that measure and no more). `columnWidth` is the reading column's
- *  border-box (≤ 880, or the pane when narrower). The centred column leaves
- *  `(paneWidth − columnWidth) / 2` empty on each side; the left one is the only
- *  slack a left-anchored table cannot use. Never returns a negative width. */
+ *  A table stays anchored at the column's LEFT edge and may grow rightward only
+ *  through the column's right-hand centring gutter. `paneWidth` is the
+ *  scroller's inner width (already minus any vertical scrollbar), while
+ *  `columnWidth` is the content column's border-box. The matching left gutter
+ *  cannot be used without moving the table away from the prose above it, so the
+ *  formula subtracts that gutter plus both content paddings. It never returns a
+ *  negative width. */
 export function paneUsableTableWidth(
   paneWidth: number,
   columnWidth: number,
@@ -693,21 +688,17 @@ function Inner(props: Props) {
     return () => ro.disconnect();
   }, [pin]);
 
-  // ---- FULL-BLEED TABLES: publish the pane-usable width ----------------------
-  // A wide markdown table escapes the 880px reading column to use the pane
-  // (index.css `.md-table-scroll`), which pure CSS cannot express (see
-  // paneUsableTableWidth). Measure this scroller's own inner width — clientWidth,
-  // which excludes the vertical scrollbar AND already tracks the chat-width
-  // setting (in 'readable' this scroller IS the 768px surface) — and publish the
-  // width a table may occupy as `--kt-table-bleed` on the content column, which
-  // the table reads. Because clientWidth excludes the scrollbar and the value
-  // stops one content-pad short of the pane edge, a full-bleed table can never
-  // push a horizontal PAGE scroll; a table too wide to wrap still scrolls inside
-  // its own container. useLayoutEffect + an initial synchronous publish so the
-  // width is set before paint (no contained→bled flash); the ResizeObserver then
-  // keeps it current across window/sidebar/keyboard/chat-width changes. Setting a
-  // custom property never resizes the scroller, so this cannot feed the follow
-  // observers a spurious resize.
+  // ---- TABLE WIDTH: publish the exact pane-safe ceiling ----------------------
+  // Chat width now changes `.kt-content` itself, so full and readable normally
+  // leave no centred-column gutter for a table to escape. Keep publishing the
+  // general pane bound for intrinsically wide tables and any future embedding
+  // where the column is narrower than the scroller (see paneUsableTableWidth).
+  // clientWidth excludes the scrollbar; stopping one content-pad short of the
+  // pane edge prevents page-level horizontal scroll, while genuinely unshrinkable
+  // content still scrolls inside its own table wrapper. useLayoutEffect publishes
+  // before paint and ResizeObserver keeps the value current across sidebar,
+  // keyboard, and chat-width changes. A custom property cannot resize the
+  // scroller, so this does not feed the follow observers a spurious resize.
   useLayoutEffect(() => {
     const v = viewportRef.current;
     const content = contentRef.current;
@@ -1219,7 +1210,7 @@ function Inner(props: Props) {
           // still deliberately tighter than the composer, which the reader asked to
           // keep edge-close. NOT the full desktop 16px: this is a phone, not a
           // narrow desktop. Desktop keeps sm:px-4 / sm:pt-2 unchanged.
-          className="kt-content mx-auto flex min-w-0 w-full max-w-[880px] flex-col px-2 pb-2 pt-3 sm:px-4 sm:pb-8 sm:pt-2"
+          className="kt-content mx-auto flex min-w-0 w-full flex-col px-2 pb-2 pt-3 sm:px-4 sm:pb-8 sm:pt-2"
         >
           {header}
           {blocks.map((b, idx) => (

@@ -37,4 +37,16 @@ describe('ChatWidthControl', () => {
     expect(radioButtons).toHaveLength(2);
     for (const button of radioButtons) expect(button).toContain('min-h-[44px]');
   });
+
+  test('lets full mode reach transcript content while readable mode keeps its cap', async () => {
+    const css = await Bun.file(new URL('../index.css', import.meta.url).pathname).text();
+    const transcript = await Bun.file(new URL('./Transcript.tsx', import.meta.url).pathname).text();
+
+    expect(css).toContain('max-width: var(--chat-measure-content, 880px);');
+    expect(css).toContain(".kt-chat-surface[data-chat-width='readable'] {");
+    expect(css).toContain('max-width: var(--chat-measure-readable, 768px);');
+    expect(css).toContain(".kt-chat-surface[data-chat-width='full'] .kt-content {");
+    expect(css).toMatch(/\[data-chat-width='full'\] \.kt-content \{\s*max-width: none;/);
+    expect(transcript.match(/className="kt-content[^"]+"/)?.[0]).not.toContain('max-w-[');
+  });
 });
