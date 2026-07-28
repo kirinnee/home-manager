@@ -123,6 +123,22 @@ function fixture(options: { perSession?: number; global?: number; idle?: number 
 }
 
 describe('TerminalService', () => {
+  test('uses the resolved session cwd and never falls back to the daemon process cwd', async () => {
+    const { service, runtime } = fixture();
+    const sessionCwd = '/repo/worktree';
+    // This distinction is the regression: if terminal creation ever substitutes
+    // the daemon's cwd, an assertion that only checks a same-cwd fixture is
+    // vacuous and the human's per-session-root requirement can silently regress.
+    expect(sessionCwd).not.toBe(process.cwd());
+    try {
+      const terminal = await service.create('teammate');
+      expect(runtime.records.get(terminal.id)?.root).toBe(sessionCwd);
+      expect(runtime.records.get(terminal.id)?.root).not.toBe(process.cwd());
+    } finally {
+      await service.close();
+    }
+  });
+
   test('creates independent cwd-rooted shells and serializes lifecycle caps', async () => {
     const { service, runtime } = fixture({ perSession: 2, global: 3 });
     try {
