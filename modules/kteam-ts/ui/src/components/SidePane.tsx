@@ -1,6 +1,6 @@
 // THE UNIFIED SESSION SIDE PANE — one host for every session-scoped companion
-// surface: browser, files, tasks, pins, terminals, skills, lineage and
-// analytics.
+// surface: browser, files, tasks, pins, terminals, skills, lineage, analytics
+// and attention.
 //
 // The pattern is extracted from InAppBrowser.tsx (the first surface to get it
 // right) and is now the CANONICAL shape for session-scoped side content —
@@ -50,6 +50,7 @@ import {
 } from 'react';
 import {
   ChartNoAxesCombined,
+  CircleAlert,
   FolderGit2,
   GitFork,
   Globe2,
@@ -78,6 +79,7 @@ import { FilesTab } from './FilesTab';
 import { PinSurface } from './PinSheet';
 import { SessionTasksSurface } from './SessionTasks';
 import { AnalyticsSurface } from './AnalyticsSurface';
+import { AttentionSurface } from './AttentionPanel';
 import { LineageSurface } from './LineageSurface';
 import { SkillsSurface } from './SkillsSurface';
 import { SidePaneResizeHandle } from './SidePaneResizeHandle';
@@ -85,7 +87,16 @@ import { SidePaneTabs, sidePanePanelId, sidePaneTabId, type SidePaneTabSpec } fr
 import { UnifiedBrowserSurface } from './UnifiedBrowserSurface';
 import { WebTerminals } from './WebTerminals';
 
-export type SidePaneSurface = 'browser' | 'files' | 'tasks' | 'pins' | 'terminals' | 'skills' | 'lineage' | 'analytics';
+export type SidePaneSurface =
+  | 'browser'
+  | 'files'
+  | 'tasks'
+  | 'pins'
+  | 'terminals'
+  | 'skills'
+  | 'lineage'
+  | 'analytics'
+  | 'attention';
 export type SidePanePresentation = 'pane' | 'sheet';
 
 export interface SidePaneSurfaceMeta {
@@ -110,6 +121,12 @@ export const SIDE_PANE_SURFACES: Record<SidePaneSurface, SidePaneSurfaceMeta> = 
     tabLabel: 'Cost',
     closeLabel: 'Close analytics',
     icon: ChartNoAxesCombined,
+  },
+  attention: {
+    label: 'Attention',
+    tabLabel: 'Needs',
+    closeLabel: 'Close attention',
+    icon: CircleAlert,
   },
 };
 
@@ -409,6 +426,15 @@ function SurfaceBody({
     case 'analytics':
       return (
         <AnalyticsPaneSurface sessionId={sessionId} presentation={presentation} titleId={titleId} onClose={onClose} />
+      );
+    case 'attention':
+      return (
+        <AttentionSurface
+          sessionId={sessionId}
+          presentation={presentation}
+          titleId={titleId}
+          onRequestClose={onClose}
+        />
       );
   }
 }
