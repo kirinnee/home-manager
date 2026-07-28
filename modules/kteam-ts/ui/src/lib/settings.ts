@@ -88,8 +88,18 @@ export const SETTINGS_DEFINITIONS: readonly SettingDefinition[] = [
     id: 'notifications',
     label: 'Notifications',
     description:
-      'System notification when a session needs you — waiting at the prompt, asking a question, failed, or finished. Off by default; turning it on asks the browser for permission.',
-    keywords: ['notify', 'notification', 'alert', 'push', 'buzz', 'awaiting', 'needs you', 'question', 'background'],
+      'System notification when a session needs attention — waiting at the prompt, asking a question, failed, or finished. Off by default; turning it on asks the browser for permission.',
+    keywords: [
+      'notify',
+      'notification',
+      'alert',
+      'push',
+      'buzz',
+      'awaiting',
+      'needs attention',
+      'question',
+      'background',
+    ],
   },
 ] as const;
 
