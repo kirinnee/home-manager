@@ -5,6 +5,7 @@ import {
   SessionTaskKanban,
   SessionTaskList,
   SessionTasksSurface,
+  TaskProjectionView,
   sessionTasksEmptyCopy,
   taskDetailRequestIsCurrent,
   type TaskDetailRequestToken,
@@ -98,6 +99,8 @@ test('the list and kanban read only the selected session, with files and advisor
   expect(list).toContain('src/shared.ts'); // claimed files are shown
   expect(list).toContain('Shares files with #X7'); // advisory cross-session overlap
   expect(list.indexOf('#B2')).toBeLessThan(list.indexOf('#F1')); // oldest blocked first
+  expect(list.match(/data-task-status-badge/g)).toHaveLength(3); // mixed list rows still name their state
+  expect(list).not.toContain('data-task-assignee'); // one repeated assignee carries no row-level signal
   const kanban = renderToStaticMarkup(
     <SessionTaskKanban tasks={mine} conflicts={conflicts} onOpen={() => undefined} />,
   );
@@ -121,6 +124,93 @@ test('compact kanban stacks every count and task at full width without a horizon
   for (const id of ['#F1', '#B2', '#I3']) expect(html).toContain(id);
   expect(html.match(/aria-label="Open #B2: Visible B2"/g)).toHaveLength(1);
   expect(html).toContain('No tasks.');
+});
+
+test('kanban removes metadata repeated throughout a lane and preserves every title', () => {
+  const titles = [
+    'Mobile session controls stay readable',
+    'Sent messages show delivery state',
+    'Filter kanban without hiding context',
+  ];
+  const homogeneous = titles.map((title, index) =>
+    taskFor(`B${14 + index}`, 'live', {
+      title,
+      assignee: 'zelda',
+      createdBy: 'ms-agent-created',
+      askSource: '/home/kirin/.kteam/ms-agent/turns/turn-001.md',
+      live: {
+        assigneeSessionId: 'ms-zelda',
+        assigneeName: 'zelda',
+        assigneeStatus: 'working',
+        assigneeHealth: 'active',
+        assigneeDoneMarker: false,
+        assigneeLastActivityAt: null,
+        staleness: null,
+      },
+    }),
+  );
+  const html = renderToStaticMarkup(<SessionTaskKanban tasks={homogeneous} onOpen={() => undefined} compact />);
+  for (const title of titles) expect(html).toContain(title);
+  expect(html).not.toContain('data-task-status-badge');
+  expect(html).not.toContain('data-task-assignee');
+  expect(html).not.toContain('data-task-ask-origin');
+  expect(html).not.toContain('Agent-originated');
+
+  const list = renderToStaticMarkup(<SessionTaskList tasks={homogeneous} onOpen={() => undefined} />);
+  expect(list).not.toContain('data-task-status-badge');
+});
+
+test('kanban restores assignee and quiet ask provenance only where the visible board mixes them', () => {
+  const mixed = [
+    taskFor('B20', 'live', {
+      assignee: 'zelda',
+      createdBy: 'ms-agent-recorder',
+      askSource: '/home/kirin/.kteam/ms-agent/turns/turn-001.md',
+      live: {
+        assigneeSessionId: 'ms-zelda',
+        assigneeName: 'zelda',
+        assigneeStatus: 'working',
+        assigneeHealth: 'active',
+        assigneeDoneMarker: false,
+        assigneeLastActivityAt: null,
+        staleness: null,
+      },
+    }),
+    taskFor('B21', 'live', {
+      assignee: 'miles',
+      createdBy: 'ms-agent-recorder',
+      askSource: 'chat 2026-07-28',
+      live: {
+        assigneeSessionId: 'ms-miles',
+        assigneeName: 'miles',
+        assigneeStatus: 'working',
+        assigneeHealth: 'active',
+        assigneeDoneMarker: false,
+        assigneeLastActivityAt: null,
+        staleness: null,
+      },
+    }),
+  ];
+  const html = renderToStaticMarkup(<SessionTaskKanban tasks={mixed} onOpen={() => undefined} compact />);
+  expect(html.match(/data-task-assignee=/g)).toHaveLength(2);
+  expect(html.match(/data-task-ask-origin="agent"/g)).toHaveLength(1);
+  expect(html).toContain('Agent-originated');
+  expect(html).not.toContain('data-task-status-badge');
+});
+
+test('assignee suppression compares the dot readers see, not stale reason internals', () => {
+  const sameRenderedAssignee = [
+    taskFor('B22', 'live', {
+      live: { ...taskFor('seed', 'live').live, staleness: 'assignee-dead' },
+    }),
+    taskFor('B23', 'live', {
+      live: { ...taskFor('seed', 'live').live, staleness: 'maybe-finished' },
+    }),
+  ];
+  const html = renderToStaticMarkup(
+    <SessionTaskKanban tasks={sameRenderedAssignee} onOpen={() => undefined} compact />,
+  );
+  expect(html).not.toContain('data-task-assignee');
 });
 
 test('the DAG closes recursively across sessions, links owning sessions, and marks a missing node', () => {
@@ -164,6 +254,39 @@ test('kanban filters exact raw statuses without undoing the collapsed in-progres
   expect(html).not.toContain('Visible F1');
   expect(html).toContain('data-task-lane="in_progress"');
   expect(html).not.toContain('data-task-lane="research"');
+});
+
+test('list projection uses the same exact multi-select status filter as kanban', () => {
+  const html = renderToStaticMarkup(
+    <TaskProjectionView
+      view="list"
+      tasks={mine}
+      dag={filterTaskDag(buildTaskDag(fleet, 'ms-a'), null)}
+      conflicts={computeFileConflicts(fleet)}
+      onOpen={() => undefined}
+      compact
+      selectedStatuses={new Set<TaskStatus>(['live'])}
+      onShowAll={() => undefined}
+    />,
+  );
+  expect(html).toContain('data-task-view="list"');
+  expect(html).toContain('Visible I3');
+  expect(html).not.toContain('Visible F1');
+  expect(html).not.toContain('Visible B2');
+
+  const empty = renderToStaticMarkup(
+    <TaskProjectionView
+      view="list"
+      tasks={mine}
+      dag={filterTaskDag(buildTaskDag(fleet, 'ms-a'), null)}
+      conflicts={computeFileConflicts(fleet)}
+      onOpen={() => undefined}
+      compact
+      selectedStatuses={new Set<TaskStatus>(['dropped'])}
+      onShowAll={() => undefined}
+    />,
+  );
+  expect(empty).toContain('No matching tasks.');
 });
 
 test('status controls use the All-first, 44px multi-select vocabulary', () => {

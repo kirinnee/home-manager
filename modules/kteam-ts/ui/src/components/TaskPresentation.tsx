@@ -25,6 +25,7 @@ import {
   TASK_STALENESS_COPY,
   TASK_WORKFLOW_LABEL,
   type TaskActivity,
+  type TaskBoardLane,
   type TaskFileConflict,
   type TaskRecord,
   type TaskSummary,
@@ -35,6 +36,19 @@ import { TaskAssigneeLink } from './TaskAssigneeLink';
 /** The one session-navigation affordance every task surface links through, so a
  *  cross-session node opens its owning session the same way the sidebar does. */
 export const sessionHref = (id: string): string => `/session/${encodeURIComponent(id)}`;
+
+export type TaskAskOrigin = 'human' | 'agent' | 'unknown';
+
+/** New tasks carry the verbatim ask plus its source. Direct chat/message
+ *  sources are human asks; kteam/session artifacts are fleet-originated work.
+ *  Legacy records without both pieces stay unknown rather than being guessed. */
+export function taskAskOrigin(task: Pick<TaskSummary, 'askChars' | 'askSource'>): TaskAskOrigin {
+  const source = task.askSource?.trim();
+  if (task.askChars <= 0 || !source || /^(?:legacy:|#[BFIC][0-9]{1,9}$)/iu.test(source)) return 'unknown';
+  const agentSource =
+    /^(?:agent(?:\s|:)|kteam(?:\s|:)|session:|turn:)/iu.test(source) || /(?:^|[/\\])\.kteam(?:[/\\]|$)/iu.test(source);
+  return agentSource ? 'agent' : 'human';
+}
 
 /** A Files pane is session-scoped. Never resolve prose against one task owner
  *  and deliver its path to another session's pane. */
@@ -79,26 +93,62 @@ export function TaskRow({
   task,
   conflicts,
   onOpen,
+  impliedLane,
+  showStatusBadge = true,
+  showAssignee = true,
+  showAskOriginMarker = true,
 }: {
   task: TaskSummary;
   conflicts?: TaskFileConflict[];
   onOpen: (id: string) => void;
+  /** A Kanban column already names its lane. Only exceptional blocked state
+   *  still needs a badge there; mixed list rows keep their status by default. */
+  impliedLane?: TaskBoardLane;
+  /** Homogeneous lists already expose their one status in the shared filter. */
+  showStatusBadge?: boolean;
+  /** Visible-set context suppresses an identity repeated on every sibling. */
+  showAssignee?: boolean;
+  /** Ask provenance distinguishes only when the visible set mixes origins. */
+  showAskOriginMarker?: boolean;
 }) {
-  const boardState = task.blocked ? TASK_STATUS_META.blocked : TASK_BOARD_LANE_META[taskBoardLane(task.phase)];
+  const lane = taskBoardLane(task.phase);
+  const boardState = task.blocked ? TASK_STATUS_META.blocked : TASK_BOARD_LANE_META[lane];
+  const statusIsImplied = !showStatusBadge || (!task.blocked && impliedLane === lane);
+  const askOrigin = taskAskOrigin(task);
   const stale = task.live.staleness ? TASK_STALENESS_COPY[task.live.staleness] : null;
   const pr = task.links.prs.map(parseGithubPr).find(Boolean);
   return (
-    <div className="group flex min-h-[52px] min-w-0 items-center gap-2 px-3 py-2 hover:bg-surface-2">
+    <div data-task-id={task.id} className="group min-w-0 px-3 py-2 hover:bg-surface-2">
       <button
         type="button"
         onClick={() => onOpen(task.id)}
-        className="flex min-h-[44px] min-w-0 flex-1 items-center gap-2 text-left focus-visible:z-10"
+        className="flex min-h-[44px] w-full min-w-0 flex-col justify-center gap-1 text-left focus-visible:z-10"
         aria-label={`Open ${taskReference(task.id)}: ${task.title}`}
       >
-        <span className="mono shrink-0 text-xs font-semibold text-accent">{taskReference(task.id)}</span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-ui font-medium text-fg">{task.title}</span>
-          <TaskCreatorMarker createdBy={task.createdBy} />
+        <span
+          data-task-title={task.id}
+          className="block w-full whitespace-normal break-words text-row font-semibold leading-tight text-fg"
+        >
+          {task.title}
+        </span>
+        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+          <span className="mono shrink-0 text-2xs font-medium text-faint">{taskReference(task.id)}</span>
+          {showAskOriginMarker && <TaskAskOriginMarker origin={askOrigin} compact />}
+          {!statusIsImplied && (
+            <Badge data-task-status-badge tone={boardState.tone} className="shrink-0 whitespace-nowrap">
+              {boardState.label}
+            </Badge>
+          )}
+          {stale && (
+            <span className="inline-flex shrink-0" title={stale.reason}>
+              <span className="sr-only">{stale.reason}</span>
+              <Badge tone="warn" className="animate-pulse motion-reduce:animate-none">
+                !
+              </Badge>
+            </span>
+          )}
+        </span>
+        <span className="block min-w-0 w-full">
           {task.blocked && task.blockedReason && (
             <span className="mt-0.5 block truncate text-xs font-medium text-warn">{task.blockedReason}</span>
           )}
@@ -127,31 +177,24 @@ export function TaskRow({
             </span>
           )}
         </span>
-        <Badge tone={boardState.tone} className="shrink-0 whitespace-nowrap">
-          {boardState.label}
-        </Badge>
-        {stale && (
-          <span className="inline-flex shrink-0" title={stale.reason}>
-            <span className="sr-only">{stale.reason}</span>
-            <Badge tone="warn" className="animate-pulse motion-reduce:animate-none">
-              !
-            </Badge>
-          </span>
-        )}
       </button>
-      <TaskAssigneeLink task={task} showStatus={false} className="max-w-[9rem] shrink-0" />
-      {pr && (
-        <a
-          href={pr.url}
-          target="_blank"
-          rel="noreferrer"
-          title={`Open ${pr.org}/${pr.repo} PR #${pr.number}`}
-          aria-label={`Open ${pr.org}/${pr.repo} pull request ${pr.number}`}
-          className="hidden shrink-0 items-center gap-1 rounded-control border border-border-soft px-1.5 py-1 text-xs text-muted hover:text-fg sm:inline-flex"
-        >
-          <GitPullRequest size={13} aria-hidden="true" />
-          {pr.repo}#{pr.number}
-        </a>
+      {(showAssignee || pr) && (
+        <div className={`mt-1 min-w-0 items-center gap-2 ${showAssignee ? 'flex' : 'hidden sm:flex'}`}>
+          {showAssignee && <TaskAssigneeLink task={task} showStatus={false} className="max-w-full" />}
+          {pr && (
+            <a
+              href={pr.url}
+              target="_blank"
+              rel="noreferrer"
+              title={`Open ${pr.org}/${pr.repo} PR #${pr.number}`}
+              aria-label={`Open ${pr.org}/${pr.repo} pull request ${pr.number}`}
+              className="ml-auto hidden shrink-0 items-center gap-1 rounded-control border border-border-soft px-1.5 py-1 text-xs text-muted hover:text-fg sm:inline-flex"
+            >
+              <GitPullRequest size={13} aria-hidden="true" />
+              {pr.repo}#{pr.number}
+            </a>
+          )}
+        </div>
       )}
     </div>
   );
@@ -181,6 +224,7 @@ export function TaskDetail({
   const auditPhase = lane === task.phase ? null : TASK_PHASE_META[task.phase];
   const stale = task.live.staleness ? TASK_STALENESS_COPY[task.live.staleness] : null;
   const full = 'ask' in task;
+  const askOrigin = taskAskOrigin(task);
   const codeReferenceContext = taskCodeReferenceContext(surfaceSessionId, surfaceCwd, task.sessionId);
   const openCodeReference = codeReferenceContext ? onCodeReferenceOpen : undefined;
   return (
@@ -192,7 +236,7 @@ export function TaskDetail({
           <p className="mt-1 flex flex-wrap items-center gap-1 text-xs text-muted">
             <span>Workflow {TASK_WORKFLOW_LABEL[task.workflow]}</span>
             <Badge tone={boardState.tone}>{boardState.label}</Badge>
-            <TaskCreatorMarker createdBy={task.createdBy} />
+            <TaskAskOriginMarker origin={askOrigin} />
             {auditPhase && <span>Audit phase {auditPhase.label}</span>}
           </p>
         </div>
@@ -243,15 +287,39 @@ export function TaskDetail({
   );
 }
 
-function TaskCreatorMarker({ createdBy }: { createdBy?: string | null }) {
-  if (!createdBy) return null;
+function TaskAskOriginMarker({ origin, compact = false }: { origin: TaskAskOrigin; compact?: boolean }) {
+  if (compact) {
+    if (origin !== 'agent') return null;
+    return (
+      <span
+        data-task-ask-origin="agent"
+        className="inline-flex shrink-0 items-center text-faint"
+        title="Original ask came from an agent"
+      >
+        <Bot size={11} aria-hidden="true" />
+        <span className="sr-only">Agent-originated</span>
+      </span>
+    );
+  }
+  const label = origin === 'agent' ? 'Agent-originated' : origin === 'human' ? 'Human-asked' : 'Ask origin unknown';
+  const title =
+    origin === 'agent'
+      ? 'Original ask came from an agent'
+      : origin === 'human'
+        ? 'Original ask came from the human'
+        : 'Original ask provenance is unavailable';
   return (
     <span
-      className="mt-0.5 inline-flex w-fit items-center gap-1 rounded-control border border-accent-border bg-accent-soft px-1.5 py-0.5 text-2xs font-semibold text-accent"
-      title={`Created by agent session ${createdBy}`}
+      data-task-ask-origin={origin}
+      className={`mt-0.5 inline-flex w-fit items-center gap-1 rounded-control border px-1.5 py-0.5 text-2xs font-semibold ${
+        origin === 'agent'
+          ? 'border-accent-border bg-accent-soft text-accent'
+          : 'border-border-soft bg-surface text-muted'
+      }`}
+      title={title}
     >
-      <Bot size={11} aria-hidden="true" />
-      Agent-created
+      {origin === 'agent' && <Bot size={11} aria-hidden="true" />}
+      {label}
     </span>
   );
 }

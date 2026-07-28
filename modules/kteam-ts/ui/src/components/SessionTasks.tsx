@@ -11,9 +11,10 @@ import { useFleetEvents } from '../lib/store';
 import { useLayoutMode } from '../hooks/useLayoutMode';
 import type { CodeReference } from '../lib/code-references';
 import { isUnknownRoute } from './files-api';
-import { TaskDetail, TaskRow, sessionHref } from './TaskPresentation';
+import { TaskDetail, TaskRow, sessionHref, taskAskOrigin } from './TaskPresentation';
 import { TaskDagGraph } from './TaskDagGraph';
 import { TaskStatusFilter } from './TaskStatusFilter';
+import { taskAssigneePresentation } from './TaskAssigneeLink';
 import {
   filterTaskDag,
   filterTasksByStatuses,
@@ -30,6 +31,7 @@ import {
   parseTaskListResponse,
   parseTaskRecord,
   sortTasksForList,
+  taskBoardLane,
   tasksForSession,
   TASK_BOARD_LANE_META,
   type TaskActivity,
@@ -54,6 +56,33 @@ export type TaskProjection = 'list' | 'kanban' | 'dag';
 type ConflictMap = Map<string, TaskFileConflict[]>;
 const EMPTY_CONFLICTS: ConflictMap = new Map();
 
+interface TaskRowContext {
+  showStatusBadge: boolean;
+  showAssignee: boolean;
+  showAskOriginMarker: boolean;
+}
+
+/** Metadata earns card space only when it changes within the group the reader
+ *  is comparing. The key mirrors TaskAssigneeLink's visible/linkable identity
+ *  plus its dot tone so a real liveness or destination difference survives. */
+function taskRowContext(tasks: TaskSummary[]): TaskRowContext {
+  const assignees = new Set(
+    tasks.map(task => {
+      const identity = taskAssigneePresentation(task);
+      const destination = identity.href ?? (identity.assigned ? 'unresolved' : 'unassigned');
+      const tone = task.live.staleness ? 'warn' : task.live.assigneeHealth === 'active' ? 'active' : 'muted';
+      return `${identity.name.toLocaleLowerCase()}|${destination}|${tone}`;
+    }),
+  );
+  const states = new Set(tasks.map(task => (task.blocked ? 'blocked' : taskBoardLane(task.phase))));
+  const askOrigins = new Set(tasks.map(taskAskOrigin));
+  return {
+    showStatusBadge: states.size > 1,
+    showAssignee: assignees.size > 1,
+    showAskOriginMarker: askOrigins.has('agent') && askOrigins.size > 1,
+  };
+}
+
 export function SessionTaskList({
   tasks,
   conflicts = EMPTY_CONFLICTS,
@@ -63,11 +92,22 @@ export function SessionTaskList({
   conflicts?: ConflictMap;
   onOpen: (id: string) => void;
 }) {
+  const visibleTasks = sortTasksForList(tasks);
+  const context = taskRowContext(visibleTasks);
   return (
     <div data-task-view="list" className="divide-y divide-border-soft rounded-md border border-border-soft bg-surface">
-      {sortTasksForList(tasks).map(task => (
-        <TaskRow key={task.id} task={task} conflicts={conflicts.get(task.id)} onOpen={onOpen} />
+      {visibleTasks.map(task => (
+        <TaskRow
+          key={task.id}
+          task={task}
+          conflicts={conflicts.get(task.id)}
+          onOpen={onOpen}
+          showStatusBadge={context.showStatusBadge}
+          showAssignee={context.showAssignee}
+          showAskOriginMarker={context.showAskOriginMarker}
+        />
       ))}
+      {visibleTasks.length === 0 && <p className="px-3 py-4 text-center text-xs text-muted">No matching tasks.</p>}
     </div>
   );
 }
@@ -83,31 +123,43 @@ export function SessionTaskKanban({
   /** Narrow surfaces trade horizontal travel for one normal reading column. */
   compact?: boolean;
 }) {
+  const visibleContext = taskRowContext(tasks);
   return (
     <div
       data-task-view="kanban"
       data-task-layout={compact ? 'stacked' : 'columns'}
       className={compact ? 'flex min-w-0 flex-col gap-3 pb-2' : 'flex min-w-max gap-3 pb-2'}
     >
-      {groupTasksByBoardLane(tasks).map(column => (
-        <section
-          key={column.lane}
-          data-task-lane={column.lane}
-          aria-label={`${TASK_BOARD_LANE_META[column.lane].label} column`}
-          className={`${compact ? 'w-full min-w-0' : 'w-64 shrink-0'} rounded-md border border-border-soft bg-surface-2 p-2`}
-        >
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <h3 className="kt-label m-0">{TASK_BOARD_LANE_META[column.lane].label}</h3>
-            <span className="text-xs text-muted">{column.tasks.length}</span>
-          </div>
-          <div className="divide-y divide-border-soft rounded-md border border-border-soft bg-surface">
-            {column.tasks.map(task => (
-              <TaskRow key={task.id} task={task} conflicts={conflicts.get(task.id)} onOpen={onOpen} />
-            ))}
-            {column.tasks.length === 0 && <p className="px-3 py-2 text-xs text-muted">No tasks.</p>}
-          </div>
-        </section>
-      ))}
+      {groupTasksByBoardLane(tasks).map(column => {
+        const context = taskRowContext(column.tasks);
+        return (
+          <section
+            key={column.lane}
+            data-task-lane={column.lane}
+            aria-label={`${TASK_BOARD_LANE_META[column.lane].label} column`}
+            className={`${compact ? 'w-full min-w-0' : 'w-64 shrink-0'} rounded-md border border-border-soft bg-surface-2 p-2`}
+          >
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h3 className="kt-label m-0">{TASK_BOARD_LANE_META[column.lane].label}</h3>
+              <span className="text-xs text-muted">{column.tasks.length}</span>
+            </div>
+            <div className="divide-y divide-border-soft rounded-md border border-border-soft bg-surface">
+              {column.tasks.map(task => (
+                <TaskRow
+                  key={task.id}
+                  task={task}
+                  conflicts={conflicts.get(task.id)}
+                  onOpen={onOpen}
+                  impliedLane={column.lane}
+                  showAssignee={context.showAssignee}
+                  showAskOriginMarker={visibleContext.showAskOriginMarker}
+                />
+              ))}
+              {column.tasks.length === 0 && <p className="px-3 py-2 text-xs text-muted">No tasks.</p>}
+            </div>
+          </section>
+        );
+      })}
     </div>
   );
 }
@@ -169,7 +221,7 @@ function ProjectionTabs({ value, onChange }: { value: TaskProjection; onChange: 
     </div>
   );
 }
-function TaskProjectionView({
+export function TaskProjectionView({
   view,
   tasks,
   dag,
@@ -198,7 +250,9 @@ function TaskProjectionView({
       />
     );
   if (view === 'dag') return <SessionTaskDag dag={dag} conflicts={conflicts} onOpen={onOpen} onShowAll={onShowAll} />;
-  return <SessionTaskList tasks={tasks} conflicts={conflicts} onOpen={onOpen} />;
+  return (
+    <SessionTaskList tasks={filterTasksByStatuses(tasks, selectedStatuses)} conflicts={conflicts} onOpen={onOpen} />
+  );
 }
 
 export interface TaskOpenRequest {
@@ -418,7 +472,6 @@ export function SessionTasksSurface({
       )}
       {state === 'ready' &&
         sessionTasks.length > 0 &&
-        (projection === 'kanban' || projection === 'dag') &&
         (() => {
           const countTasks =
             projection === 'dag' ? taskDag.nodes.flatMap(node => (node.task ? [node.task] : [])) : sessionTasks;
@@ -429,7 +482,7 @@ export function SessionTasksSurface({
               ? `All ${countTasks.length}`
               : projection === 'dag'
                 ? taskFilterSummary(filteredTaskDag.matchCount, filteredTaskDag.contextCount)
-                : taskFilterSummary(matched, 0);
+                : `${matched} ${matched === 1 ? 'match' : 'matches'}`;
           return (
             <section className="shrink-0 px-panel pb-2" aria-label="Task status filter">
               <div className="mb-1 flex items-center justify-between gap-2">
