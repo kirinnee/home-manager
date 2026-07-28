@@ -52,9 +52,11 @@ describe('composer autocomplete trigger detection', () => {
   });
 
   test.each([
-    { value: '#F', trigger: '#' as const, query: 'F', start: 0 },
-    { value: 'see #F12', trigger: '#' as const, query: 'F12', start: 4 },
-    { value: '(#B2', trigger: '#' as const, query: 'B2', start: 1 },
+    { value: '&', trigger: '&' as const, query: '', start: 0 },
+    { value: '&F', trigger: '&' as const, query: 'F', start: 0 },
+    { value: 'see &F12', trigger: '&' as const, query: 'F12', start: 4 },
+    { value: '(&B2', trigger: '&' as const, query: 'B2', start: 1 },
+    { value: 'line\n&', trigger: '&' as const, query: '', start: 5 },
     { value: '?A', trigger: '?' as const, query: 'A', start: 0 },
     { value: 'resolve ?A3', trigger: '?' as const, query: 'A3', start: 8 },
     { value: 'line\n?A12', trigger: '?' as const, query: 'A12', start: 5 },
@@ -79,15 +81,43 @@ describe('composer autocomplete trigger detection', () => {
     '#FFF',
     '#123',
     'issue (#123)',
+    '#F',
+    'see #F12',
+    '(#B2',
     'foo#L12',
     'see #L12',
   ])('%s stays ordinary prose or markdown', value => {
     expect(detectComposerTrigger(value, caret(value.length))).toBeNull();
   });
 
+  test.each([
+    { value: 'Tom & Jerry', caretAt: 'Tom & Jerry'.length },
+    { value: 'Tom & Jerry', caretAt: 'Tom &'.length },
+    { value: 'R&D', caretAt: 'R&D'.length },
+    { value: 'AT&T', caretAt: 'AT&T'.length },
+    { value: '&amp;', caretAt: '&amp;'.length },
+    { value: '&amp;', caretAt: 1 },
+    { value: '&nbsp;', caretAt: '&nbsp;'.length },
+    { value: '&nbsp;', caretAt: 1 },
+    { value: '&#39;', caretAt: '&#39;'.length },
+    { value: '&#39;', caretAt: 1 },
+    { value: '&#x27;', caretAt: 1 },
+    { value: '&#X27;', caretAt: 1 },
+    { value: 'cmd &', caretAt: 'cmd &'.length },
+    { value: 'a && b', caretAt: 'a && b'.length },
+    { value: '&&', caretAt: 1 },
+    { value: '&&', caretAt: 2 },
+  ])('$value at caret $caretAt is not a task trigger', ({ value, caretAt }) => {
+    expect(detectComposerTrigger(value, caret(caretAt))).toBeNull();
+  });
+
+  test('changing the task sigil does not tighten the existing attention boundary', () => {
+    expect(detectComposerTrigger('&?A3', caret(5))).toMatchObject({ trigger: '?', query: 'A3', start: 1 });
+  });
+
   test('reference replacement stops before prose punctuation', () => {
-    const task = detectComposerTrigger('see #F12, please', caret(8));
-    expect(task).toMatchObject({ trigger: '#', query: 'F12', start: 4, end: 8 });
+    const task = detectComposerTrigger('see &F12, please', caret(8));
+    expect(task).toMatchObject({ trigger: '&', query: 'F12', start: 4, end: 8 });
     const attention = detectComposerTrigger('resolve ?A3.', caret(11));
     expect(attention).toMatchObject({ trigger: '?', query: 'A3', start: 8, end: 11 });
   });
@@ -104,7 +134,7 @@ describe('composer autocomplete trigger detection', () => {
   test('a non-collapsed textarea selection never opens suggestions', () => {
     expect(detectComposerTrigger('/summary', { start: 1, end: 4 })).toBeNull();
     expect(detectComposerTrigger('@src', { start: 0, end: 4 })).toBeNull();
-    expect(detectComposerTrigger('#F12', { start: 1, end: 4 })).toBeNull();
+    expect(detectComposerTrigger('&F12', { start: 1, end: 4 })).toBeNull();
     expect(detectComposerTrigger('?A3', { start: 1, end: 3 })).toBeNull();
   });
 
@@ -183,8 +213,8 @@ describe('composer autocomplete token replacement', () => {
   });
 
   test('canonical task and attention references replace their whole token', () => {
-    const task = detectComposerTrigger('track #F1', caret(9));
-    expect(replaceComposerTrigger('track #F1', task!, '#F12')).toEqual({
+    const task = detectComposerTrigger('track &F1', caret(9));
+    expect(replaceComposerTrigger('track &F1', task!, '#F12')).toEqual({
       value: 'track #F12 ',
       selection: { start: 11, end: 11 },
     });

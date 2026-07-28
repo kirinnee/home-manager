@@ -1,4 +1,4 @@
-// Presentation for the composer's shared / and @ trigger engine.
+// Presentation for the composer's shared /, @, &, and ? trigger engine.
 //
 // The visual direction is a compact "signal rail": an industrial, information-
 // dense strip attached to the composer rather than a floating command-palette
@@ -254,7 +254,7 @@ export function ComposerAutocompletePopover({
   const trigger = controller.match.trigger;
   const groups = groupAutocompleteCandidates(controller.candidates);
   const surface =
-    trigger === '/' ? 'commands-skills' : trigger === '@' ? 'files' : trigger === '#' ? 'tasks' : 'attention';
+    trigger === '/' ? 'commands-skills' : trigger === '@' ? 'files' : trigger === '&' ? 'tasks' : 'attention';
 
   return (
     <div

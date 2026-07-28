@@ -180,8 +180,8 @@ describe('ComposerAutocompletePopover', () => {
     const taskHtml = renderToStaticMarkup(
       <ComposerAutocompletePopover
         controller={controller({
-          provider: { ...provider, trigger: '#', label: 'Tasks' },
-          match: { trigger: '#', query: 'F', start: 0, end: 2, caret: 2 },
+          provider: { ...provider, trigger: '&', label: 'Tasks' },
+          match: { trigger: '&', query: 'F', start: 0, end: 2, caret: 2 },
           candidates: [
             {
               id: 'task:F38',

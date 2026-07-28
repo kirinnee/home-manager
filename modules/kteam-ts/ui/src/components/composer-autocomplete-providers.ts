@@ -3,7 +3,7 @@
 // `/` merges harness-valid built-in commands with the exact session account's
 // discovered skills. `@` reuses the Files tab's existing cwd-contained,
 // secrets-filtered listing endpoint and lazily navigates one path segment at a
-// time. `#` and `?` project already-live task and attention stores through
+// time. `&` and `?` project already-live task and attention stores through
 // synchronous getters, so typing a reference never launches another request.
 
 import { ApiError, HAS_TOKEN, TOKEN } from '../lib/api';
@@ -240,7 +240,7 @@ export function createTasksProvider(
   });
   return {
     id: `tasks:${sessionId}`,
-    trigger: '#',
+    trigger: '&',
     label: 'Tasks',
     get snapshotKey() {
       return getTasks();

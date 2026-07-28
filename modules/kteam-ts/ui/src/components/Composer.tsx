@@ -155,7 +155,7 @@ export function composerTasksFromSnapshot(value: unknown): TaskSummary[] {
 
 /** Warm one session task snapshot when the composer mounts, then converge from
  * the FleetStore's existing session event stream. The provider itself never
- * fetches: by the time a reader types `#F`, it reads this in-memory snapshot.
+ * fetches: by the time a reader types `&F`, it reads this in-memory snapshot.
  * A live event wins over an older in-flight initial response. */
 function useComposerTasks(sessionId: string | undefined): {
   tasks: readonly TaskSummary[];
