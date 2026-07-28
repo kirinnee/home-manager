@@ -11,8 +11,10 @@ import {
   type AnalyticsRawSession,
   type AnalyticsRefreshResult,
   type AnalyticsResponse,
+  type ParsedAnalyticsQuery,
 } from './analytics-types';
 import { AnalyticsQueryError, matcherLikePattern, parseAnalyticsQuery } from './analytics-query';
+import { PRICING_REGISTRY } from './model-cost';
 
 export const ANALYTICS_SCHEMA_VERSION = 6;
 export const ANALYTICS_RAW_LIMIT = 200;
@@ -24,6 +26,59 @@ const DEFAULT_REFRESH_SOURCES = 64;
 const MAX_TRANSCRIPT_LINE_BYTES = 16 * 1024 * 1024;
 const SOURCE_RETRY_MS = 5 * 60 * 1000;
 const BACKGROUND_REFRESH_MS = 60 * 1000;
+
+/**
+ * SQLite compares timestamps as text while `model-cost.ts` compares them as
+ * parsed instants. The two agree only for canonical, fixed-width, UTC ISO
+ * strings, so the rate join demands exactly that shape; anything else prices as
+ * an honest unknown rather than silently landing in the wrong validity window.
+ */
+const CANONICAL_TIMESTAMP_GLOB =
+  '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z';
+
+/**
+ * The `estimateEquivalentApiCost` formula in SQL, over the temp rates table.
+ * Every guard mirrors an unknown-reason in `model-cost.ts`: a missing rate,
+ * incomplete or negative counters, more cached+written input than gross input,
+ * or an Anthropic cache-write total its TTL split does not reconstruct. The
+ * `+ 500000` before integer division is the same half-up rounding the TypeScript
+ * implementation applies once at the end.
+ */
+const EQUIVALENT_COST_SQL = `
+          CASE
+            WHEN rate.model_alias IS NOT NULL
+             AND analytics.token_known = 1
+             AND analytics.input_tokens IS NOT NULL AND analytics.input_tokens >= 0
+             AND analytics.output_tokens IS NOT NULL AND analytics.output_tokens >= 0
+             AND analytics.cached_input_tokens IS NOT NULL AND analytics.cached_input_tokens >= 0
+             AND analytics.cache_write_input_tokens IS NOT NULL AND analytics.cache_write_input_tokens >= 0
+             AND analytics.input_tokens - analytics.cached_input_tokens - analytics.cache_write_input_tokens >= 0
+             AND (
+               rate.provider = 'openai'
+               OR analytics.cache_write_input_tokens = 0
+               OR (
+                 analytics.cache_write_5m_input_tokens IS NOT NULL
+                 AND analytics.cache_write_1h_input_tokens IS NOT NULL
+                 AND analytics.cache_write_5m_input_tokens >= 0
+                 AND analytics.cache_write_1h_input_tokens >= 0
+                 AND analytics.cache_write_5m_input_tokens + analytics.cache_write_1h_input_tokens
+                     = analytics.cache_write_input_tokens
+               )
+             )
+            THEN (
+              (analytics.input_tokens - analytics.cached_input_tokens - analytics.cache_write_input_tokens)
+                * rate.input
+              + analytics.cached_input_tokens * rate.cached_read
+              + analytics.output_tokens * rate.output
+              + CASE
+                  WHEN rate.provider = 'openai' THEN analytics.cache_write_input_tokens * rate.cache_write
+                  ELSE COALESCE(analytics.cache_write_5m_input_tokens, 0) * rate.cache_write_5m
+                     + COALESCE(analytics.cache_write_1h_input_tokens, 0) * rate.cache_write_1h
+                END
+              + 500000
+            ) / 1000000
+            ELSE NULL
+          END AS equiv_cost_usd_micros`;
 
 const OUTPUT_TYPES_SQL = "'chat.assistant.text','chat.assistant.thinking','chat.assistant.reasoning','tool.use'";
 const FAILURE_TYPES_SQL = "'session.failed','session.crashed'";
@@ -141,6 +196,7 @@ const LABEL_COLUMNS: Record<AnalyticsLabel, string> = {
   cwd: 'cwd',
   repo: 'cwd',
   parent: 'parent',
+  tree: 'tree_root',
   day: 'day',
   week: 'week',
   token_data: 'token_data',
@@ -180,6 +236,7 @@ export class AnalyticsIndex {
       this.database.exec('PRAGMA foreign_keys = ON');
       this.database.exec('PRAGMA busy_timeout = 5000');
       this.initialize();
+      this.createRatesTable();
     } catch (error) {
       this.database.close();
       throw error;
@@ -214,6 +271,53 @@ export class AnalyticsIndex {
       .run(String(ANALYTICS_SCHEMA_VERSION));
     this.invalidateIncompleteTokens();
     this.recomputeAllTokenTotals();
+  }
+
+  /**
+   * Publish the shared price registry as a connection-local TEMP table so
+   * equivalent API cost can be summed in SQL. Deliberately not persisted: a
+   * stored cost column would strand stale values the moment a rate is edited,
+   * and a schema bump would force a pointless full transcript rebuild.
+   */
+  private createRatesTable(): void {
+    this.database.exec(`
+      CREATE TEMP TABLE analytics_rates (
+        model_alias TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        input INTEGER NOT NULL,
+        cached_read INTEGER NOT NULL,
+        cache_write INTEGER,
+        cache_write_5m INTEGER,
+        cache_write_1h INTEGER,
+        output INTEGER NOT NULL,
+        valid_from TEXT NOT NULL,
+        valid_through TEXT,
+        PRIMARY KEY (model_alias, valid_from)
+      );
+    `);
+    const insert = this.database.query(`
+      INSERT INTO analytics_rates (
+        model_alias, provider, input, cached_read, cache_write,
+        cache_write_5m, cache_write_1h, output, valid_from, valid_through
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const micros = (value: bigint | undefined): number | null => (value === undefined ? null : Number(value));
+    for (const entry of PRICING_REGISTRY) {
+      const rates = entry.ratesUsdMicrosPerMillion;
+      for (const alias of entry.aliases)
+        insert.run(
+          alias,
+          entry.provider,
+          Number(rates.input),
+          Number(rates.cachedRead),
+          micros(rates.cacheWrite),
+          micros(rates.cacheWrite5m),
+          micros(rates.cacheWrite1h),
+          Number(rates.output),
+          entry.validCreatedAt.from,
+          entry.validCreatedAt.through ?? null,
+        );
+    }
   }
 
   /** Persistent triggers keep a warm index current even while this connection
@@ -717,10 +821,10 @@ export class AnalyticsIndex {
   query(source?: string): AnalyticsResponse {
     this.assertOpen();
     const parsed = parseAnalyticsQuery(source);
-    const filter = this.filterSql(parsed.matchers);
-    const commonParameters = filter.parameters;
+    const plan = this.plan(parsed);
+    const commonParameters = plan.parameters;
     const matchedRow = this.database
-      .query(`${this.baseCte()} SELECT COUNT(*) AS count FROM base b ${filter.where}`)
+      .query(`${plan.cte} SELECT COUNT(*) AS count FROM base b ${plan.where}`)
       .get(...commonParameters) as { count: number };
     const matched = asCount(matchedRow?.count);
     const index = this.indexStatus();
@@ -735,8 +839,8 @@ export class AnalyticsIndex {
       const rows = this.database
         .query(
           `
-          ${this.baseCte()}
-          SELECT * FROM base b ${filter.where}
+          ${plan.cte}
+          SELECT * FROM base b ${plan.where}
           ORDER BY created_at DESC, session_id
           LIMIT ${this.rawLimit + 1}
         `,
@@ -775,7 +879,7 @@ export class AnalyticsIndex {
     const rows = this.database
       .query(
         `
-        ${this.baseCte()}
+        ${plan.cte}
         SELECT
           ${selectGroups}
           COUNT(*) AS sessions,
@@ -789,11 +893,12 @@ export class AnalyticsIndex {
           ${metric('cache_write_input_tokens', 'cache_write_input_tokens')},
           ${metric('cache_write_5m_input_tokens', 'cache_write_5m_input_tokens')},
           ${metric('cache_write_1h_input_tokens', 'cache_write_1h_input_tokens')},
+          ${metric('equiv_cost_usd_micros', 'equiv_cost')},
           ${metric('turns', 'turns')},
           ${metric('duration_ms', 'duration_ms')},
           ${metric('ttfo_ms', 'ttfo_ms')},
           ${metric('context_percent', 'context_percent')}
-        FROM base b ${filter.where}
+        FROM base b ${plan.where}
         ${groupSql}
         ${orderSql}
         LIMIT ${this.groupLimit + 1}
@@ -803,7 +908,13 @@ export class AnalyticsIndex {
     if (rows.length > this.groupLimit)
       throw new AnalyticsQueryError(
         `query produces more than ${this.groupLimit} groups; add a matcher` +
-          `${parsed.groupBy.includes('label') ? ' such as {label=batch-*}' : ''} or use fewer grouping labels`,
+          `${
+            parsed.groupBy.includes('tree')
+              ? ' such as {tree=<session-id>}'
+              : parsed.groupBy.includes('label')
+                ? ' such as {label=batch-*}'
+                : ''
+          } or use fewer grouping labels`,
       );
     const results: AnalyticsAggregateResult[] = rows.map(row => {
       const sessions = asCount(row.sessions);
@@ -828,6 +939,7 @@ export class AnalyticsIndex {
         cacheWriteInputTokens: this.measure(row, 'cache_write_input_tokens', measureTotal),
         cacheWrite5mInputTokens: this.measure(row, 'cache_write_5m_input_tokens', measureTotal),
         cacheWrite1hInputTokens: this.measure(row, 'cache_write_1h_input_tokens', measureTotal),
+        equivalentApiCostUsdMicros: this.measure(row, 'equiv_cost', measureTotal),
         turns: this.measure(row, 'turns', measureTotal),
         durationMs: this.measure(row, 'duration_ms', measureTotal),
         timeToFirstOutputMs: this.measure(row, 'ttfo_ms', measureTotal),
@@ -843,13 +955,104 @@ export class AnalyticsIndex {
     return response;
   }
 
-  private baseCte(): string {
-    return `
-      WITH base AS (
+  /**
+   * One place that turns a parsed query into SQL, because the CTE prelude and
+   * the WHERE clause now share bound parameters: subtree anchors appear inside
+   * the prelude, so every statement must bind `parameters` in this exact order.
+   *
+   * The lineage CTEs are emitted only when the query actually mentions `tree`,
+   * keeping ordinary queries at today's cost. They reproduce the client-side
+   * `buildLineage` sanitization in SQL: an edge counts only when the parent is
+   * a real, different session; a node that can reach itself by climbing is on
+   * a cycle and loses its own parent edge, while ordinary children hanging off
+   * that node keep theirs. Recursive UNION makes every walk a finite set of
+   * distinct ids, so cycles terminate without imposing a valid-depth cutoff.
+   */
+  private plan(parsed: ParsedAnalyticsQuery): {
+    cte: string;
+    where: string;
+    parameters: string[];
+    tree: boolean;
+  } {
+    const tree = parsed.groupBy.includes('tree') || parsed.matchers.some(matcher => matcher.label === 'tree');
+    const preludes: string[] = [];
+    const cteParameters: string[] = [];
+
+    if (tree) {
+      preludes.push(`
+        lineage_edge AS (
+          SELECT child.session_id AS child, TRIM(child.parent) AS parent
+          FROM analytics_sessions child
+          JOIN analytics_sessions ancestor ON ancestor.session_id = TRIM(child.parent)
+          WHERE child.parent IS NOT NULL
+            AND TRIM(child.parent) <> ''
+            AND TRIM(child.parent) <> child.session_id
+        ),
+        lineage_climb(start, node) AS (
+          SELECT child, parent FROM lineage_edge
+          UNION
+          SELECT climb.start, edge.parent
+          FROM lineage_climb climb
+          JOIN lineage_edge edge ON edge.child = climb.node
+        ),
+        lineage_cycle AS (SELECT DISTINCT start AS node FROM lineage_climb WHERE node = start),
+        lineage_sane AS (
+          SELECT child, parent FROM lineage_edge WHERE child NOT IN (SELECT node FROM lineage_cycle)
+        ),
+        lineage_root(node, root) AS (
+          SELECT session_id, session_id FROM analytics_sessions
+          WHERE session_id NOT IN (SELECT child FROM lineage_sane)
+          UNION
+          SELECT sane.child, walk.root
+          FROM lineage_root walk
+          JOIN lineage_sane sane ON sane.parent = walk.node
+        )`);
+    }
+
+    const conditions: string[] = [];
+    const whereParameters: string[] = [];
+    let anchors = 0;
+    for (const matcher of parsed.matchers) {
+      if (matcher.label === 'tree') {
+        // The anchor itself belongs to its own subtree, so seed the walk with it.
+        const name = `subtree_${anchors}`;
+        anchors += 1;
+        preludes.push(`
+        ${name}(node) AS (
+          SELECT session_id FROM analytics_sessions WHERE session_id = ?
+          UNION
+          SELECT sane.child
+          FROM ${name} sub
+          JOIN lineage_sane sane ON sane.parent = sub.node
+        )`);
+        cteParameters.push(matcher.value);
+        conditions.push(`b.session_id IN (SELECT node FROM ${name})`);
+        continue;
+      }
+      const column = `b.${LABEL_COLUMNS[matcher.label]}`;
+      if (matcher.wildcard) {
+        conditions.push(`LOWER(COALESCE(CAST(${column} AS TEXT), '')) LIKE LOWER(?) ESCAPE '\\'`);
+        whereParameters.push(matcherLikePattern(matcher.value));
+      } else {
+        conditions.push(`COALESCE(CAST(${column} AS TEXT), '') = ?`);
+        whereParameters.push(matcher.value);
+      }
+    }
+
+    const prelude = preludes.length ? `${preludes.join(',\n')},` : '';
+    const cte = `
+      WITH RECURSIVE ${prelude}
+      base AS (
         SELECT
-          analytics.*,
+          analytics.*,${
+            tree
+              ? `
+          COALESCE(lineage.root, analytics.session_id) AS tree_root,`
+              : ''
+          }
           CASE WHEN token_known = 1 THEN 'known' ELSE 'unknown' END AS token_data,
           CASE WHEN token_known = 1 THEN input_tokens + output_tokens ELSE NULL END AS total_tokens,
+          ${EQUIVALENT_COST_SQL},
           CASE
             WHEN started_at IS NOT NULL AND finished_at IS NOT NULL
               THEN MAX(0, (julianday(finished_at) - julianday(started_at)) * 86400000.0)
@@ -861,28 +1064,28 @@ export class AnalyticsIndex {
             ELSE NULL
           END AS ttfo_ms
         FROM analytics_sessions analytics
+        LEFT JOIN analytics_rates rate ON rate.rowid = (
+          SELECT candidate.rowid FROM analytics_rates candidate
+          WHERE candidate.model_alias = analytics.pricing_model
+            AND analytics.created_at GLOB '${CANONICAL_TIMESTAMP_GLOB}'
+            AND analytics.created_at >= candidate.valid_from
+            AND (candidate.valid_through IS NULL OR analytics.created_at <= candidate.valid_through)
+          ORDER BY candidate.valid_from DESC
+          LIMIT 1
+        )${
+          tree
+            ? `
+        LEFT JOIN lineage_root lineage ON lineage.node = analytics.session_id`
+            : ''
+        }
       )
     `;
-  }
-
-  private filterSql(matchers: ReturnType<typeof parseAnalyticsQuery>['matchers']): {
-    where: string;
-    parameters: string[];
-  } {
-    if (!matchers.length) return { where: '', parameters: [] };
-    const conditions: string[] = [];
-    const parameters: string[] = [];
-    for (const matcher of matchers) {
-      const column = `b.${LABEL_COLUMNS[matcher.label]}`;
-      if (matcher.wildcard) {
-        conditions.push(`LOWER(COALESCE(CAST(${column} AS TEXT), '')) LIKE LOWER(?) ESCAPE '\\'`);
-        parameters.push(matcherLikePattern(matcher.value));
-      } else {
-        conditions.push(`COALESCE(CAST(${column} AS TEXT), '') = ?`);
-        parameters.push(matcher.value);
-      }
-    }
-    return { where: `WHERE ${conditions.join(' AND ')}`, parameters };
+    return {
+      cte,
+      where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
+      parameters: [...cteParameters, ...whereParameters],
+      tree,
+    };
   }
 
   private measure(row: Record<string, unknown>, prefix: string, total: number): AnalyticsMeasure {
@@ -908,10 +1111,14 @@ export class AnalyticsIndex {
       label: nullableText('label'),
       cwd: nullableText('cwd'),
       parent: nullableText('parent'),
+      // Only a tree-aware query computes a root, so stay silent otherwise
+      // rather than implying every session was placed in a lineage.
+      ...('tree_root' in row ? { tree: nullableText('tree_root') } : {}),
       day: nullableText('day'),
       week: nullableText('week'),
       createdAt: nullableText('created_at'),
       pricingModel: nullableText('pricing_model'),
+      equivalentApiCostUsdMicros: nullableNumber(row.equiv_cost_usd_micros),
       tokens: nullableNumber(row.total_tokens),
       inputTokens: nullableNumber(row.input_tokens),
       outputTokens: nullableNumber(row.output_tokens),
