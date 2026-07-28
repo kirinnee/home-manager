@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { TaskDetail, TaskRow, TasksPage } from './TasksPage';
+import { TaskDetail, TaskRow } from './TaskPresentation';
 import type { TaskSummary } from '../lib/tasks';
 
 const task: TaskSummary = {
@@ -24,18 +24,14 @@ const task: TaskSummary = {
   },
 };
 
-describe('TasksPage', () => {
-  test('renders an unwired, read-only route shell', () => {
-    const html = renderToStaticMarkup(<TasksPage />);
-    expect(html).toContain('>Tasks</h1>');
-    expect(html).toContain('Task API wiring is pending');
-  });
+describe('task presentation', () => {
   test('row exposes liveness mismatch as evidence without changing its declared status', () => {
     const html = renderToStaticMarkup(<TaskRow task={task} onOpen={() => undefined} />);
     expect(html).toContain('In progress');
     expect(html).toContain('Declared status remains in progress');
     expect(html).toContain('kteam#42');
   });
+
   test('blocked rows expose the reason the user needs to act on', () => {
     const html = renderToStaticMarkup(
       <TaskRow
@@ -45,6 +41,7 @@ describe('TasksPage', () => {
     );
     expect(html).toContain('Choose the rollout window');
   });
+
   test('dropped rows and details expose the mandatory reason', () => {
     const dropped = {
       ...task,
@@ -57,6 +54,7 @@ describe('TasksPage', () => {
     expect(detail).toContain('Status reason');
     expect(detail).toContain('The upstream API cannot support this safely');
   });
+
   test('detail separates feedback and status events', () => {
     const html = renderToStaticMarkup(
       <TaskDetail

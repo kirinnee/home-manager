@@ -47,7 +47,6 @@ import {
   ChevronsRight,
   Cpu,
   FolderGit2,
-  ListTodo,
   Pause,
   Pencil,
   Play,
@@ -788,9 +787,6 @@ function Rail({ count, onExpand }: { count: number; onExpand: () => void }) {
       >
         <Plus size={14} />
       </Link>
-      <Link to="/tasks" aria-label="Open Tasks" title="Tasks" className="kt-btn h-[44px] w-[44px] justify-center !px-0">
-        <ListTodo size={14} />
-      </Link>
       <Link
         to="/warden"
         aria-label="Open Warden"
@@ -855,12 +851,8 @@ function NarrowDestinations({ onNavigate }: { onNavigate: () => void }) {
   return (
     <nav
       aria-label="Destinations"
-      className="grid shrink-0 grid-cols-3 gap-sm border-b border-border-soft px-cell-x pb-2"
+      className="grid shrink-0 grid-cols-2 gap-sm border-b border-border-soft px-cell-x pb-2"
     >
-      <Link to="/tasks" onClick={onNavigate} className="kt-btn min-h-[44px] justify-center gap-xs">
-        <ListTodo size={14} aria-hidden="true" />
-        Tasks
-      </Link>
       <Link to="/warden" onClick={onNavigate} className="kt-btn min-h-[44px] justify-center gap-xs">
         <ShieldCheck size={14} aria-hidden="true" />
         Warden

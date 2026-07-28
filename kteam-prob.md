@@ -1726,3 +1726,1147 @@ Still deliberately open (see triage doc): the /rc-banner readiness CANNOT-TELL (
 frame fixture), the 07-25 interactive-stops root cause (unanswerable pre-B6; diagnosable after
 restart), /signal-behind-adoption residual (bounded, deferred), and the two feature candidates
 (worktree isolation, human-only question provenance).
+
+## 2026-07-26 09:47 — `sus_subprocess` + token-blind heuristics self-flag every long Codex turn (spurious warden spawn, harmless)
+
+**Session watched:** ms1jpy88-5618dc60 (lenny, codex-auto-loge, gpt-5.6-sol) — babysat during
+mobile-round-3-batch1. Fleet sweep assigned warden mohammed (ms1m6uiq-8219fa70, claude-auto-loge,
+opus-4-8) against lenny at 09:47:32 for `sus_subprocess`: "a background subprocess has been
+running continuously for 16m." mohammed's verdict (`~/.kteam/daemon/warden/reports/2026-07-26T09-47-32-727Z-ms1jpy88-5618dc60.md`,
+also `~/.kteam/ms1m6uiq-8219fa70/summary.md`): **LEAVE** — lenny was healthy and progressing
+(Working timer 5m22s→6m15s, context 49%→51%, different active commands, steady CPU, growing
+diff/file mtimes across two looks a minute apart). No harm done: the warden-scoped token cannot
+send/interrupt/resume/answer/stop anything outside its own assignment (`api-server.ts`
+`wardenScopeDenial`), and mohammed's own transcript shows zero mutating calls against lenny —
+confirmed independently in lenny's `events.jsonl` (uninterrupted `workspace.changed` through
+09:50, no stop/interrupt/resume events in or after the sweep window).
+
+The warden behaved correctly; the defect is upstream — two liveness heuristics misfire
+specifically on long Codex turns, each spawning a full opus-4-8 warden session (this one: $1.01,
+64k/1M tokens) to investigate a session that was never actually wedged:
+
+1. **`sus_subprocess` counts the session's own turn process as a suspicious long-running
+   subprocess.** Condition + threshold: `modules/kteam-ts/src/liveness.ts:188-196` (`susFindings`
+   — fires once a continuous subprocess episode, tracked from `subprocessSince`, exceeds
+   `susSubprocessSeconds`, default 900s at `modules/kteam-ts/src/daemon-config.ts:93`). The
+   "subprocess alive" signal itself is computed at `modules/kteam-ts/src/session-manager.ts:3842-3843`
+   as `tmux.subprocessAlive() || backgroundTerminalCount(pane.visiblePane) > 0`.
+   `tmux.subprocessAlive()` (`modules/kteam-ts/src/tmux-controller.ts:511-518`) does exclude the
+   pane's own root PID (`.slice(1)` over the process tree) — but excludes nothing else: a
+   necessary per-turn child process (lenny's PID 14243, `codex-raw ... resume --model
+gpt-5.6-sol`, alive for the whole turn) is indistinguishable from a genuinely runaway
+   background job. `backgroundTerminalCount()` (`tmux-controller.ts:213-219`, footer text "N
+   background terminal(s) running") excludes nothing at all — it's a raw text-match. Net effect:
+   any single Codex turn that holds one live process or one open background terminal past 15
+   minutes self-flags, regardless of health.
+2. **The token liveness channel structurally never advances for gpt-5.6-sol.** Fed by
+   `paneWorkCounters()`'s tokens regex (`tmux-controller.ts:190-196`, matches literal `"N[k]
+tokens"` in the pane — Claude Code's status line format) and only set on proven increase via
+   `workCountersAdvanced`/`foldStallLiveness` (`tmux-controller.ts:202-209`, `:241-252`, token set
+   at `:251`). Codex's pane renders a `Context NN% used` meter instead of a `"tokens"` string, so
+   the regex never matches and `lastTokenAdvanceAt` never moves — a gap the code already documents
+   inline (`tmux-controller.ts:229`: "codex has none, so this never moves there and the sus
+   classifier treats the session as token-blind"). This channel isn't what triggered this
+   specific incident (`sus_subprocess` doesn't read it — only `sus_thinking` does), but it adds
+   false weight to any stall/sus judgment that treats a never-fed channel as infinitely stale
+   rather than not-applicable, and was independently observed here: lenny's token-age read 951s
+   at mohammed's first look, 1002s at the second, monotonically growing across an actively
+   progressing turn.
+
+**Workaround:** none needed — the warden self-corrects (cheap, read-only, bounded by
+`assignedCooldownMinutes`) and caused zero harm. **Suggested fix:** exclude a session's own
+necessary per-turn/background-terminal process from `sus_subprocess` (or require CPU/output
+growth between ticks, which the warden already checks manually), and treat a harness whose
+token channel has NEVER once advanced (not just "stale") as not-applicable rather than
+maximally-stale in any heuristic that weighs `tokens` staleness.
+
+## 2026-07-26 — structured questions intermittently never render in the UI ("sometimes questions don't propagate")
+
+**Problem.** An agent raises a structured question (`AskUserQuestion` / Codex `request_user_input`)
+and sometimes it never appears as a QuestionForm in the kteam UI, so the human can't answer.
+Intermittent. Investigated read-only in session `ms2bna1k-c43f2f07`; full writeup at
+`~/.kteam/ms2bna1k-c43f2f07/question-propagation-diagnosis.md`.
+
+**NOT the cause: `HAS_TOKEN` / token-less shell.** The UI is reached via a **Cloudflare tunnel**,
+not Tailscale/plain-HTTP. `cloudflared` proxies to `127.0.0.1:7337`, so from the daemon the peer is
+loopback (`api-server.ts:239-240`) and the shell IS served with the embedded admin token
+(`:268-271`, `:276`); `HAS_TOKEN` is true. Verified and dropped.
+
+**Confirmed drop points (ranked).**
+
+1. _(Primary, best fit for "sometimes")_ **Reconnect/late-focus recovery relies on a 200-event
+   GLOBAL fleet backfill.** `interaction.question` IS journalled (seq>0, not in
+   `HARNESS_DERIVED_EVENT_TYPES` at `session-manager.ts:282-289`) and broadcast live. But the WS
+   catch-up on (re)connect is a fixed global tail: `ui/src/lib/ws.ts:44` opens with
+   `after=STREAM_TAIL=-200` (`store.tsx:78`); `api-server.ts:581` calls
+   `replay(undefined, -200, 1000)` → `session-manager.ts:3148` `tailFleet(min(200,1000))` →
+   `storage.ts:970-982` `SELECT ... FROM events ORDER BY time DESC LIMIT 200` (whole fleet, by
+   time; one page only — `api-server.ts:588`). A question raised while the client was
+   disconnected/backgrounded that is >200 fleet-events old is NOT re-delivered, so the per-session
+   `scheduleRefresh` (`store.tsx:663`, 900ms `getSession`) that flips the view to
+   `awaiting_question` never fires. Recovery then depends only on `reconcile()` (`listSessions`,
+   which DOES carry `state.pendingQuestion`/`status` — `compactFleetSession` at
+   `api-server.ts:53-57` strips only `config.harnessSessionBaseline`), and every non-forced
+   `reconcile` is **skipped while `document.hidden`** (`store.tsx:573`) and throttled 5s
+   (`:572`); the 45s interval is also hidden-gated (`:339`). Net on the phone PWA: form delayed up
+   to ~45s after foregrounding, and absent entirely while backgrounded. Measured fleet rate today
+   ~18 events/min ⇒ 200 events ≈ 11 min (much less during bursts).
+
+2. **A `direct:true` send (or any new-turn transition) clears `pendingQuestion` without an
+   answer.** `session-manager.ts:1825-1831` (`pendingQuestion: undefined` on turn start). A normal
+   send while `awaiting_question` is rejected (`:1578`), but a `direct` send bypasses that guard.
+   Benign when the human chooses to type; a real drop if any automated/injected direct send lands
+   while a question is pending. **This is what cleared the candidate instance** (see below).
+
+3. _(Permanent, harness-dependent — CANNOT-TELL)_ an unanswered question cancelled by the harness
+   (tool timeout/interrupt) writes a `tool.result` that clears `pendingQuestion`
+   (`session-manager.ts:4287`/`:4448`) before a `reconcile()` surfaces it → gone for good.
+   Fixture: leave an interactive `AskUserQuestion` unanswered 10-20 min with no client and watch
+   whether `state.json` clears on its own.
+
+4. _(Transient live race)_ `interaction.question` carries no `status` in its payload, so the
+   optimistic `transitionPatch` (`store.tsx:257-264`) applies no status; `awaiting_question` only
+   lands via the 900ms-debounced `getSession`. A question answered/interrupted inside that window
+   never shows a form. UI gate is status-only: `SessionChatPage.tsx:442`
+   (`awaitingQ = state.status === 'awaiting_question'`), form at `:999`
+   (`awaitingQ && pendingQ && HAS_TOKEN`).
+
+5. _(Codex — CANNOT-TELL, needs fixture)_ Codex `request_user_input` uses the same emit path, but
+   abort/turn-boundary clearing (`:4434-4438`) and one-record→many-events normalisation are not
+   proven equivalent to Claude's per-line delivery (`claude-transcript.ts:707-731` delivers one
+   transcript line per `onEvents`, which rules out within-batch collapse for Claude).
+
+**Candidate instance `ms1lhymf-c4051f31` (zelda), seq 454 — verdict: consistent with the bug, not
+proof.** 21:35:19 the agent raised the Parakeet `AskUserQuestion` and the daemon correctly emitted
+`interaction.question` + reached `awaiting_question`. 13s later (seq 455) the human sent a
+**free-text `admin-ui` message with `direct:true`** instead of a structured `answer`, which cleared
+the question (drop point 2, "rejected/interrupted"); at 21:39 they typed this very bug report. The
+human resorting to typing right before reporting the bug is what you'd expect if the form never
+rendered (mode is `interactive`, so detection/state were correct) — but the journal can't prove the
+form's absence.
+
+**Workaround (user-facing):** if a question seems missing, foreground the tab and wait one reconcile
+(~≤45s), or reload the session page (`hydrate()` does a full `listSessions` and restores it). Answer
+with `kteam answer`/the form rather than a free-text send, which discards the pending question.
+
+**Suggested fixes:** (1) on WS reconnect, force a per-session `getSession` for the open session and
+make the reconnect `reconcile()` forced (`store.tsx:457 → reconcile(true)`), or resume the fleet
+backfill from each session's last-seen sequence instead of a fixed global `-200`; fire one
+un-gated reconcile on the visibility→visible edge. (2) relax the UI gate to
+`(awaitingQ || pendingQ) && !isTerminal && HAS_TOKEN` (`SessionChatPage.tsx:999`) so an open
+question shows even before `status` propagates. (3) reject or visibly-supersede a `direct` send
+that lands on `awaiting_question`. (4) journal an `interaction.question_cancelled` event when a
+question is cleared unanswered. (5) carry `status`/`awaiting_question` in the `interaction.question`
+payload so `transitionPatch` flips the view immediately.
+
+## 2026-07-26 21:47–21:52Z — instant-return native input executes 3×, then reports HTTP 409
+
+**Problem.** A single send of native input that the Codex TUI handles locally, without starting a
+model turn, may be executed **three times** and then reported as failed with HTTP 409. This is not
+specific to `!`: it reproduced with both the supported `/status` command and a shell command. Any
+native command which consumes the composer input, returns immediately to an idle prompt, and
+produces no positive model-turn evidence can enter the same retry path. For shell commands this is
+an arbitrary side-effect-duplication hazard.
+
+**Evidence (live web-send path, Codex 0.145.0, interactive session Tanner
+`ms2bqvyc-3cd1f9e6`).** Both probes used the same authenticated
+`POST /v1/sessions/:id/send` JSON request as the web composer, with one unique request id per send;
+no direct tmux input was used.
+
+- At `2026-07-26T21:47:26.988Z`, one request
+  (`composer-probe-codex-status-ms2bpjea`, body `{"message":"/status","now":false}`)
+  was submitted. Pane records contain one `/status` panel at
+  `2026-07-26T21:47:31.961Z`, two at `2026-07-26T21:47:52.940Z`, and three at
+  `2026-07-26T21:48:08.707Z`; the request reported HTTP 409. A second diagnostic request at
+  `2026-07-26T21:48:24.239Z` independently added exactly three more panels (four at
+  `21:48:34.435Z`, five at `21:48:49.776Z`, six at `21:49:10.063Z`).
+- At `2026-07-26T21:51:52.949Z`, one request
+  (`composer-probe-codex-bang-ms2bpjea`, body
+  `{"message":"!printf KTEAM_BANG_PROBE","now":false}`) was submitted. Pane records contain
+  one `You ran printf KTEAM_BANG_PROBE` result at `2026-07-26T21:51:56.147Z`, two at
+  `2026-07-26T21:52:01.355Z`, and three at `2026-07-26T21:52:06.515Z`. At
+  `2026-07-26T21:52:10.245Z` the single request completed with
+  `{"error":"the prompt was typed but the harness never started the turn"}` and `HTTP 409`.
+
+The full probe transcript is
+`~/.kteam/ms2bqvyc-3cd1f9e6/logs/turn-002.txt`; the timestamped pane evidence is under that
+session's `snapshots/`. The design investigation which found the defect is
+`~/.kteam/ms2bpjea-120af894/composer-affordances-design.md`.
+
+**Suspected code path.** `modules/kteam-ts/src/session-manager.ts:1787` calls
+`TmuxController.send`; `modules/kteam-ts/src/tmux-controller.ts:786-816` waits for readiness and
+calls `inject()`. In `inject()` (`tmux-controller.ts:693-735`), `turnStarted` requires active-work
+or non-idle evidence (`:699-700`), while the outer loop explicitly retries three times (`:702`).
+When a local command consumes the payload and immediately returns idle, `composerHolds` is false
+without `turnStarted`; after the grace polls (`:715-723`) execution falls through and retypes the
+same input (`:727-729`). After the third execution it throws the observed error (`:730-734`), and
+`api-server.ts:556-559` maps the ordinary error to HTTP 409.
+
+There is **no idempotency guard inside the injection retry loop**. The request-id `applyOnce`
+mechanism at `api-server.ts:423-445` is outside that loop and cannot distinguish or suppress its
+three internal executions (and it records a request only after the operation succeeds).
+
+**Workaround.** Do not send local/instant-return native commands through the web composer until
+delivery has command-aware, one-shot acknowledgement. In particular, never send side-effecting
+`!` commands there; run them directly in a harness/terminal where kteam's injection retry is not
+involved. The eventual fix needs a distinct `handled-local` outcome (or equivalent native-command
+acknowledgement) and must never retype an input after the TUI has consumed it as a local command.
+
+_(Logged 2026-07-26 by humberto, session `ms2bpjea-120af894`, from direct observation. No daemon
+restart or source fix was performed in this design-only turn.)_
+
+---
+
+## 2026-07-26 — Structured answer refused with "the structured question is not visible in the interactive tmux pane; snapshot and retry" when the selected option label wraps in the pane
+
+**Problem.** A session in `awaiting_question` shows the structured question correctly in
+the web UI (heading, question text, radio options, Other row, SUBMIT). The user selects an
+option and submits, and the answer is refused inline with:
+
+> `the structured question is not visible in the interactive tmux pane; snapshot and retry`
+
+This is NOT the question-propagation bug (that was "the form never appears", fixed by sasha,
+`~/.kteam/ms2bna1k-c43f2f07/question-propagation-diagnosis.md`). Here the question IS on
+screen; it just cannot be answered. The failure is a **dead end**: the guard refuses rather
+than typing blind, but leaves the user with no way to answer that option from the UI.
+
+**Trigger / exact condition.** The refusal fires only for option labels that do not appear
+as a **contiguous whitespace-stripped substring** of the captured pane. That happens when the
+label wraps across two TUI lines AND there is right-column content between the wrapped
+fragments — e.g. an ASCII/box-drawing side panel the model drew in its answer. The
+whitespace-strip normalization removes spaces/newlines but NOT the intervening box-drawing +
+panel text, so the two fragments never become adjacent and the substring match fails. Long
+labels the harness truncates with an ellipsis would fail the same way. Short, single-line
+labels answer fine.
+
+**Evidence (session `leon` = `ms2byk2f-891acfa2`, real pending question, observed read-only).**
+Question: `What naming scheme do you want for the helper EAs? (I stay the main EA; these are
+staff under me.)` Options: `Plain role names (Recommended)`, `East Asian mythical`, `Norse`,
+`Chemistry`. In the pane the Recommended option renders wrapped —
+`1. Plain role names` on one line and `(Recommended)` on the next — with a box-drawing panel
+(`┌── Main EA → you (me) … └──`) occupying the columns to the right of both lines.
+
+Running the daemon's exact normalization
+(`pane.replace(/\s+/g,'').toLowerCase()` and `label.replace(/\s+/g,'').toLowerCase()`) against
+`leon`'s real snapshot `~/.kteam/ms2byk2f-891acfa2/snapshots/2026-07-26T22-41-48-922Z.txt`:
+
+- `questionProbe` ("whatnamingschemedoyouwantforthehelpereas") — **visible: true**
+- `Plain role names (Recommended)` → "plainrolenames(recommended)" — **visible: FALSE**
+- `East Asian mythical` → "eastasianmythical" — visible: true
+- `Norse` → "norse" — visible: true
+- `Chemistry` → "chemistry" — visible: true
+
+So the user picked the Recommended option — the only one that fails `selectedVisible` — and
+`answerQuestion` threw. The daemon-restart lead is a red herring here: the anchor
+(`questionProbe`) still matches after adoption; the wrapped label is what fails.
+
+**Suspected code path.** `modules/kteam-ts/src/tmux-controller.ts:931-934`, in
+`answerQuestion()`:
+
+```
+const questionProbe = question.question.replace(/\s+/g, '').toLowerCase().slice(0, 40);        // :931
+const selectedVisible = selected.every(label =>
+  normalizedPane.includes(label.replace(/\s+/g, '').toLowerCase()));                            // :932  <-- fails on wrapped label
+if (!questionProbe || !normalizedPane.includes(questionProbe) || !selectedVisible || current.promptReady) {
+  throw new Error('the structured question is not visible in the interactive tmux pane; snapshot and retry'); // :934
+}
+```
+
+`session-manager.ts` `answer()` (~`:1874`) calls this on the same path the web UI and
+`kteam answer` both use, so the CLI has the identical failure for a wrapping label. Menu
+navigation itself is index-based over the daemon's authoritative stored `options` array
+(`options.findIndex(...)`), so the full-label substring match is a redundant sanity check, not
+the thing that makes navigation correct.
+
+**Workaround (immediate, no code change).**
+
+- In the UI, do NOT click the wrapping `… (Recommended)` radio. Instead use the **Other…**
+  field and type the answer text (e.g. `Plain role names`), then submit. Freeform sets
+  `selected=[]`, so `selectedVisible` is vacuously true and the guard passes; the freeform
+  branch types the value via the custom-response row.
+- Or pick any single-line option (here: East Asian mythical / Norse / Chemistry) — those pass.
+- CLI equivalent: `kteam answer <id> --response "<free text>"` (a response that doesn't exactly
+  match a stored label is treated as freeform and bypasses `selectedVisible`).
+
+**Fix proposal.** Relax `selectedVisible` (`:932`) from a full-label contiguous match to a
+distinctive **prefix** match — e.g. the label up to its first `(` or its first ~12
+non-whitespace chars — so trailing `(Recommended)` wraps and ellipsis truncation no longer
+cause false refusals, while still guarding against a grossly wrong pane. (Navigation stays
+index-based on the stored options, so this only affects the sanity gate.) Do NOT weaken it to
+"accept and type blind" — index navigation must still be preconditioned on the question text
+(`questionProbe`) being present and `promptReady` being false, which it already is. Re-present
+/ scrollback fallbacks are unnecessary here: the question is fully visible; only the label
+matcher is too strict.
+
+_(Logged 2026-07-26 in automode, coordination dir `ms2e8bal-25b03b99`. READ-ONLY on the repo
+except this append; no daemon restart, no build, `leon` observed only — not answered.)_
+
+## 2026-07-26 ~23:05Z — DAEMON-SIDE CONTRIBUTOR: inline native-queue sends leave no `chat.user` record and no `control.send_consumed`, so the UI can never prove per-message delivery
+
+**Symptom (the reported bug).** A short message sent to a BUSY interactive session renders in
+the browser with an orange "queued for next turn" chip that NEVER clears, even long after the
+message was delivered and acted on. On reload the message vanishes entirely. Screenshot:
+`~/.kteam/ms1lhymf-c4051f31/attachments/0f713da208144d13769fd41336ffc4cf3a4957f8d8cf6607004a5d735390e912/image.png`.
+
+**Evidence (real session `ms1lhymf-c4051f31`, turns 36→37).** The three stuck messages are
+journal events `control.send_queued` seq 613/616/617, all `turn:36`, all WITHOUT
+`fileBacked`. Across the whole session there are **zero `control.send_consumed` events** and
+**zero `chat.user` records** carrying those texts (checked all 1779 `/chat` records). Yet the
+session advanced to turn 37, and the agent acted on them — so they WERE delivered. A fresh
+repro (`ms2emuk3-a24edcc7`) confirms: after a short send to a busy session, the agent's own
+reply quoted the message ("Also saw your mid-turn message …") while `pendingNativeSends` still
+held the entry, `turn` never advanced, and no `chat.user`/`send_consumed`/`send_lost` was
+emitted.
+
+**Root cause (daemon side).** `session-manager.ts` `queueNativeSend()` (~`:1683`) types a
+short (`≤ NATIVE_QUEUE_INLINE_MAX_CHARS = 1000`) message straight into the harness composer
+and emits ONLY `control.send_queued` (no `fileBacked` flag). The harness folds that composer
+text into a turn without the daemon capturing a distinct `chat.user` transcript record, and
+`correlateNativeSends()` (~`:4110`) can only emit `control.send_consumed` when it finds a
+matching `chat.user` boundary — which for inline sends never exists. So the ONLY durable,
+per-message server signal for an inline native-queue send is the `control.send_queued` event
+itself; there is no server-provided proof of _delivery_ (contrast the file-backed queue path,
+which leaves a "Read the queued message file …" `chat.user` row, and the idle turn-file path,
+which leaves a turn-prompt `chat.user` row — both reap normally).
+
+**UI half (fixed here, my ownership).** `ui/src/lib/transcript.ts` `buildSendIndex()` ignored
+non-`fileBacked` `control.send_queued` entirely, so inline queued sends were indexed nowhere
+and `buildTranscript()` rendered no block → the optimistic `PendingSend` reaper
+(`blockConfirmsPending`, `SessionChatPage.tsx`) had nothing to match → chip stuck forever, and
+the message was invisible on reload. Fix: collect inline queued sends onto a new
+`SendIndex.queued` list and have `buildTranscript(records, sends, sessionId, currentTurn)`
+SYNTHESIZE a `chat.user` block for each once `currentTurn` has advanced past the turn it was
+queued in (proof it left the composer — a turn cannot advance while its queued text is
+unsubmitted; a lost send dies at its turn and never advances it). The existing block reaper
+then clears the chip. Kept proof-based (no timers/assumptions); a still-open turn or a
+terminal-without-advance (lost) send is deliberately NOT synthesized.
+
+**Suggested daemon-side follow-up (NOT done — outside UI ownership).** Give inline
+native-queue sends the same durable per-message delivery proof the other paths already have:
+either persist a real `chat.user` record when the composer text is actually consumed, or emit
+`control.send_consumed` (with the real text + queueId + consuming turn) for inline sends too —
+correlating on the turn-advance boundary rather than requiring a matching `chat.user`. That
+would let the UI reap the _specific_ queued message on authoritative evidence instead of
+inferring delivery from `view.state.turn` advancing past the queued turn.
+
+_(Logged 2026-07-26 in automode, coordination dir `ms2ebjqf-5cd365e7` (london). READ-ONLY on
+the repo except this append and the four owned UI files; no daemon restart, no `bun run build`.
+Repro sessions `ms2ehmrt-18901448`/`ms2emuk3-a24edcc7` stopped after use.)_
+
+---
+
+## 2026-07-27 — `claude-auto-mm3` falsely reported "not logged in (kfleet usage reports auth failure); run kfleet login" (INTERMITTENT false positive)
+
+**Problem.** kteam intermittently refuses to launch/route `claude-auto-mm3` with
+`wrapper claude-auto-mm3 is not logged in (kfleet usage reports auth failure); run
+kfleet login`, even though the MiniMax account works fine. A false auth alarm that
+tells the user to re-auth a working account trains them to ignore real ones.
+
+**Evidence.**
+
+- Live probe of MiniMax's usage endpoint (`GET
+https://api.minimax.io/v1/token_plan/remains`) with the real key returns HTTP 200,
+  `base_resp.status_code:0 "success"`, general model 99%/100% remaining — healthy.
+  60 spaced probes over ~45 min (coordination dir `ms2g4kn2-226ce51a`,
+  `minimax-poll.jsonl`) were ALL `status_code:0` — the failing state is rare/transient,
+  not persistent (rules out a genuine intermittent auth drop across that window).
+- A genuinely bad/empty key returns HTTP 200 with `status_code:1004 "login fail:
+Please carry the API secret key in the 'Authorization' field of the request header"`.
+  So `1004` is MiniMax's generic auth-verification-failed code — and it is what a
+  valid key can also transiently receive under load/throttle.
+
+**Suspected code path.**
+
+1. `modules/kfleet-ts/src/core/usage.ts` → `probeMinimax()` (~:263-289): a SINGLE
+   `status_code` of `1004`/`2049` sets `authOk:false` with no retry/hysteresis. One
+   transient blip = "not logged in". (Non-1004/2049 nonzero codes and HTTP 429/timeouts
+   correctly resolve to `authOk:undefined` = "usage unavailable", so ONLY the transient
+   1004/2049 misfires.)
+2. Intermittency amplifier: kteam `UsageFeed` (`modules/kteam-ts/src/usage.ts:49-112`)
+   caches `kfleet serve`'s `/usage` snapshot for the `usage.interval` window (300s,
+   `kfleet/config.yaml`). One bad probe cycle poisons the cached verdict for the whole
+   window; a fresh manual `kfleet usage` re-probes and shows ✓ ("works fine now").
+3. Remedy text is impossible advice: `modules/kteam-ts/src/session-manager.ts:1176`
+   and `modules/kteam-ts/src/core.ts:698` say "run kfleet login". But
+   `modules/kfleet-ts/src/cli/login.ts:42` iterates `identities.filter(i => i.oauth)`
+   and mm3 is an API-key account (`isOAuth` false, `core/login.ts:44-48`), so `kfleet
+login` SKIPS mm3 — it can never fix an mm3 credential. The genuine remedy is
+   rotating `$MINIMAX_API_KEY` in sops, then `kfleet apply`/`hms`.
+
+Ruled out: OAuth per-member override (mm3 is filtered out of `scanOAuthAuth`); missing
+env var (`$MINIMAX_API_KEY` present, `sk-cp-…`, len 125 — would be persistent anyway).
+
+**Fix proposal.**
+
+- `probeMinimax`: on `1004`/`2049`, re-probe once; only return `authOk:false` if it
+  fails twice consecutively (transient blip clears on the retry).
+- Add hysteresis at the feed/serve layer (provider-agnostic): require ≥2 consecutive
+  failing cycles before surfacing `authOk:false` to the launch gate.
+- Make the kteam remedy message provider-aware: for API-key providers
+  (minimax/zai/deepseek), say "API key rejected by <provider> — rotate the key in
+  sops, then kfleet apply", NOT "run kfleet login" (which is only valid for
+  anthropic/codex OAuth accounts).
+
+**Workaround (human).** Ignore a lone mm3 "not logged in" when `kfleet usage` shows it
+✓ on a fresh run; do NOT run `kfleet login` for mm3 (no-op). If it were ever a real
+MiniMax auth failure, rotate `$MINIMAX_API_KEY` in `secrets.yaml` and re-apply.
+
+_(Logged 2026-07-27 in automode, coordination dir `ms2g4kn2-226ce51a`. Diagnosis only:
+READ-ONLY on the repo except this append; no `kfleet login`/`apply`/`hms`, no daemon
+restart, no `bun run build`. Full write-up in that dir's `findings.md`.)_
+
+---
+
+## `kteam send` fails on both native AND durable paths to a stalled `running` session
+
+**Observed 2026-07-27 (automode, coordination dir `ms2k9t5o-111aede1`, worker teammate).**
+
+Sending a completion handoff to the lead (`zelda`, session `ms1lhymf-c4051f31`)
+failed twice:
+
+```
+kteam: native composer delivery failed and the one durable file-backed fallback
+also failed ... NativeQueueComposerError: durable queue instruction failed;
+the complete payload remains at .../channel/queued-<uuid>.md ... Error: text did
+not land in the composer
+```
+
+Both a ~1.5KB and a shorter follow-up failed identically, so it is **not payload
+size** (the CLAUDE.md "multi-KB to a busy session" caveat does not fully cover
+this — a short message failed too).
+
+**Evidence.** `kteam status ms1lhymf-c4051f31` reports the session as `running`
+turn 58, but the liveness counters are all ~830–845s stale (`transcript 842s`,
+`pane 830s`, `last tool started 01:44:08Z` ~14 min prior) and `context 324% used`.
+So the session is effectively **stalled mid-tool-call** — not at a turn boundary,
+composer unavailable — yet still classified `running`, and the stall monitor had
+not acted after 14 minutes.
+
+**Two distinct problems.**
+
+1. A `running` session can sit with all liveness counters stale for 14 min+ and
+   `context > 100%` without being flagged stalled — the stall detector's
+   threshold/among-counters logic (likely `modules/kteam-ts` daemon liveness/stall
+   path) is not catching this shape.
+2. The "durable file-backed fallback" for `kteam send` is not actually durable:
+   the payload file is written, but the _instruction to consume it_ also depends
+   on the composer, so when the composer is unavailable BOTH paths fail together.
+   A truly durable queue should append to `channel/inbox.jsonl` (or similar) for
+   the session to drain at its next boundary, independent of the live composer.
+
+**Suspected code path.** `modules/kteam-ts` — the send/composer delivery
+(`native composer` + `durable queue` fallback) and the daemon stall/liveness
+classifier.
+
+**Workaround.** None applied (cannot help-signal in automode, and the human owns
+`kteamd`). Completion was handed off durably instead via this session's
+`summary.md` + `kteam signal done`; the queued payloads remain at
+`.../ms1lhymf-c4051f31/channel/queued-*.md` for a manual
+`kteam send ms1lhymf-c4051f31 --message-file <that>` retry once zelda unstalls.
+
+_(Logged in automode; append-only to this file, otherwise READ-ONLY on the repo
+outside my owned UI files. No daemon restart, no `bun run build`.)_
+
+---
+
+## 2026-07-27 — structured questions could still dead-end and journal answers that never landed
+
+**Live reproduction.** Isolated interactive Claude session `ms2l7r3c-d2ffe58f`
+(`frances`) displayed one question with the sibling labels `Enable feature` and
+`Enable feature flags`. `kteam answer frances "Enable feature"` failed every time
+with “the structured question is not visible” even though the snapshot showed the
+complete numbered row `❯ 1. Enable feature`. The safe prefix matcher deliberately
+had no unique fragment for a label that is itself a sibling prefix, but it failed
+to use the stronger evidence already on screen: an exact complete menu row.
+
+**Worse, the refusal was recorded as success.** The session stayed
+`awaiting_question` with the same `pendingQuestion`, but `events.jsonl` gained an
+`interaction.answer` row for `Enable feature`. `SessionManager.answer()` emitted
+that event _before_ calling the matcher/driver. The UI therefore had a false answer
+in history while the user remained blocked. The driver also ignored most tmux
+`send-keys` exit codes and returned after fixed 300ms sleeps without checking that
+the menu advanced, a next question appeared, a turn started, or a prompt returned.
+
+**Other confirmed dead-end paths in source.** Answers were not bound to the
+question's `toolUseId`, so a stale browser form for A could drive into B. A
+nonmatching `tool.result` changed status to `running` while retaining A's
+`pendingQuestion`. Generic interrupt did not clear or lifecycle-mark a pending
+question. Matching result / completion / abort silently erased it. The web form
+offered no explicit abandon path after a refusal, so deterministic matcher failures
+could only be repaired with CLI/session surgery.
+
+**Implemented recovery design (daemon restart intentionally left to the lead).**
+
+- Answer POSTs now carry and validate `toolUseId`; stale forms refresh instead of
+  ever driving a different question.
+- The menu driver accepts exact complete rows for ambiguous-prefix labels, exits
+  tmux copy-mode once to restore a scrolled question, checks every key result, and
+  records success only after post-Enter pane-advance evidence. Partial
+  multi-question retries resume at the currently visible question.
+- Failed/unconfirmed answers keep `pendingQuestion` intact and journal
+  `interaction.question_failed` with matcher details, pane geometry/hash/excerpt,
+  and `last-snapshot.txt`. `interaction.answer` is now the verified transition,
+  never an attempted keystroke.
+- QuestionForm always exposes a two-step **Abandon question** escape hatch.
+  Pending-question interrupt sends Escape and requires pane confirmation before it
+  clears state; interrupt is request-id deduped so a lost response cannot send a
+  second Escape.
+- The monitor self-heals after two frames of strong divergence (idle prompt, or a
+  new active turn with no question visible), while ambiguous missing/repaint states
+  remain safely pending and get a diagnostic event/snapshot. Harness clears,
+  aborts, and superseding questions now receive explicit lifecycle events.
+
+**Verification.** Focused daemon/API/tmux/session-manager and QuestionForm/store
+tests pass, including the exact live repro, swallowed Enter, failed tmux key,
+copy-mode restore, verified abandon, stale tool id, unrelated tool result, and
+Codex abort fixtures. Codex's real question menu is still unverifiable: the
+normalizer recognizes it synthetically, but no live `request_user_input` event has
+appeared fleet-wide, so no claim of live Codex pane parity is made.
+
+_(Logged 2026-07-27 in automode, coordination dir `ms2l1x3i-6e1818ad`. No commit,
+no daemon restart, and no UI build.)_
+
+## 2026-07-27 — concurrent teammates in ONE worktree can corrupt a file (NUL byte mid-file)
+
+**Problem.** With ~6 teammates editing `modules/kteam-ts` simultaneously, teammate
+`bernard` (ms2mldiq-60902e3d) reported that a collision left a **NUL byte
+mid-file** in its own new `src/learning.ts`, which it had to rewrite. Separately it
+could not land edits in `api-server.ts`, `daemon-config.ts`, `paths.ts` or
+`App.tsx` at all, because other teammates "keep rewriting those whole files"; it
+delivered the wiring as a hand-apply patch instead. Teammate `cordelia`
+(ms2mlj0s-6382e46b) independently pre-emptively backed up its `index.ts` diff for
+the same reason, having detected a second concurrent editor on that file.
+
+**Evidence.** `bernard` summary + `~/.kteam/ms2mldiq-60902e3d/learning.patch.md`;
+`~/.kteam/ms2mlj0s-6382e46b/safemigrate.patch.md`. At the time: 11 lead-owned
+sessions live, 22 dirty files in `modules/kteam-ts`. The corrupted file was
+rewritten by its author, so nothing was lost — but a torn write that lands as
+valid-looking source is the dangerous version of this.
+
+**Suspected cause.** Not a kteam defect as such: it is the documented shared-tree
+hazard (`CLAUDE.md`: "Concurrent teammates share one working tree… assign explicit
+per-file ownership, no file owned twice"). Per-file ownership WAS assigned and
+mostly held; what broke down is that several agents legitimately needed the same
+SHARED wiring files (`api-server.ts`, `App.tsx`, `index.ts`, `lib/api.ts`,
+`lib/store.tsx`, `types.ts`) that no single feature owns. Whole-file rewrites by
+formatters/agents on those shared files are what produced the collisions.
+
+**Workaround in use.** Agents that cannot land a shared-file edit write a
+hand-apply patch to their session dir and the lead applies it serially. That works
+but is manual and easy to drop.
+
+**Real fix candidate (already on the feature list, now with evidence):**
+per-teammate git worktree isolation. This is the second independent incident
+pointing at it — recorded previously as a feature candidate after a foreign staged
+file was swept into another agent's commit. A shared wiring file wanted by N
+features is the case per-file ownership cannot express.
+
+**Lead lesson (process, not code):** the lead over-parallelised — ~6 concurrent
+writers on one package. Throttle concurrent writers on a single package, or
+sequence work that touches shared wiring files.
+
+---
+
+## 2026-07-27 — structured-question hardening closed with fail-closed live-region binding
+
+**Closure of the structured-question report above.** Five adversarial review
+rounds found a common remaining defect class: authorising evidence was gathered
+from the whole tmux capture, so stale scrollback or transcript prose could be
+combined with a different live selector. In the worst case, answer or abandon
+could send keys into a model picker, permission prompt, or other unrelated menu.
+
+**Final safety boundary.** Every authorising fact now comes from one contiguous,
+bottom live-menu block: structural whole question row, exact header row, ordered
+option rows, cursor, and checkbox state. Footer/question/composer boundaries stop
+the block walk; multiple cursors or a composer below the menu reject it. Question
+matching requires full normalized equality with only bounded wrapped rows and an
+explicit anchored-ellipsis exception. A prose quote — even with the same complete
+option set — cannot authorise answer or Escape. Free-text presence and typing use
+the same bounded bottom region (structural question row + explicit marker + bottom
+composer), so stale free-text scrollback at an idle prompt neither pins
+`awaiting_question` nor receives a new message. Ambiguity always refuses with zero
+keys/fills.
+
+**Recovery/state guarantees.** Answers and abandons bind to the rendered
+`toolUseId`; abandon retries retain one logical request id; terminal driving is
+confirmed before success is journalled; failures preserve the pending question
+and diagnostics; explicit abandon restores chat only after verified cancellation;
+and pane self-heal is serialized with submit/cancel and revalidates the pending
+tool id before mutation.
+
+**Verification.** `tmux-controller` + manager-question + API focused suites:
+**168 pass, 0 fail**; `QuestionForm`: **33 pass, 0 fail**; package TypeScript passed
+inside `bun run check`; `git diff --check` passed. Independent final review ran
+**130 focused tests** and found no blocker. The current shared-tree broad gate is
+not clean for an unrelated Settings/dictation slice: UI typecheck reports the
+missing `components/DictationSettings` import plus `stt/capabilities.ts:89`
+nullability, and UI tests report **764 pass, 2 fail, 2 errors** from that missing
+module (package check: **1588 pass, 2 fail, 2 errors**). Those separately owned
+files were not edited here.
+
+**Architectural ceiling.** Pane scraping is conservative rendered-history
+matching, not authoritative interaction state. The long-term fix is a
+harness-native RPC/adapter keyed by `toolUseId` that exposes the active ordinal
+and accepted/cancelled acknowledgement, leaving the terminal display-only.
+Codex `request_user_input` remains unverified fleet-wide; safe refusal is the only
+supported claim until controlled live captures exist.
+
+_(Closed in automode, coordination dir `ms2l1x3i-6e1818ad`. No commit, daemon
+restart, or UI build.)_
+
+---
+
+## 2026-07-27 — Context-window % is wrong (`ctx 324%`): `[1m]` window derived from the wrong model string
+
+**Problem.** The composer status line showed `● · claude-opus-5[1m] · ctx 324% · running`.
+324% is impossible on its face. A peer lead (noel/diene) claimed kteam derives the
+window only from a literal `[1m]` substring and reports `contextWindow=200000` for a
+`[1m]` session, inflating the percent ~5x. **Confirmed in mechanism, with one
+refinement.** READ-ONLY diagnosis, coordination dir `ms2rkmfd-17b8e738`.
+
+**Root cause (one cause, two symptoms).** `[1m]` is a kteam _wrapper-alias_
+convention. It lives ONLY in `config.model` (e.g. `claude-opus-5[1m]`). It NEVER
+appears in the raw API model id the Claude transcript records — empirically
+`message.model` = `claude-opus-4-8` (no `[1m]`), confirmed in a live loge transcript.
+
+`contextWindowForModel()` (`modules/kteam-ts/src/core.ts:940-948`) decides the window
+solely by `model.includes('[1m]')` → 1_000_000, else the 200_000 default (`core.ts:948`).
+Every Claude caller feeds it a model string from which `[1m]` has ALREADY been stripped:
+
+- transcript-usage path uses `usageEvent.data.model` (raw transcript id, no `[1m]`) —
+  `session-manager.ts:4771-4780` and the twin block `:4987-4996`;
+- the fallback `resolveDisplayModel()` returns `observedModel` (the harness/transcript
+  id) in preference to `config.model` — `core.ts:44` — again dropping `[1m]`.
+
+So a Claude `[1m]` session is ALWAYS assigned `contextWindow=200000`, never 1M.
+
+**Symptom 1 — inflated %.** `contextPercent = round(contextTokens / 200000 * 100)`
+(`session-manager.ts:4780`, twin `:4996`). ~648k real tokens on a true-1M session
+(real ~65%) → 648000/200000 = 324%. **Reproduced live:** a `claude-opus-4-8[1m]`
+session in the fleet reads `contextTokens=414298, contextWindow=200000,
+contextPercent=207`. Same mechanism as opus-5[1m] (no opus-5 session was live to
+inspect directly; opus-4-8[1m] is the identical code path).
+
+**Symptom 2 — "256K".** There is NO 256K constant anywhere in src or ui (searched).
+The real windows the code carries: Claude never emits a `contextWindow` in its usage
+event (→ always the 200k/1M `[1m]` guess); Codex (gpt-5.6) DOES emit its own
+`model_context_window` (`codex-transcript.ts:324`) and passes it straight through
+(`session-manager.ts:4772` `usageEvent.data.contextWindow ?? …`) — live gpt-5.6
+sessions read `contextWindow=258400` (≈"256K"), which is accurate. So "256K" is not a
+kteam-invented number. Most likely it is the _real_ prompt-token count of the
+opus-5[1m] session (~256k = input+cache_read+cache_creation) surfaced correctly — e.g.
+MigrateSheet renders `readableNumber(contextTokens)` "…(256K tokens)…"
+(`MigrateSheet.tsx:723`). The token COUNT is right; only its pairing with a 200k
+window / >100% percent is wrong. Cannot fully pin the exact UI element without the
+original screenshot; ruled out a fabricated constant.
+
+**Can % exceed 100%?** Yes, by construction. `Math.round(tokens/window*100)` has no
+clamp (`session-manager.ts:4780`), and the UI renders `${contextPercent}%` verbatim
+(`ui/src/components/Composer.tsx:814` and `:884`; `SessionDetails.tsx:1187`;
+`ui/src/pages/SessionsListPage.tsx` ContextMeter). Above 90% it only turns red
+(`text-err`). So 207%/324% render literally.
+
+**Does anything ACT on it? — Mostly COSMETIC, one latent load-bearing spot.**
+
+- `context.high` fires at `>=85%` (`session-manager.ts:4784/4787`, `:5000/5003`, and
+  pane path `:4185/4214`). On a `[1m]` session the 5x inflation makes it fire at ~17%
+  REAL usage. But `context.high` has NO destructive consumer — grep shows it is only
+  emitted to the event stream (UI notification). No nudge / stall / warden / kill /
+  auto-compaction reads `contextPercent` or `contextTokens` (only producers +
+  display consumers reference them). So: noisy, not dangerous.
+- `migrate()` (`session-manager.ts:2587-2613`) is the ONLY place a context number
+  gates an action. `currentWindow = contextWindowForModel(currentModel)` mis-detects a
+  `[1m]` source as 200k (currentModel comes from `resolveDisplayModel` → observedModel,
+  `core.ts:44`), so the downgrade guard (`:2599 targetWindow < currentWindow`) is
+  unreliable for `[1m]` sources and its error text (`:2603`) prints wrong window
+  numbers. HOWEVER the second guard (`:2608`) compares REAL `contextTokens` against the
+  target window and backstops a genuinely-too-large migration. Net: latent bug, masked
+  by the token-count guard; not currently breaking migrates.
+
+**Verdict: primarily cosmetic (wrong displayed number + over-eager `context.high`),
+with one latent load-bearing guard in `migrate()` that is masked today.**
+
+**Suspected code path / fix.** The true window must come from the WRAPPER/CONFIG
+model (`config.model`, which retains `[1m]`), not the transcript model:
+
+1. In the transcript-usage path, when the usage event carries no `contextWindow`
+   (Claude case), derive the `[1m]` signal from `config.model` (or OR the `[1m]` test
+   across observedModel AND config.model) before calling `contextWindowForModel`.
+   `session-manager.ts:4771-4780` / `:4987-4996`.
+2. Keep trusting Codex's `usageEvent.data.contextWindow` first (already correct), and
+   keep the substring-override table (`daemon-config contextWindows`) as the source of
+   real windows for third-party accounts (GLM ~131072, MiniMax, DeepSeek), which
+   otherwise all fall to the 200k default.
+3. Clamp/shape the UI readout (cap at 100% or render `tokens/window`) so an impossible
+   percent can't display — `Composer.tsx:814/884`.
+4. Fix `migrate()`'s `currentWindow` to use the configured `[1m]` model so the downgrade
+   guard stops relying on the token backstop — `session-manager.ts:2587-2588`.
+
+**Cannot determine.** Exact UI element behind the user's "256K"; the opus-5[1m]
+account's exact real window (inferred 1M from the `[1m]` convention + defaults — no
+opus-5 session was live to read; opus-4-8[1m] proves the mechanism).
+
+_(Read-only diagnosis in automode, coordination dir `ms2rkmfd-17b8e738`. One append to
+this file only; no commit, no daemon restart, no UI build.)_
+
+---
+
+## 2026-07-27 ~17:40Z — `kteam ps --label <slug>` (no `-a`) reported dropping live rows — NOT REPRODUCED, code audited
+
+**Problem (as reported by lead zelda, ms1lhymf-c4051f31).** At ~17:33Z, consecutive
+`kteam ps --label ui-round25` calls (without `-a`) returned inconsistent SUBSETS of
+the four live sessions: call 1 listed emile+miguel, call 2 minutes later listed
+carson+emile. `kteam ps --label ui-round25 -a` consistently listed all four, all
+`status=running`. Impact if real: a lead sees live teammates vanish from `ps` and
+concludes they died; a genuinely stalled one could hide.
+
+**Repro attempt (babysitter ms3i5j7q-688df4a8, 17:36–17:39Z).** Ran
+`kteam ps --label ui-round25` (no `-a`) 20 times consecutively (5 with 2s sleeps,
+15 back-to-back). Every single run listed all four rows
+(brody,carson,emile,miguel; all `running`). **Could not reproduce.**
+
+**Code audit (what the non-`-a` path actually does).**
+
+- `src/index.ts:522-531` (`ps` action): fetches EVERYTHING via `client().list()`,
+  then filters by label, THEN filters out terminal statuses
+  (`terminal = ['completed','failed','stalled','stopped']`, `index.ts:62`).
+  Filter order is label-first — the suspected "status predicate before label
+  filter" is NOT present. There is also NO limit, pagination, or recency window
+  anywhere in the `ps` path.
+- Server side: `GET /v1/sessions` (`api-server.ts:482`) → `service.list()`
+  (`session-manager.ts:1043`) → `store.listSessions()` (`storage.ts:807`), which
+  returns the FULL in-process `sessionCache` sorted by recency — no window.
+  `list()` drops only rows missing config or state (`session-manager.ts:1045`).
+- So for a row to vanish from non-`-a` output, at read time its cached
+  `state.status` must have been one of the four terminal values, OR its
+  config/state must have been transiently absent from the cache.
+
+**Hypotheses (unconfirmed, in likelihood order).**
+
+1. Transient status flap in the daemon cache: something briefly wrote a terminal
+   status (e.g. `stalled` from the liveness path, `session-manager.ts:4597-4616`)
+   and then recovered to `running`. `-a` would keep showing the row (matching the
+   report), and minutes later everything reads `running` again (matching my failed
+   repro). Different sessions flapping on different calls fits the inconsistency.
+2. Daemon contention/restart: `~/.kteam/daemon/daemon.log` shows repeated
+   `EADDRINUSE` start attempts, several distinct "already running" pids
+   (3641546→309645→315185→320208→3877570→3896181) and a
+   `[Bun.serve]: request timed out after 10 seconds` — a freshly restarted daemon
+   rebuilds `sessionCache` from SQLite (`storage.ts:408-419`) and could serve a
+   partially-current view for a moment. Doesn't obviously explain a SUBSET of
+   running rows, but daemon churn is real and worth noting.
+3. Reader-side truncation (pipe/head/terminal wrap on the caller's side) — cannot
+   be ruled out from here since the raw outputs weren't captured.
+
+**Evidence gap.** The original outputs were not captured verbatim; the report is
+secondhand. 20-run repro burst is clean.
+
+**Suspected code path if real:** the status value in `EventStore.sessionCache`
+at read time (writers: `indexSessionMetadata` `storage.ts:1587`; stall marker
+`session-manager.ts:4605`), NOT the ps filter itself.
+
+**Workaround.** Use `kteam ps --label <slug> -a` (statuses are shown anyway) or
+`--json` and filter yourself; treat a missing row in non-`-a` output as "check
+`kteam status <name>`" rather than "dead". If it recurs, capture the raw output
+plus `kteam ps --json` in the same second — the cached `state.status` will show
+whether a terminal flap happened.
+
+_(Babysitter read-only diagnosis in automode, coordination dir ms3i5j7q-688df4a8.
+Append-only; no commit, no daemon restart, no fix attempted.)_
+
+---
+
+## 2026-07-27 ~17:55Z — CORRECTION to the 17:40Z entry + NEW bug: daemon.log is frozen (systemd rejects the quoted output specifier)
+
+**Correction 1 — the "daemon churn" note in the previous entry is WRONG.** Zelda
+(ms1lhymf) pointed out, and I verified: the repeated `kteamd is already running
+(pid N)` / `EADDRINUSE` lines are the single-instance guard working AS DESIGNED
+(port is the lock; extra invocations probe, find a live responder, and exit with
+EXIT_ALREADY_RUNNING so systemd's RestartPreventExitStatus doesn't respawn).
+Exactly ONE daemon-entry process is live: pid 1035999, up 6h38m (started
+2026-07-27 11:10:13 via a clean systemd stop/start, per journald). Not churn,
+not a defect.
+
+**Correction 2 — the `[Bun.serve]: request timed out after 10 seconds` line is
+STALE, not current.** `~/.kteam/daemon/daemon.log` mtime is **2026-07-22
+16:46:21Z** — the file has not been written in 5 days. The timeout lines in it
+predate commit dd78e5a (2026-07-22 19:26Z) which set `idleTimeout: 255`
+(`api-server.ts:308`, Bun's documented max) precisely to fix that. Current
+source has the fix; the running daemon (started 11:10Z today from this tree)
+has it too. No live 10s-timeout problem to characterise — the evidence was a
+fossil.
+
+**NEW BUG (the actual root cause of the fossil log): kteamd's systemd unit
+quotes `StandardOutput=`/`StandardError=` values, and systemd REJECTS them —
+all daemon output silently goes to journald only, and `daemon.log` froze.**
+
+- Evidence: `journalctl --user -u kteamd` shows
+  `Failed to parse output specifier, ignoring: "append:/home/kirin/.kteam/daemon/daemon.log"`
+  for unit lines 20-21 — **100 occurrences** in the journal (every daemon
+  start/reload since the unit was generated). The live daemon's fd 1/2 point at
+  a socket (journald), not the file. Meanwhile `daemon.log` mtime is frozen at
+  2026-07-22 16:46Z.
+- Suspected code path: `modules/kteam-ts/src/daemon-service.ts:115-116` emit
+  `StandardOutput=${systemdQuote(`append:${this.paths.daemonLog}`)}` — and
+  `systemdQuote` (`daemon-service.ts:19-27`) wraps the value in double quotes.
+  systemd's output specifiers are NOT shell-parsed: `StandardOutput=` takes the
+  value literally, so `"append:/path"` (with quotes) is an unknown specifier
+  and systemd 255 ignores it, falling back to journal. Env vars and ExecStart
+  accept quoting; output specifiers don't. Fix: emit the specifier unquoted
+  (paths with spaces aren't representable here anyway per systemd docs, and
+  KTEAM_HOME is user-controlled but conventional).
+- Impact: anyone debugging "the daemon" by reading `~/.kteam/daemon/daemon.log`
+  is reading 5-day-old fossils — which is EXACTLY what happened in the 17:40Z
+  entry above (I cited stale EADDRINUSE + timeout lines as if current). This is
+  a diagnosis-poisoning bug: it doesn't break the daemon, it breaks everyone's
+  ability to reason about the daemon.
+- Workaround: read `journalctl --user -u kteamd` (add `--all` to inline the
+  "blob data" lines, which are just UTF-8 arrows in self-check messages);
+  ignore `daemon.log` until the unit generator is fixed and the unit
+  regenerated + daemon-reloaded (human's call — do NOT restart kteamd for this).
+
+_(Babysitter read-only diagnosis in automode, coordination dir ms3i5j7q-688df4a8.
+Append-only; no commit, no fix, no daemon restart.)_
+
+---
+
+## 2026-07-27 ~18:05Z — `kteam send` to a COMPLETED session is undeliverable when any live session shares its label (successor guard swallows plain messages)
+
+**Problem.** A plain `kteam send <completed-session> "…"` fails with:
+`refusing to revive session ms3i46c4-dba503f9: live successor emile
+(ms3i4l9t-64e73a49) already owns label ui-round25 in
+/home/kirin/.config/home-manager; continue there or stop it first`.
+Reported by nils (whose final handover report to carson bounced); **reproduced
+verbatim by me at 18:04Z** with a plain message send. Three distinct wrongs:
+
+1. The caller sent a MESSAGE; the error talks about a revive the caller never
+   asked for.
+2. The named "successor" (emile) is an UNRELATED teammate that merely shares
+   `--label ui-round25` + cwd — labels are BATCH slugs, not ownership keys.
+   Any lead running a 4-teammate batch under one label makes every finished
+   teammate unreachable until the whole batch drains.
+3. Net effect: a peer's final handover to a finished teammate is silently
+   undeliverable — how carson's orphaned sub-team work nearly got lost today.
+
+**Code path (read, confirmed).**
+
+- `session-manager.ts:1692-1694` — `send()` pre-lock probe: a terminal-status
+  target routes the send to `reviveWithMessage()` unconditionally.
+- `session-manager.ts:1963-1973` — `reviveWithMessage()` = `resume(id, message)`.
+- `session-manager.ts:2440-2447` — `resume()` hits the successor guard.
+- `session-manager.ts:2371-2382` — `liveSuccessorFor()`: ANY non-terminal
+  session with the SAME trimmed label + SAME resolved cwd counts as a
+  "successor". No parent/lineage/teammate-name check — label+cwd only. The
+  doc comment says it exists to refuse "resurrection when another live
+  teammate already owns the same labelled work", i.e. it was designed for the
+  warden's crash-revive dedupe, but it fires on the peer-messaging path too
+  because send() converges on resume().
+- Design tension: send-to-terminal MUST revive (a dead pane can't receive
+  text), but the guard treats "same label = same work" which is false for
+  fan-out batches where one label spans N parallel teammates by design (the
+  CLAUDE.md contract says `--label` is "your batch slug").
+
+**Fix directions (not applied).** Either (a) scope `liveSuccessorFor` to
+actual lineage (same teammate name, or a recorded predecessor/successor link
+— e.g. warden respawns record `config.parent`/retry ancestry), or (b) let a
+queued peer message survive without a revive: append to the terminal session's
+channel/inbox so a later `resume` delivers it, returning
+`disposition: 'queued-for-revive'` instead of throwing.
+
+**Workaround (verified by nils):** `kteam resume <name>` first, then
+`kteam send` — resume from the CLI takes a different path? No: nils resumed
+AND THEN sent; the resume itself succeeded presumably because it ran after
+emile… actually nils' resume succeeded while emile was still live, which
+suggests the CLI `resume` command passes a message-less path that… was not
+re-verified here. Treat "resume-then-send worked for nils at ~17:58Z" as
+reported fact; I did not re-run a resume to avoid disturbing carson's
+completed state twice.
+
+## 2026-07-27 ~18:05Z — ps --label row-drop, second report (17:57Z, `-a` form): the provided capture does NOT show a drop
+
+Zelda reported the row-drop recurred at 17:57Z "on the -a form too" and
+provided captures. I secured them to
+`~/.kteam/ms3i5j7q-688df4a8/evidence/ps.{txt,json}`. **Both show all FOUR
+ui-round25 rows present** (carson completed, emile tool_running, miguel
+running, brody running) with sane per-row state. So either the drop happened
+on a different invocation than the one captured, or the capture was taken
+after recovery. The JSON confirms: no terminal-status flap visible at capture
+time (carson's `completed` is legitimate — done marker written 17:52:19Z).
+Status-flap hypothesis stays open but STILL UNCONFIRMED by direct evidence;
+nothing new to pin. Standing request: capture the text and `--json` output of
+the SAME failing invocation, atomically (`kteam ps --label X > a.txt; kteam
+ps --label X --json > a.json` immediately after seeing a drop).
+
+_(Babysitter diagnosis in automode, coordination dir ms3i5j7q-688df4a8.
+Repro of the send bug used one harmless test message to completed carson.
+Append-only; no commit, no fix, no daemon restart.)_
+
+---
+
+## 2026-07-27 ~18:39Z — `kteam wait <name>` process died silently after ~66 min while its target was still live
+
+**Problem.** A backgrounded `kteam wait brody` (started ~17:33Z) terminated at
+~18:39Z with NO output beyond the direnv preamble — reported as killed/stopped,
+not exited-with-result — while brody (ms3i49gv) was still alive and
+`tool_running`. Three sibling waits (carson/emile/miguel) started the same way
+at the same time all completed normally when their targets finished (~19-50 min
+lifetimes). Only the longest-lived one died.
+
+**Evidence.** Harness task bzurw2lxm status `killed`; its output file contains
+only direnv loading lines, no wait result and no error. `kteam status brody`
+immediately after: running fine, turn 1.
+
+**Ambiguity (logged for pattern-matching, not as a confirmed kteam defect).**
+Cannot distinguish from here whether (a) the harness/babysitter side killed the
+background task, or (b) the `kteam wait` client process itself died (e.g. a
+long-poll/reconnect limit, or the `[Bun.serve] idleTimeout`-adjacent long-request
+path in the daemon dropping a >1h waiter). If other sessions see long `kteam
+wait`s dying near the ~60-66 min mark while shorter ones survive, suspect the
+daemon's long-poll handling in the wait route (client `wait` → api long-poll)
+rather than the caller. Workaround: re-arm the wait (it is idempotent) and
+never rely on a single long-lived wait as the only completion signal — pair it
+with a periodic `kteam ps` check.
+
+_(Babysitter observation in automode, coordination dir ms3i5j7q-688df4a8.
+Append-only; wait re-armed; no other action.)_
+
+## `kteam send` to a finished peer refused: label-successor guard blocks reply delivery (2026-07-27)
+
+**Problem.** A teammate cannot deliver a message to a peer whose session has
+ended when the SENDER holds the same label. `kteam send corey "…"` (corey =
+ms3ir8n1-09368f95, label ui-round26, by then finished) failed with:
+`kteam: refusing to revive session ms3ir8n1-09368f95: live successor pamela
+(ms3jmqn0-5d673ceb) already owns label ui-round26 in /home/kirin/.config/
+home-manager; continue there or stop it first`. The same send had worked
+minutes earlier while corey was still running — messages were exchanged both
+ways — so mid-collaboration the channel silently became one-way the moment
+corey's TUI stopped.
+
+**Evidence.** Exit code 1 with the message above; earlier sends to the same
+name in the same session succeeded (`queued in the TUI's native queue`).
+
+**Suspected code path.** `modules/kteam-ts` send/resume logic: `kteam send` to
+a stopped session falls through to an implicit `resume`, and resume has a
+same-label/same-cwd successor guard. The guard treats the sender itself as the
+"live successor" and refuses. Sender identity ≠ successor: a peer message
+should either queue durably to the dead session's inbox without reviving it, or
+the guard should exclude the requesting session.
+
+**Workaround.** Route the information through the lead (`kteam send zelda`)
+or write to a file the peer's successor will read. If the reply matters, send
+it BEFORE the peer finishes.
+
+_(pamela, automode, coordination dir ms3jmqn0-5d673ceb.)_
+
+---
+
+## 2026-07-27 ~18:45Z — claude resume path: relaunch `--resume <harnessSessionId>` dies with "No conversation found" when turn 1 never persisted a conversation (killed 3 sessions on the same task)
+
+**Problem.** Three consecutive sessions given the notifications design task —
+ms2e9eea-4e93c9f0 (2026-07-26T22:53Z), ms2fdimo-e21072eb (23:24Z),
+ms2ro63p-17d36e29 (2026-07-27T05:08Z) — all `failed` at turn 2-3 with reason
+"interactive claude exited; exit code unavailable after confirmed re-probe; no
+final pane output captured", zero tool calls, zero artifacts. Surfaced by brody
+(ms3i49gv), who inherited the task on the 4th attempt and succeeded; he left
+the log entry to the watcher. Verified by me from the preserved session dirs.
+
+**Evidence.**
+
+- All three `state.json`: status=failed, turn=2/3, the harness-exit reason above.
+- ms2e9eea's `last-snapshot.txt` contains the actual pane output:
+  `No conversation found with session ID: 47631b76-e0b2-4967-8c79-ac11cbcaf9ff`
+  — and that UUID is exactly `config.harnessSessionId`.
+- `session-manager.ts:2608` then records "failed resume cleanup".
+
+**Code path.** `core.ts:899-900`: turn 1 launches claude with
+`--session-id <uuid>` (freshly minted at `session-manager.ts:1357`); every
+relaunch (turn >= 2, i.e. resume/nudge/retry) switches to
+`--resume <same uuid>`. If the turn-1 process exits before the harness
+PERSISTS a conversation under that id (crash at startup, quota bounce, wrapper
+error — anything pre-first-message), the id exists in kteam's config but no
+conversation exists on the claude side. Every subsequent relaunch then runs
+`--resume <missing>` → instant "No conversation found" exit → monitor kills →
+retry relaunches with the SAME id → same instant death. The session
+crash-loops to `failed` without ever getting a second chance at a real start.
+Same-task retries as NEW sessions (new uuid) hit the same fate only if the
+underlying turn-1 crash recurs — which it apparently did twice more that
+night; by 17:29Z today the same brief launched fine (brody).
+
+**Suspected fix direction.** On a resume failure whose pane output matches
+"No conversation found with session ID", fall back to a FRESH
+`--session-id` launch (mint a new uuid, keep the kteam session) instead of
+terminalizing — the conversation provably has nothing to lose. Detection is
+cheap: the string is already in the captured final frame that
+`harnessExitReason` reads (`session-manager.ts:2350-2360`).
+
+**Workaround.** None from inside a dead session; start a fresh session for
+the task. If a teammate dies at turn 1-2 with "exit code unavailable … no
+final pane output", check its last-snapshot for this string before assuming
+the task/brief was at fault — the task never ran.
+
+_(Babysitter diagnosis in automode, coordination dir ms3i5j7q-688df4a8, from
+brody's report + preserved state/snapshots of the three dead sessions.
+Append-only; no commit, no fix.)_
+
+---
+
+## 2026-07-27 ~20:50Z — ESCALATION of the 18:05Z label-successor entry: the guard now BLOCKS REVIVAL of a genuinely stalled session (recovery, not just messaging)
+
+**Update to "`kteam send` to a COMPLETED session is undeliverable…" (18:05Z).**
+Same root cause, second and materially worse manifestation. The impact line
+should now read: **blocks revival of stalled sessions**, not just "final
+handover undeliverable".
+
+**What happened (zelda's report, reproduced by me at 20:49Z).** Session evan
+(ms3myvmx-31e46764, label ui-round28) STALLED with zero life-signs for 302s
+(nudge did not revive it; 3 native-queued sends unconsumed). `kteam resume
+evan` — the designed recovery action for exactly this state — is REFUSED by
+the successor guard. There is no CLI override; the only ways out are stopping
+an unrelated live teammate or respawning evan's task as a NEW session under a
+different label, losing the stalled session's conversation context.
+
+**Confirming detail (new evidence, from my repro).** The named "successor" is
+ARBITRARY: zelda's attempt was refused citing sophia (ms3moxcz), mine minutes
+later citing gretchen (ms3mf453) — both merely live sessions sharing label
+ui-round28 + cwd (there are SIX live ui-round28 sessions right now; any of
+them blocks evan). This is `liveSuccessorFor` (session-manager.ts:2371)
+returning the first non-terminal label+cwd match in recency-sorted cache
+order — direct proof the guard matches "same batch", not "same work": evan
+(dictation task) vs gretchen (markdown overlay) vs sophia (browser streaming)
+are disjoint tasks.
+
+**Why the guard misfires here by its own design intent.** Its doc comment
+says it refuses resurrection when "another live teammate already owns the
+same labelled work" — the warden crash-revive dedupe case, where a respawned
+REPLACEMENT owns the dead session's task. In fan-out batches (the documented
+`--label` = batch-slug convention) label+cwd NEVER implies same work. resume()
+is the convergence point for send-revive, control auto-revive, quota wake,
+retry, AND manual `kteam resume` — so the lead's explicit recovery command
+inherits a guard meant for automated dedupe.
+
+**Severity.** Was: annoyance (message bounce, resume-then-send workaround
+existed). Now: a stalled session in any multi-teammate batch is UNRECOVERABLE
+by normal means while any sibling lives — in a busy fleet that is essentially
+always. Priority should move from nice-to-have to urgent. Fix directions from
+the 18:05Z entry stand (lineage-scope the guard — teammate name or recorded
+predecessor link — or add an explicit override for the manual resume path).
+
+**Live specimen — do not clean up.** evan's session dir
+(~/.kteam/ms3myvmx-31e46764) additionally holds 3 native-queued unconsumed
+sends (19:57:53/19:58:03/19:58:14Z in channel/inbox.jsonl); zelda handed that
+to juan (ms3n5aeg, "Queued Message Vanishes") as a live specimen. Leave the
+directory untouched.
+
+_(Babysitter verification in automode, coordination dir ms3i5j7q-688df4a8.
+One `kteam resume evan` repro attempt (refused, side-effect-free). Append-only;
+no commit, no fix, no cleanup of evan.)_
+
+---
+
+## 2026-07-27 22:58Z — `wt merge` is a live-fire hazard in a shared checkout: it staged all 35 dirty paths before the commit hook stopped it
+
+**Incident.** A peer report was passed to `kteam send` as an inline,
+double-quoted shell argument containing Markdown backticks. The shell treated
+the backticked text `wt merge` as command substitution and invoked Worktrunk's
+default merge pipeline in `/home/kirin/.config/home-manager`, where roughly 20
+agents shared one dirty checkout.
+
+**Impact, verified twice.** `wt merge` staged every dirty path it saw: 35 files
+from unrelated browser, quota, dictation, analytics, and problem-log work. It
+then attempted a commit. The repository's pre-commit treefmt hook failed after
+formatting six files, which stopped the pipeline before any commit, ref move,
+merge, rebase, branch deletion, or worktree removal. Recovery unstaged the exact
+35-path set without changing working-tree bytes. `HEAD`, branch, reflog,
+worktree inventory, and operation state remained unchanged; the formatter-only
+edits were deliberately kept because treefmt is idempotent and every owner
+would receive them on commit anyway.
+
+**Why this matters beyond the quoting bug.** A periodic “completed worktree”
+scanner must never call an interactive merge helper, `git add`, or `git commit`.
+In a shared checkout, a single mistaken merge invocation can sweep many agents'
+unrelated, unreviewed work into its commit before a later hook gets a chance to
+object. This run was harmless only because the hook failed. The safe design is
+automatic read-only discovery and evidence collection, PR preparation/babysitting,
+and a human merge; no timer mutates the target checkout.
+
+**Workaround / prevention.** Put Markdown or any message containing backticks,
+`$()`, globs, or shell metacharacters in a file and use `kteam send
+--message-file`; never interpolate it into a shell command. For native kteam
+worktree support, persist intent before creation, isolate each agent by branch,
+and keep the completion scanner report/PR-only.
+
+_(ida, session `ms3pu7yd-f872cb8e`; incident report and exact pre-hook blob ids
+are under that session's coordination directory.)_
+
+---
+
+## 2026-07-28 00:26Z — three warden invariants are not enforced (scratch retention, self-signal scope, same-sweep concurrency)
+
+Read-only tracing for Codex warden support found three **harness-neutral**
+warden defects. They are recorded here rather than fixed in that task because
+the affected daemon files are contended and each deserves an independently
+scoped repair.
+
+### Assigned targets are not actually protected from scratch GC
+
+**Intended invariant.** A session under an assigned warden must retain its
+scratch because the warden is about to read that session's durable files.
+
+**Code mismatch.** `modules/kteam-ts/src/session-manager.ts:6049-6057`
+implements `hasLiveWarden(targetId)` by looking for a live warden whose
+`config.parent === targetId`. But assigned wardens are spawned at
+`session-manager.ts:6516-6525` without a `parent` field; their authoritative
+target association is instead persisted under `wardenState.assignments`.
+Consequently the GC predicate cannot recognize a normally assigned target and
+may reclaim eligible scratch while its warden is live.
+
+**Fix direction.** Consult `wardenState.assignments[targetId].wardenId` (and
+verify that warden remains non-terminal), or explicitly persist the target
+relationship in a dedicated config field. Do not overload ordinary teammate
+parentage unless assigned wardens are meant to appear as children of targets.
+
+### The shared scoped token can signal any warden-labelled session done
+
+**Intended invariant.** A warden may run `kteam signal done` only for itself.
+
+**Code mismatch.** The scoped-token gate at
+`modules/kteam-ts/src/api-server.ts:124-131` resolves the requested target and
+allows the signal whenever `target.config.label === WARDEN_LABEL`. It never
+compares that target id with the calling warden's `x-kteam-session-id`.
+Because every warden pane receives the same scoped bearer token, one warden can
+therefore mark a different live warden completed. The session-id header is
+currently actor attribution, not authorization.
+
+**Fix direction.** Require the authenticated warden session id to equal the
+resolved signal target (and retain the label check). Add a negative test using
+two labelled sessions under the same scoped token.
+
+### Assigned spawn and fleet escalation reuse a stale session snapshot
+
+**Intended invariant.** `maxAssignedWardens: 1` means at most one live warden
+across assigned and fleet-sweep duties.
+
+**Code mismatch.** `sweepOnce` takes one `sessions` snapshot, then awaits
+`spawnAssignedWardens(...)` and calls `maybeEscalate(..., sessions, ...)` with
+the original snapshot (`session-manager.ts:6279-6285`). `maybeEscalate` counts
+live wardens only from that stale array (`:6655-6663`), so it cannot see the
+assigned warden that the immediately preceding await just created. If the same
+sweep contains both assigned and triage anomalies, both spawn sites can each
+observe one free slot and launch, exceeding the shared cap.
+
+**Live demonstration.** With persisted `maxAssignedWardens: 1`, the daemon
+created assigned warden Miranda (`ms3vk51q-98c39dec`, `warden:gloria`) at
+`2026-07-27T23:45:21.816Z` and fleet warden Aspen
+(`ms3vkpz0-ff6ef828`, `warden-sweep`) at
+`2026-07-27T23:45:48.979Z`. Both remained simultaneously live until the Codex
+warden experiment stopped them; both had zero report/work and were wedged only
+on the provider-wide Claude credential cooldown. The two-pane state was not a
+configuration mystery: it is the same-sweep stale read described above.
+
+**Fix direction.** Refresh the live warden count after assigned spawns (or
+carry the returned spawned ids into the second gate) before calling fleet
+escalation. Pin one test where a single sweep has both anomaly classes and cap
+1; exactly one warden may start and the other work must remain queued/suppressed.
+
+_(Linda, session `ms3wfazx-e3f00d06`; traced independently by Dakota
+`ms3wkmyk-111d22de`; append-only diagnosis, no daemon fix.)_
