@@ -285,6 +285,89 @@ describe('AttentionSources', () => {
     h.sources.close();
   });
 
+  test('restart keeps same-report warden blocks distinct without duplicating either', async () => {
+    const sessions = new Sessions();
+    sessions.current = view(false);
+    const tasks = new Tasks();
+    tasks.current = taskSnapshot('in_progress');
+    const firstService = new AttentionService(
+      paths,
+      { resolve: async ref => (ref === SID ? { id: SID, name: 'zoe' } : null) },
+      { role: 'daemon' },
+    );
+    const firstSources = new AttentionSources(firstService, sessions, tasks);
+    await firstSources.start();
+    sessions.emit(
+      'fleet.needs_human',
+      {
+        reason: 'Only the human can choose the rollout path.',
+        reportPath: '/reports/needs-human.md',
+        anomalyKind: 'sus_subprocess',
+      },
+      'daemon',
+    );
+    sessions.emit(
+      'fleet.needs_human',
+      {
+        reason: 'Only the human can decide whether thinking should continue.',
+        reportPath: '/reports/needs-human.md',
+        anomalyKind: 'sus_thinking',
+      },
+      'daemon',
+    );
+    await boardWhen(
+      firstService,
+      snapshot =>
+        snapshot.items.filter(item => item.sourceRef?.startsWith('warden:/reports/needs-human.md#')).length === 2,
+    );
+    firstSources.close();
+
+    const restartedSessions = new Sessions();
+    restartedSessions.current = view(false);
+    restartedSessions.current.state.needsHuman = 'Only the human can choose the rollout path.';
+    restartedSessions.current.state.needsHumanKind = 'sus_subprocess';
+    restartedSessions.current.state.needsHumanReportPath = '/reports/needs-human.md';
+    restartedSessions.current.state.needsHumanRequests = [
+      {
+        reason: 'Only the human can choose the rollout path.',
+        anomalyKind: 'sus_subprocess',
+        reportPath: '/reports/needs-human.md',
+        at: '2026-07-28T00:03:00.000Z',
+      },
+      {
+        reason: 'Only the human can decide whether thinking should continue.',
+        anomalyKind: 'sus_thinking',
+        reportPath: '/reports/needs-human.md',
+        at: '2026-07-28T00:03:00.000Z',
+      },
+    ];
+    const restartedService = new AttentionService(
+      paths,
+      { resolve: async ref => (ref === SID ? { id: SID, name: 'zoe' } : null) },
+      { role: 'daemon' },
+    );
+    const restartedSources = new AttentionSources(restartedService, restartedSessions, tasks);
+    await restartedSources.start();
+
+    const wardenItems = (await restartedService.list(SID)).items.filter(
+      item => item.source === 'agent-raised' && item.sourceRef?.startsWith('warden:'),
+    );
+    expect(wardenItems).toHaveLength(2);
+    expect(wardenItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceRef: 'warden:/reports/needs-human.md#sus_subprocess',
+          why: 'Only the human can choose the rollout path.',
+        }),
+        expect.objectContaining({
+          sourceRef: 'warden:/reports/needs-human.md#sus_thinking',
+          why: 'Only the human can decide whether thinking should continue.',
+        }),
+      ]),
+    );
+    restartedSources.close();
+  });
+
   test('repeated blocked-task edits refresh one reasoned item and leaving blocked resolves it', async () => {
     const h = await harness();
     const changed: SessionTaskListResponse = {

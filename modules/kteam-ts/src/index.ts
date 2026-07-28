@@ -54,6 +54,7 @@ import {
   renderBrowserCli,
 } from './browser-cli';
 import { isBrowserError } from './browser-types';
+import { inheritStopReason, processStopIo, runBulkStop, type BulkStopOptions, type BulkStopSelector } from './stop-cli';
 
 const VERSION = KTEAM_VERSION;
 const paths = createPaths();
@@ -127,6 +128,22 @@ function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
       );
   }
   console.log(`  ${view.directory}`);
+}
+
+async function runBulkStopCommand(selector: BulkStopSelector, options: BulkStopOptions): Promise<void> {
+  const api = await client();
+  const result = await runBulkStop(
+    selector,
+    options,
+    {
+      list: () => api.list(),
+      get: id => api.get(id),
+      stop: (id, reason) => api.stop(id, reason),
+      io: processStopIo(),
+    },
+    process.env.KTEAM_SESSION_ID,
+  );
+  if (result.exitCode !== 0) process.exitCode = result.exitCode;
 }
 
 /** Parse a `--when-idle` duration (`30s`, `5m`, `1h`, or bare seconds) to ms. */
@@ -790,11 +807,65 @@ program
   .command('interrupt')
   .argument('<id>')
   .action(async id => printView(await (await client()).interrupt(id)));
-program
+const stopCommand = program
   .command('stop')
-  .argument('<id>')
+  .description('choose explicit orphan/cascade/children/label semantics; bare <id> keeps legacy orphan behavior')
+  .argument('[id]', 'legacy form: stop this session only, leaving every descendant running')
   .option('--reason <reason>')
-  .action(async (id, options: { reason?: string }) => printView(await (await client()).stop(id, options.reason)));
+  .addHelpText(
+    'after',
+    '\nNamed modes show an exact confirmation list. Bare `kteam stop <id>` remains the legacy, unconfirmed orphan-only form for scripts. The four mode words are reserved in alias position; use the session id if a teammate has one of those names.\n',
+  )
+  .action(async (id: string | undefined, options: { reason?: string }) => {
+    if (!id) throw new Error('choose stop orphan|cascade|children|label, or provide an id for legacy orphan-only stop');
+    printView(await (await client()).stop(id, options.reason));
+  });
+const namedStopOptions = (options: BulkStopOptions): BulkStopOptions =>
+  inheritStopReason(options, stopCommand.opts<{ reason?: string }>().reason);
+stopCommand
+  .command('orphan')
+  .description('stop only this session; list every live descendant that will keep running parentless')
+  .argument('<id>')
+  .option('--reason <reason>', 'reason recorded on every stopped session')
+  .option('--dry-run', 'print the exact selected sessions without stopping any')
+  .option('-y, --yes', 'confirm the printed set without an interactive prompt')
+  .option('--include-caller', 'also stop the issuing KTEAM_SESSION_ID, explicitly, and do it last')
+  .action(async (id: string, options: BulkStopOptions) =>
+    runBulkStopCommand({ kind: 'orphan', rootId: id }, namedStopOptions(options)),
+  );
+stopCommand
+  .command('cascade')
+  .description('stop this session and every transitive descendant')
+  .argument('<id>')
+  .option('--reason <reason>', 'reason recorded on every stopped session')
+  .option('--dry-run', 'print the exact selected sessions without stopping any')
+  .option('-y, --yes', 'confirm the printed set without an interactive prompt')
+  .option('--include-caller', 'also stop the issuing KTEAM_SESSION_ID, explicitly, and do it last')
+  .action(async (id: string, options: BulkStopOptions) =>
+    runBulkStopCommand({ kind: 'cascade', rootId: id }, namedStopOptions(options)),
+  );
+stopCommand
+  .command('children')
+  .description('stop every transitive descendant while leaving this session running')
+  .argument('<id>')
+  .option('--reason <reason>', 'reason recorded on every stopped session')
+  .option('--dry-run', 'print the exact selected sessions without stopping any')
+  .option('-y, --yes', 'confirm the printed set without an interactive prompt')
+  .option('--include-caller', 'include the issuing KTEAM_SESSION_ID if it is a descendant, and stop it last')
+  .action(async (id: string, options: BulkStopOptions) =>
+    runBulkStopCommand({ kind: 'children', rootId: id }, namedStopOptions(options)),
+  );
+stopCommand
+  .command('label')
+  .description('stop every live session whose ownership label matches exactly; lineage is ignored')
+  .argument('<label>')
+  .option('--reason <reason>', 'reason recorded on every stopped session')
+  .option('--dry-run', 'print the exact selected sessions without stopping any')
+  .option('-y, --yes', 'confirm the printed set without an interactive prompt')
+  .option('--include-caller', 'also stop the issuing KTEAM_SESSION_ID, explicitly, and do it last')
+  .action(async (label: string, options: BulkStopOptions) =>
+    runBulkStopCommand({ kind: 'label', label }, namedStopOptions(options)),
+  );
 program
   .command('resume')
   .argument('<id>')

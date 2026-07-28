@@ -14,6 +14,7 @@ import type {
   ProjectInfo,
   StartSessionPayload,
   WardenVerdict,
+  WardenAttentionView,
   SearchResponse,
   SendsResponse,
   UsageFeedView,
@@ -219,6 +220,11 @@ export const api = {
   updateWardenConfig: (patch: WardenConfigPatch) =>
     request<WardenConfigView>('/v1/warden/config', { method: 'PATCH', body: JSON.stringify(patch) }),
   wardenVerdicts: () => request<WardenVerdict[]>('/v1/warden/verdicts'),
+  // Fleet-wide "who needs the human". Deliberately under /v1/warden/ so the
+  // existing admin-only prefix rule covers it — no new auth surface. A daemon
+  // without the route answers 404; the caller renders that as an explicit
+  // "no judgement available", never as an empty (healthy-looking) list.
+  wardenAttention: () => request<WardenAttentionView>('/v1/warden/attention'),
   wardenReport: (path: string) => request<string>(`/v1/warden/report?path=${encodeURIComponent(path)}`),
   search: (q: string, limit = 30) => request<SearchResponse>(`/v1/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   usage: () => request<UsageFeedView>('/v1/usage'),

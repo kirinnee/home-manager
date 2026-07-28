@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { ShieldCheck } from 'lucide-react';
 import { WardenStrip } from '../components/WardenStrip';
+import { WardenAttention } from '../components/WardenAttention';
 import { WardenVerdicts } from '../components/WardenVerdicts';
 import { WardenConfigCard } from '../components/WardenConfigCard';
 
@@ -25,9 +26,13 @@ export function WardenPage() {
             <ShieldCheck size={20} className="text-accent" aria-hidden="true" />
             Warden
           </h1>
-          <p className="mt-0.5 text-ui text-muted">Fleet sweeps, anomalies, and recent supervision verdicts.</p>
+          <p className="mt-0.5 text-ui text-muted">Who needs you, then sweeps, accounts, and recent verdicts.</p>
         </div>
 
+        {/* OUTCOME FIRST. "Who needs you" leads the page; the sweep strip,
+            account editor and verdict history are the supporting evidence and
+            follow it. Reordering this puts configuration above the answer. */}
+        <WardenAttention />
         <WardenStrip page />
         <WardenConfigCard />
         <WardenVerdicts page />

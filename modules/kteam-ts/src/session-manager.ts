@@ -56,7 +56,12 @@ import {
   shiftFrozenSendTimeout,
   type SendMatch,
 } from './send-ledger';
-import { classifyVerdict, parseWardenReports, type WardenVerdict } from './warden-verdicts';
+import { classifyVerdict, parseWardenAnomalyKind, type WardenVerdict } from './warden-verdicts';
+import {
+  readWardenReport as readWardenReportFromDisk,
+  readWardenVerdicts as readWardenVerdictsFromDisk,
+} from './warden-reports';
+import { buildWardenSpawnProvenance, provenancePath, type WardenSelectionProvenance } from './warden-provenance';
 import {
   blessingTtlMs,
   isAnomalyBlessed,
@@ -341,6 +346,14 @@ interface SessionManagerOptions {
    *  decides WHEN. Returns false when it declined, so the manager can say so. */
   onSelfRestart?: () => boolean | Promise<boolean>;
 }
+
+/** Internal lifecycle gates for daemon-created sessions. The public API never
+ *  supplies functions; wardens use this to persist mandatory spawn evidence
+ *  after the pane launches but before turn 1 can run. */
+interface SessionStartHooks {
+  beforeFirstTurn?: (view: SessionView) => Promise<void>;
+  onBootstrapFailure?: () => Promise<void>;
+}
 interface WardenRuntimeState {
   lastSweepAt?: string;
   lastSpawnAt?: string;
@@ -396,6 +409,26 @@ interface WardenRuntimeState {
    *  restart must not turn the second sighting back into the first. */
   providerOutages?: ProviderOutageState;
 }
+
+interface PickedWardenAccount extends WardenSelectionProvenance {
+  wrapper: string;
+  model?: string;
+}
+
+const wardenReportInstructions = (reportPath: string): string[] => [
+  '',
+  '## Report writing',
+  '- Lead with the outcome.',
+  '- Use point form only.',
+  '- Keep one idea per bullet.',
+  '- Keep every line short and plain.',
+  '- Bold one key value per bullet.',
+  `- Before writing, read the daemon spawn facts at: ${provenancePath(reportPath)}`,
+  '- Include the exact CLI, resolved model, and harness.',
+  '- Include whether failover happened.',
+  '- If failover happened, include the original CLI and exact daemon reason.',
+  '',
+];
 interface WardenSweep {
   at: string;
   anomalies: WardenAnomaly[];
@@ -447,6 +480,30 @@ class ReviveDedupeConflict extends ReviveRefused {
   }
 }
 
+class WardenProvenancePersistenceError extends Error {
+  constructor(
+    readonly wardenId: string,
+    readonly reportPath: string,
+    cause: unknown,
+  ) {
+    super(`could not persist mandatory warden provenance: ${cause instanceof Error ? cause.message : String(cause)}`, {
+      cause,
+    });
+    this.name = 'WardenProvenancePersistenceError';
+  }
+}
+
+function wardenProvenanceError(error: unknown): WardenProvenancePersistenceError | undefined {
+  if (error instanceof WardenProvenancePersistenceError) return error;
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) {
+      const found = wardenProvenanceError(nested);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
 const terminalStatuses: SessionStatus[] = ['completed', 'failed', 'stalled', 'stopped'];
 const protectedStatuses: SessionStatus[] = [...terminalStatuses, 'kill_failed'];
 const waitingStatuses: SessionStatus[] = ['waiting', 'awaiting_question', 'awaiting_user', 'rate_limited'];
@@ -466,6 +523,18 @@ function rejectUnconfirmedCodexPickerInput(): never {
 /** Statuses a session can hold BEFORE its tmux pane has ever been created.
  *  In these the absence of a pane means "not launched yet", never "crashed". */
 const preLaunchStatuses: SessionStatus[] = ['created', 'starting'];
+
+const isMissingPath = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
+
+async function readJsonIfPresent<T>(file: string): Promise<T | undefined> {
+  try {
+    return await readJson<T>(file);
+  } catch (error) {
+    if (isMissingPath(error)) return undefined;
+    throw error;
+  }
+}
 /** How far back a FLEET-WIDE replay cursor may reach. The cross-session feed
  *  is a live stream, not an archive: a client asking for the whole fleet from
  *  sequence 0 would page through every event ever recorded. Per-session
@@ -781,6 +850,20 @@ async function interruptibleSleep(
     signal.addEventListener('abort', abort, { once: true });
     register?.(done);
   });
+}
+
+/** A durable needs-human flag suppresses only the exact anomaly class it was
+ *  issued for. Legacy flags have no kind and therefore cover nothing. */
+export function needsHumanCoversAnomaly(needsHumanKind: string | undefined, anomalyKind: WardenAnomalyKind): boolean {
+  return needsHumanKind === anomalyKind;
+}
+
+export function needsHumanStateCoversAnomaly(
+  state: Pick<SessionState, 'needsHuman' | 'needsHumanKind' | 'needsHumanRequests'>,
+  anomalyKind: WardenAnomalyKind,
+): boolean {
+  if (state.needsHuman !== undefined && needsHumanCoversAnomaly(state.needsHumanKind, anomalyKind)) return true;
+  return (state.needsHumanRequests ?? []).some(request => request.anomalyKind === anomalyKind);
 }
 
 export class SessionManager implements KTeamService {
@@ -1927,7 +2010,7 @@ export class SessionManager implements KTeamService {
     return false;
   }
 
-  async start(request: StartSessionRequest): Promise<SessionView> {
+  async start(request: StartSessionRequest, hooks: SessionStartHooks = {}): Promise<SessionView> {
     const prompt = request.prompt?.trim() ?? '';
     // Pure argument validation first, before any wrapper/filesystem probing, so a
     // malformed request is rejected on the same terms whatever the environment.
@@ -2170,7 +2253,7 @@ export class SessionManager implements KTeamService {
     const running = new Promise<void>(resolve => {
       signalRunning = resolve;
     });
-    const bootstrap = this.bootstrapSession(id, config, signalRunning, deliverFirstTurn).finally(() => {
+    const bootstrap = this.bootstrapSession(id, config, signalRunning, deliverFirstTurn, hooks).finally(() => {
       this.launching.delete(id);
       releaseLaunch();
     });
@@ -2189,7 +2272,10 @@ export class SessionManager implements KTeamService {
       id,
       bootstrap,
       running,
-      request.detach === true ? 0 : startWaitMsFor(binary, START_WAIT_MS),
+      // A daemon-owned pre-turn gate is part of the launch contract, not
+      // optional bookkeeping. Never return a warden as successfully spawned
+      // before that gate has either passed or failed back to its caller.
+      hooks.beforeFirstTurn ? undefined : request.detach === true ? 0 : startWaitMsFor(binary, START_WAIT_MS),
     );
     return await this.get(id);
   }
@@ -2203,17 +2289,18 @@ export class SessionManager implements KTeamService {
     id: string,
     bootstrap: Promise<void>,
     running: Promise<void>,
-    waitMs: number,
+    waitMs: number | undefined,
   ): Promise<void> {
     let bootstrapError: unknown;
     const guarded = bootstrap.catch(error => {
       bootstrapError = error;
     });
-    const outcome = await Promise.race([
+    const outcomes: Array<Promise<'settled' | 'running' | 'timeout'>> = [
       guarded.then(() => 'settled' as const),
       running.then(() => 'running' as const),
-      Bun.sleep(waitMs).then(() => 'timeout' as const),
-    ]);
+    ];
+    if (waitMs !== undefined) outcomes.push(Bun.sleep(waitMs).then(() => 'timeout' as const));
+    const outcome = await Promise.race(outcomes);
     if (outcome === 'settled') {
       if (bootstrapError !== undefined) throw bootstrapError;
       return;
@@ -2236,7 +2323,7 @@ export class SessionManager implements KTeamService {
         reason:
           waitMs === 0
             ? 'detached start: the launch runs in the background'
-            : `launch still in progress after ${Math.round(waitMs / 1000)}s (bootstrap queue); it continues in the background`,
+            : `launch still in progress after ${Math.round((waitMs ?? 0) / 1000)}s (bootstrap queue); it continues in the background`,
       },
       'daemon',
     ).catch(() => undefined);
@@ -2250,6 +2337,7 @@ export class SessionManager implements KTeamService {
     config: SessionConfig,
     signalRunning: () => void = () => {},
     deliverFirstTurn = true,
+    hooks: SessionStartHooks = {},
   ): Promise<void> {
     try {
       // send() re-verifies prompt readiness right before typing â launch()'s
@@ -2262,6 +2350,10 @@ export class SessionManager implements KTeamService {
         // what tells a monitor apart from "the tmux session does not exist
         // yet" â the state a pre-launch monitor used to misread as a crash.
         await this.store.updateState<SessionState>(id, current => ({ ...current, launchedAt: now() }));
+        // Mandatory daemon evidence must exist before the model can consume its
+        // task. Warden hooks write the provenance sidecar here; any failure
+        // aborts bootstrap before prompt delivery, so no report can outrun it.
+        if (hooks.beforeFirstTurn) await hooks.beforeFirstTurn(await this.get(id));
         // Bare interactive start: the pane is up at its own prompt and that IS
         // the deliverable. Nothing is typed.
         if (deliverFirstTurn) await this.tmux.send(config, this.promptInstruction(id, 1));
@@ -2320,6 +2412,9 @@ export class SessionManager implements KTeamService {
         console.error(`kteamd: launch of ${id} found its tmux session already live; leaving it to its owner`);
         return;
       }
+      await hooks.onBootstrapFailure?.().catch(cleanupError => {
+        console.error(`kteamd: start-hook cleanup failed for ${id}: ${String(cleanupError)}`);
+      });
       await this.tmux.snapshot(config, true).catch(() => '');
       let killError: unknown;
       try {
@@ -7354,7 +7449,7 @@ export class SessionManager implements KTeamService {
    *  detection sweep is always-on and free; LLM escalation inside it is gated on
    *  warden.enabled. */
   private async startWarden(): Promise<void> {
-    this.wardenState = await readJson<WardenRuntimeState>(this.paths.wardenState).catch(() => ({}));
+    this.wardenState = (await readJsonIfPresent<WardenRuntimeState>(this.paths.wardenState)) ?? {};
     const intervalMs = Math.max(60_000, this.wardenConfig.intervalMinutes * 60_000);
     this.wardenTimer = setInterval(() => {
       void this.runSweep(false).catch(() => undefined);
@@ -7439,13 +7534,9 @@ export class SessionManager implements KTeamService {
     // report every sweep is noise (lacey, 2026-07-23). The flag clears when a
     // human acts (answer/resume/stop).
     await this.reconcileNeedsHuman(sessions);
-    const flagged = new Map(
-      sessions
-        .filter(view => view.state.needsHuman !== undefined)
-        .map(view => [view.config.id, view.state.needsHumanKind]),
-    );
+    const flagged = new Map(sessions.map(view => [view.config.id, view.state]));
     const anomalies = detected.anomalies.filter(
-      item => !flagged.has(item.sessionId) || (flagged.get(item.sessionId) ?? item.kind) !== item.kind,
+      item => !needsHumanStateCoversAnomaly(flagged.get(item.sessionId) ?? {}, item.kind),
     );
     const result = { anomalies, fingerprint: fingerprintAnomalies(anomalies) };
     const at = now();
@@ -7515,8 +7606,9 @@ export class SessionManager implements KTeamService {
    *  fleet.warden_exhausted when every account is ineligible. Returns
    *  undefined on exhaustion — the caller must skip the spawn WITHOUT
    *  consuming its gap/fingerprint so recovery escalates immediately. */
-  private async pickWardenAccount(): Promise<{ wrapper: string; model?: string } | undefined> {
+  private async pickWardenAccount(): Promise<PickedWardenAccount | undefined> {
     const config = this.wardenConfig;
+    const configuredAccounts = normalizeWardenAccounts(config);
     const usage = await this.fetchUsageAccounts().catch(() => [] as AgentUsage[]);
     const nowMs = Date.now();
     const reconciled = reconcileDemotions(this.wardenState.failover ?? {}, usage, nowMs);
@@ -7530,7 +7622,7 @@ export class SessionManager implements KTeamService {
       // Unreadable bin dir == empty inventory: evidence about nobody.
     }
     if (installed.length > 0) {
-      for (const account of normalizeWardenAccounts(config)) {
+      for (const account of configuredAccounts) {
         if (installed.includes(account.wrapper)) continue;
         this.wardenMissingWarned ??= new Set();
         if (this.wardenMissingWarned.has(account.wrapper)) continue;
@@ -7568,7 +7660,13 @@ export class SessionManager implements KTeamService {
         reason: 'preferred account unhealthy',
       });
     }
-    return selection.account;
+    return {
+      ...selection.account,
+      policy: effectiveFailoverConfig(config).policy,
+      selection: selection.reason,
+      configuredFirst: configuredAccounts[0]?.wrapper ?? selection.account.wrapper,
+      skipped: selection.skipped,
+    };
   }
 
   /** Record a warden spawn failure against the WRAPPER (never the target):
@@ -7607,9 +7705,13 @@ export class SessionManager implements KTeamService {
     force: boolean,
   ): Promise<string[]> {
     const warden = this.wardenConfig;
-    if (!force && !warden.enabled) return [];
     const queuedAnomalies = this.wardenState.assignedQueue ?? [];
-    if (susAnomalies.length === 0 && queuedAnomalies.length === 0) return [];
+    const hasAssignments = Object.keys(this.wardenState.assignments ?? {}).length > 0;
+    if (!force && !warden.enabled && !hasAssignments) return [];
+    // Even an empty detector result must reconcile old assignment records:
+    // otherwise a finished/missing warden remains "pending" forever in the
+    // Attention view and consumes the durable assignment slot.
+    if (susAnomalies.length === 0 && queuedAnomalies.length === 0 && !hasAssignments) return [];
     const byId = new Map(sessions.map(view => [view.config.id, view]));
     // Reconcile: drop assignments whose warden session is gone/terminal, and
     // start the cooldown clock for the target at that moment.
@@ -7652,6 +7754,12 @@ export class SessionManager implements KTeamService {
       }
     }
     this.wardenState.blessings = blessings;
+    if (!force && !warden.enabled) {
+      this.wardenState.assignments = assignments;
+      this.wardenState.assignedCooldowns = cooldowns;
+      await this.saveWardenState();
+      return [];
+    }
     const cooldownMs = Math.max(0, warden.assignedCooldownMinutes * 60_000);
     const nowMs = Date.now();
 
@@ -7727,34 +7835,45 @@ export class SessionManager implements KTeamService {
       // capabilities, so another warden holding the shared scoped token
       // cannot spoof its way to someone else's target (review P1).
       const capability = `${crypto.randomUUID()}${crypto.randomUUID().replaceAll('-', '')}`;
+      const provenanceFile = provenancePath(reportPath);
+      const writeProvenance = (spawnView: SessionView) =>
+        atomicJson(provenanceFile, buildWardenSpawnProvenance(spawnView, account, target.config.id));
+      const gateFirstTurnOnProvenance = async (spawnView: SessionView) => {
+        try {
+          await writeProvenance(spawnView);
+        } catch (error) {
+          throw new WardenProvenancePersistenceError(spawnView.config.id, reportPath, error);
+        }
+      };
+      let view: SessionView;
       try {
-        const view = await this.start({
-          prompt: this.buildAssignedWardenPrompt(anomaly, target, reportPath),
-          agent: account.wrapper,
-          model: account.model,
-          mode: 'auto',
-          label: WARDEN_LABEL,
-          name: `warden:${target.config.teammate ?? targetId}`,
-          cwd: this.paths.home,
-          stopCapability: capability,
-        });
-        this.wardenState.failover = recordWardenSuccess(this.wardenState.failover ?? {}, account.wrapper);
-        const assignedKinds = [...new Set(susAnomalies.filter(a => a.sessionId === targetId).map(a => a.kind))];
-        assignments[targetId] = {
-          wardenId: view.config.id,
-          spawnedAt: at,
-          capability,
-          kinds: assignedKinds,
-          reportPath,
-        };
-        spawned.push(view.config.id);
-        this.emitTransient('fleet.warden_assigned', {
-          wardenId: view.config.id,
-          targetId,
-          kind: anomaly.kind,
-          reportPath,
-        });
+        view = await this.start(
+          {
+            prompt: this.buildAssignedWardenPrompt(anomaly, target, reportPath),
+            agent: account.wrapper,
+            model: account.model,
+            mode: 'auto',
+            label: WARDEN_LABEL,
+            name: `warden:${target.config.teammate ?? targetId}`,
+            cwd: this.paths.home,
+            stopCapability: capability,
+          },
+          {
+            beforeFirstTurn: gateFirstTurnOnProvenance,
+            onBootstrapFailure: () => rm(provenanceFile, { force: true }),
+          },
+        );
       } catch (error) {
+        const provenanceError = wardenProvenanceError(error);
+        if (provenanceError) {
+          this.emitTransient('fleet.warden_provenance_failed', {
+            wardenId: provenanceError.wardenId,
+            targetId,
+            reportPath: provenanceError.reportPath,
+            message: provenanceError.message,
+          });
+          continue;
+        }
         // Strike the WRAPPER (the attributed cause) so failover can route the
         // next spawn elsewhere — the old code punished only the TARGET's
         // cooldown, silently starving every sus target on a dead account. The
@@ -7767,7 +7886,37 @@ export class SessionManager implements KTeamService {
           wrapper: account.wrapper,
           message: error instanceof Error ? error.message : String(error),
         });
+        continue;
       }
+      // start() succeeded. From here on, never attribute daemon persistence
+      // failures to the wrapper or lose track of the already-live warden.
+      await writeProvenance(view).catch(error => {
+        this.emitTransient('fleet.warden_provenance_failed', {
+          wardenId: view.config.id,
+          targetId,
+          reportPath,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+      this.wardenState.failover = recordWardenSuccess(this.wardenState.failover ?? {}, account.wrapper);
+      // The assigned prompt and report template investigate exactly ONE
+      // anomaly block. Mark only that selected kind pending; simultaneous
+      // sibling kinds remain visibly unjudged instead of borrowing a warden
+      // that was never asked to assess them.
+      assignments[targetId] = {
+        wardenId: view.config.id,
+        spawnedAt: at,
+        capability,
+        kinds: [anomaly.kind],
+        reportPath,
+      };
+      spawned.push(view.config.id);
+      this.emitTransient('fleet.warden_assigned', {
+        wardenId: view.config.id,
+        targetId,
+        kind: anomaly.kind,
+        reportPath,
+      });
     }
 
     // Persist the carried-over queue (still-sus, no slot) and report drops.
@@ -7837,20 +7986,24 @@ export class SessionManager implements KTeamService {
       `- RESUME â \`kteam resume ${target.config.id}\` if the turn is dead but the session should continue.`,
       `- KILL â \`kteam stop ${target.config.id}\` ONLY if the session is demonstrably burning time/tokens with no progress.`,
       '  (Your token can stop only this assigned session.)',
+      '- NEEDS_HUMAN â no safe warden action can resolve the human decision.',
       '',
       '## Rules',
       '- Do NOT touch any other session. No git writes, no repository edits, no new non-warden sessions.',
       `- Write your report to EXACTLY: ${reportPath}`,
+      ...wardenReportInstructions(reportPath),
       '- The report MUST follow this machine-stable template (the Fleet UI parses lines 1 and 3):',
       '```',
-      'Verdict: LEAVE|NUDGE|RESUME|KILL',
+      'Verdict: LEAVE|NUDGE|RESUME|KILL|NEEDS_HUMAN',
       '',
       `# Warden report â ${target.config.id} (teammate ${target.config.teammate ?? '-'}, ${target.config.label ?? '-'})`,
       '',
-      '## Summary',
-      '<one- or two-sentence reason for the verdict>',
+      `- **Anomaly kind:** ${anomaly.kind}`,
       '',
-      '<free-form evidence sections>',
+      '## Summary',
+      '- **Outcome:** <short reason for the verdict>',
+      '',
+      '<point-form evidence sections>',
       '```',
       '- Then run: kteam signal done',
     ].join('\n');
@@ -7900,23 +8053,45 @@ export class SessionManager implements KTeamService {
     const reportPath = path.join(this.paths.wardenReports, `${at.replace(/[:.]/g, '-')}.md`);
     await mkdir(this.paths.wardenReports, { recursive: true, mode: 0o700 });
     const prompt = await this.buildWardenPrompt(anomalies, sessions, reportPath, at);
+    const provenanceFile = provenancePath(reportPath);
+    const writeProvenance = (spawnView: SessionView) =>
+      atomicJson(provenanceFile, buildWardenSpawnProvenance(spawnView, account));
+    const gateFirstTurnOnProvenance = async (spawnView: SessionView) => {
+      try {
+        await writeProvenance(spawnView);
+      } catch (error) {
+        throw new WardenProvenancePersistenceError(spawnView.config.id, reportPath, error);
+      }
+    };
+    let view: SessionView;
     try {
-      const view = await this.start({
-        prompt,
-        agent: account.wrapper,
-        model: account.model,
-        mode: 'auto',
-        label: WARDEN_LABEL,
-        name: 'warden-sweep',
-        cwd: this.paths.home,
-      });
-      this.wardenState.failover = recordWardenSuccess(this.wardenState.failover ?? {}, account.wrapper);
-      this.wardenState.lastSpawnAt = at;
-      this.wardenState.lastSpawnFingerprint = spawnKey;
-      await this.saveWardenState();
-      this.emitTransient('fleet.warden_spawned', { sessionId: view.config.id, count: anomalies.length, reportPath });
-      return { spawned: view.config.id };
+      view = await this.start(
+        {
+          prompt,
+          agent: account.wrapper,
+          model: account.model,
+          mode: 'auto',
+          label: WARDEN_LABEL,
+          name: 'warden-sweep',
+          cwd: this.paths.home,
+        },
+        {
+          beforeFirstTurn: gateFirstTurnOnProvenance,
+          onBootstrapFailure: () => rm(provenanceFile, { force: true }),
+        },
+      );
     } catch (error) {
+      const provenanceError = wardenProvenanceError(error);
+      if (provenanceError) {
+        this.wardenState.lastSpawnAt = at;
+        await this.saveWardenState();
+        this.emitTransient('fleet.warden_provenance_failed', {
+          wardenId: provenanceError.wardenId,
+          reportPath: provenanceError.reportPath,
+          message: provenanceError.message,
+        });
+        return { message: provenanceError.message };
+      }
       // The strike lands on the WRAPPER, so once demoted the next escalation
       // flows to the next configured account.
       this.recordWardenSpawnFailure(account.wrapper, error);
@@ -7930,6 +8105,21 @@ export class SessionManager implements KTeamService {
       this.emitTransient('fleet.warden_spawn_failed', { message, wrapper: account.wrapper });
       return { message };
     }
+    // The wrapper launched successfully. A daemon-side provenance write error
+    // must not strike it or make the live sweep warden invisible to state.
+    await writeProvenance(view).catch(error => {
+      this.emitTransient('fleet.warden_provenance_failed', {
+        wardenId: view.config.id,
+        reportPath,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+    this.wardenState.failover = recordWardenSuccess(this.wardenState.failover ?? {}, account.wrapper);
+    this.wardenState.lastSpawnAt = at;
+    this.wardenState.lastSpawnFingerprint = spawnKey;
+    await this.saveWardenState();
+    this.emitTransient('fleet.warden_spawned', { sessionId: view.config.id, count: anomalies.length, reportPath });
+    return { spawned: view.config.id };
   }
 
   private async buildWardenPrompt(
@@ -7998,7 +8188,13 @@ export class SessionManager implements KTeamService {
       '',
       '## Required output',
       `- Write a report to EXACTLY this path: ${reportPath}`,
-      '  It must state: what you found, what you did (per session), and what still needs a human.',
+      '- State what you found, what you did per session, and what still needs a human.',
+      '- Write one `## Anomaly: <session-id> â <teammate> / <label>` section per anomaly record; repeat a session in separate sections when it has multiple anomaly kinds.',
+      '- Put `- **Anomaly kind:** <kind>` inside EVERY anomaly section.',
+      '- Put `Verdict: LEAVE|NUDGE|RESUME|KILL|NEEDS_HUMAN` inside EVERY anomaly section.',
+      '- Put `- **Outcome:** <short reason>` directly under each verdict.',
+      '- Never use one fleet-wide verdict as the verdict for multiple sessions.',
+      ...wardenReportInstructions(reportPath),
       '- When the sweep is done, run: `kteam signal done`.',
       '',
       '',
@@ -8030,13 +8226,14 @@ export class SessionManager implements KTeamService {
     await atomicJson(this.paths.wardenState, this.wardenState);
   }
 
-  /** Broadcast a fleet-level (non-session) event to live listeners without
-   *  persisting it â transient by design (the anomaly file is the durable copy). */
-  private emitTransient(type: string, payload: unknown): void {
+  /** Broadcast a transient event to live listeners without persisting it.
+   *  Most are fleet-wide; a source adapter that must write a target session's
+   *  durable board needs that real session id on the event envelope. */
+  private emitTransient(type: string, payload: unknown, sessionId = 'fleet'): void {
     const event: KTeamEvent = {
       sequence: ++this.transientSequence,
       time: now(),
-      sessionId: 'fleet',
+      sessionId,
       turn: 0,
       type,
       source: 'daemon',
@@ -8046,14 +8243,17 @@ export class SessionManager implements KTeamService {
   }
 
   private async latestReport(): Promise<{ path: string; head: string } | undefined> {
-    const files = await readdir(this.paths.wardenReports).catch(() => [] as string[]);
+    const files = await readdir(this.paths.wardenReports).catch(error => {
+      if (isMissingPath(error)) return [] as string[];
+      throw error;
+    });
     const latest = files
       .filter(name => name.endsWith('.md'))
       .sort()
       .at(-1);
     if (!latest) return undefined;
     const file = path.join(this.paths.wardenReports, latest);
-    const text = await readFile(file, 'utf8').catch(() => '');
+    const text = await readWardenReportFromDisk(file);
     return { path: file, head: text.split('\n').slice(0, 12).join('\n') };
   }
 
@@ -8066,36 +8266,92 @@ export class SessionManager implements KTeamService {
   }
 
   /** Reconcile needs_human verdicts from recent warden reports into durable
-   *  session state: set `needsHuman` (reason) + `needsHumanKind` (the anomaly
-   *  class fingerprint used for sweep dedupe) and emit a transient
-   *  fleet.needs_human ONCE per flagging. Cheap: reads only the recent
-   *  reports already parsed by wardenVerdicts(). */
+   *  per-block requests. The scalar fields remain a short legacy/UI summary;
+   *  exact suppression and Attention identity use the plural request list. */
   private async reconcileNeedsHuman(sessions: SessionView[]): Promise<void> {
     const verdicts = await this.wardenVerdicts().catch(() => [] as WardenVerdict[]);
     const byId = new Map(sessions.map(view => [view.config.id, view]));
+    type NeedsHumanRequest = NonNullable<SessionState['needsHumanRequests']>[number];
+    const requestKey = (request: Pick<NeedsHumanRequest, 'reportPath' | 'anomalyKind'>): string =>
+      `${request.reportPath}\u0000${request.anomalyKind ?? ''}`;
+    const wasAcknowledged = (
+      acknowledged: SessionState['needsHumanAcknowledgedRequests'],
+      request: Pick<NeedsHumanRequest, 'reportPath' | 'anomalyKind'>,
+    ): boolean =>
+      (acknowledged ?? []).some(
+        item =>
+          item.reportPath === request.reportPath &&
+          (item.anomalyKind === undefined || item.anomalyKind === request.anomalyKind),
+      );
+    const requestsFrom = (state: SessionState, fallbackAt: string): NeedsHumanRequest[] => {
+      const requests = [...(state.needsHumanRequests ?? [])];
+      if (state.needsHuman && state.needsHumanReportPath) {
+        const legacy: NeedsHumanRequest = {
+          reason: state.needsHuman,
+          reportPath: state.needsHumanReportPath,
+          at: state.lastActivityAt ?? fallbackAt,
+          ...(state.needsHumanKind ? { anomalyKind: state.needsHumanKind } : {}),
+        };
+        if (!requests.some(request => requestKey(request) === requestKey(legacy))) requests.push(legacy);
+      }
+      return requests;
+    };
     for (const verdict of verdicts) {
       if (verdict.verdict !== 'needs_human' || !verdict.targetSession) continue;
       const view = byId.get(verdict.targetSession);
-      if (!view || view.state.needsHuman !== undefined) continue;
+      if (!view) continue;
       const reason = verdict.reason ?? 'a warden concluded this session needs a human decision';
-      // The anomaly kind at flag time keys the dedupe: a NEW anomaly class on
-      // the same session still surfaces.
-      const kind = this.lastSweep?.anomalies.find(item => item.sessionId === view.config.id)?.kind;
-      await this.store
-        .updateState<SessionState>(view.config.id, current => ({
-          ...current,
-          needsHuman: reason,
-          ...(kind ? { needsHumanKind: kind } : {}),
-        }))
-        .catch(() => undefined);
-      view.state.needsHuman = reason;
-      view.state.needsHumanKind = kind;
-      this.emitTransient('fleet.needs_human', {
-        sessionId: view.config.id,
-        teammate: view.config.teammate,
+      const kind = verdict.anomalyKind;
+      const request: NeedsHumanRequest = {
         reason,
         reportPath: verdict.reportPath,
-      });
+        at: verdict.at,
+        ...(kind ? { anomalyKind: kind } : {}),
+      };
+      if (wasAcknowledged(view.state.needsHumanAcknowledgedRequests, request)) continue;
+      const existingRequests = requestsFrom(view.state, verdict.at);
+      if (existingRequests.some(existing => requestKey(existing) === requestKey(request))) continue;
+      let added = false;
+      const persisted = await this.store
+        .updateState<SessionState>(view.config.id, current => {
+          if (wasAcknowledged(current.needsHumanAcknowledgedRequests, request)) return current;
+          const currentRequests = requestsFrom(current, verdict.at);
+          if (currentRequests.some(existing => requestKey(existing) === requestKey(request))) return current;
+          const shouldUpdateSummary =
+            current.needsHuman === undefined ||
+            (current.needsHumanKind !== CODEX_PICKER_QUARANTINE_KIND &&
+              parseWardenAnomalyKind(current.needsHumanKind) === undefined);
+          added = true;
+          return {
+            ...current,
+            ...(shouldUpdateSummary
+              ? {
+                  needsHuman: reason,
+                  needsHumanKind: kind,
+                  needsHumanReportPath: verdict.reportPath,
+                }
+              : {}),
+            needsHumanRequests: [...currentRequests, request],
+          };
+        })
+        .catch(() => undefined);
+      if (!persisted || !added) continue;
+      view.state.needsHuman = persisted.needsHuman;
+      view.state.needsHumanKind = persisted.needsHumanKind;
+      view.state.needsHumanReportPath = persisted.needsHumanReportPath;
+      view.state.needsHumanRequests = persisted.needsHumanRequests;
+      view.state.needsHumanAcknowledgedRequests = persisted.needsHumanAcknowledgedRequests;
+      this.emitTransient(
+        'fleet.needs_human',
+        {
+          sessionId: view.config.id,
+          teammate: view.config.teammate,
+          reason,
+          reportPath: verdict.reportPath,
+          anomalyKind: kind,
+        },
+        view.config.id,
+      );
     }
   }
 
@@ -8106,37 +8362,33 @@ export class SessionManager implements KTeamService {
   private async clearNeedsHuman(id: string, options: { clearCodexPickerQuarantine?: boolean } = {}): Promise<void> {
     await this.store
       .updateState<SessionState>(id, current => {
-        if (current.needsHuman === undefined) return current;
+        if (current.needsHuman === undefined && !(current.needsHumanRequests?.length ?? 0)) return current;
         if (current.needsHumanKind === CODEX_PICKER_QUARANTINE_KIND && !options.clearCodexPickerQuarantine)
           return current;
-        return { ...current, needsHuman: undefined, needsHumanKind: undefined };
+        const acknowledged = [...(current.needsHumanAcknowledgedRequests ?? [])];
+        const remember = (reportPath: string | undefined, anomalyKind: string | undefined): void => {
+          if (!reportPath) return;
+          const candidate = { reportPath, ...(anomalyKind ? { anomalyKind } : {}) };
+          const key = `${reportPath}\u0000${anomalyKind ?? ''}`;
+          if (!acknowledged.some(item => `${item.reportPath}\u0000${item.anomalyKind ?? ''}` === key))
+            acknowledged.push(candidate);
+        };
+        for (const request of current.needsHumanRequests ?? []) remember(request.reportPath, request.anomalyKind);
+        remember(current.needsHumanReportPath, current.needsHumanKind);
+        return {
+          ...current,
+          needsHuman: undefined,
+          needsHumanKind: undefined,
+          needsHumanReportPath: undefined,
+          needsHumanRequests: undefined,
+          needsHumanAcknowledgedRequests: acknowledged.slice(-200),
+        };
       })
       .catch(() => undefined);
   }
 
-  async wardenVerdicts(): Promise<WardenVerdict[]> {
-    const dir = this.paths.wardenReports;
-    const names = (await readdir(dir).catch(() => [] as string[])).filter(n => n.endsWith('.md'));
-    // Read only the most recent reports (by mtime) â bounded work.
-    const stats = await Promise.all(
-      names.map(async name => {
-        const p = path.join(dir, name);
-        const s = await stat(p).catch(() => undefined);
-        return s ? { path: p, mtimeMs: s.mtimeMs } : undefined;
-      }),
-    );
-    const recent = stats
-      .filter((x): x is { path: string; mtimeMs: number } => x !== undefined)
-      .sort((a, b) => b.mtimeMs - a.mtimeMs)
-      .slice(0, 40);
-    const files = await Promise.all(
-      recent.map(async r => ({
-        path: r.path,
-        mtimeMs: r.mtimeMs,
-        content: await readFile(r.path, 'utf8').catch(() => ''),
-      })),
-    );
-    return parseWardenReports(files.filter(f => f.content));
+  async wardenVerdicts(limit = 20): Promise<WardenVerdict[]> {
+    return readWardenVerdictsFromDisk(this.paths, limit);
   }
 
   /** The cached `kfleet usage` feed, projected for the browser and keyed by
@@ -8230,9 +8482,12 @@ export class SessionManager implements KTeamService {
     const dir = path.resolve(this.paths.wardenReports);
     const resolved = path.resolve(reportPath);
     if (path.dirname(resolved) !== dir || !resolved.endsWith('.md')) throw new Error('report not found');
-    return readFile(resolved, 'utf8').catch(() => {
-      throw new Error('report not found');
-    });
+    try {
+      return await readWardenReportFromDisk(resolved);
+    } catch (error) {
+      if (isMissingPath(error)) throw new Error('report not found');
+      throw error;
+    }
   }
 
   async wardenStatus(): Promise<WardenStatusView> {
@@ -8240,9 +8495,9 @@ export class SessionManager implements KTeamService {
     let fingerprint = this.lastSweep?.fingerprint ?? '';
     let lastSweepAt = this.lastSweep?.at ?? this.wardenState.lastSweepAt;
     if (!this.lastSweep) {
-      const disk = await readJson<{ at?: string; fingerprint?: string; anomalies?: WardenAnomaly[] }>(
+      const disk = await readJsonIfPresent<{ at?: string; fingerprint?: string; anomalies?: WardenAnomaly[] }>(
         this.paths.wardenAnomalies,
-      ).catch(() => undefined);
+      );
       if (disk) {
         anomalies = disk.anomalies ?? [];
         fingerprint = disk.fingerprint ?? '';
@@ -8269,7 +8524,7 @@ export class SessionManager implements KTeamService {
    *  and must not hold daemon bootstrap on an external probe. */
   async wardenAnomalies(): Promise<WardenAnomaly[]> {
     if (this.lastSweep) return this.lastSweep.anomalies;
-    const disk = await readJson<{ anomalies?: WardenAnomaly[] }>(this.paths.wardenAnomalies).catch(() => undefined);
+    const disk = await readJsonIfPresent<{ anomalies?: WardenAnomaly[] }>(this.paths.wardenAnomalies);
     return disk?.anomalies ?? [];
   }
 

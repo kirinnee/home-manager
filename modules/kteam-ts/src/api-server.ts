@@ -1,7 +1,7 @@
 import type { Server, ServerWebSocket } from 'bun';
 import { existsSync } from 'node:fs';
 import { join, normalize } from 'node:path';
-import type { KTeamService, SessionView, WardenConfigPatch } from './service';
+import type { KTeamService, SessionView, WardenAttentionView, WardenConfigPatch } from './service';
 import { SIGNAL_KINDS } from './types';
 import type { KTeamEvent, RuntimeControlRequest, SendRequest, SignalKind, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
@@ -122,6 +122,9 @@ export interface ApiServerOptions {
   runtimeModels?: RuntimeModelsApi;
   /** Durable, daemon-owned per-session attention records. */
   attention?: AttentionApi;
+  /** Fleet-wide Warden Attention view. Kept under `/v1/warden/` so the
+   *  existing warden-token prefix denial makes it admin-only. */
+  wardenAttention?: { view(): Promise<WardenAttentionView> };
   /** Admin-only Web Push enrollment and per-device management. */
   push?: PushApi;
   /** Fleet-wide historical analytics over the daemon-owned SQLite index. */
@@ -590,6 +593,10 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           if (url.pathname === '/v1/warden/config' && request.method === 'PATCH') {
             const patch = await body<WardenConfigPatch>(request);
             return json(await options.service.updateWardenConfig(patch));
+          }
+          if (url.pathname === '/v1/warden/attention' && request.method === 'GET') {
+            if (!options.wardenAttention) return json(unknownRoute(request.method, url.pathname), 404);
+            return json(await options.wardenAttention.view());
           }
           if (url.pathname === '/v1/gc' && request.method === 'GET') {
             const raw = Number(url.searchParams.get('limit') ?? '20');

@@ -19,6 +19,18 @@ import type { FsDiffView, FsFileView, FsListing } from './fs';
 import type { GitChangesView } from './git';
 import type { RuntimeModelCatalog } from './codex-runtime';
 
+// Fleet-wide, read-only Warden Attention projection. Re-exported here so the API
+// wire types live beside the other views (and can be mirrored into the UI).
+export type {
+  WardenAttentionView,
+  WardenAttentionOutcome,
+  FleetAttentionItem,
+  FleetAttentionSource,
+  WardenJudgement,
+  WardenJudgementState,
+  WardenJudgeProvenance,
+} from './warden-attention';
+
 export interface SearchResult {
   sessionId: string;
   teammate?: string;
