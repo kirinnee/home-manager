@@ -67,6 +67,7 @@ class FakeService implements KTeamService {
     this.lastActor = currentActor();
     return { ...view, disposition: 'delivered' as const };
   };
+  listSends = async () => [];
   runtime = async (_id: string, _input: RuntimeControlRequest) => view;
   answer = async (_id: string, _toolUseId: string, _labels: string[], _other?: string, _responses?: string[]) => view;
   interrupt = async (_id: string, _expectedToolUseId?: string) => view;

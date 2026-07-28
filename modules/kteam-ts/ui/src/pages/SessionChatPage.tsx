@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ImageOff, Loader2, MessageSquare, RotateCcw, Terminal, X } from 'lucide-react';
 import { api, ApiError, HAS_TOKEN } from '../lib/api';
 import { useFleet, useSession, useSessionEvents, useStore, useUiControls } from '../lib/store';
-import type { ChatRecord, KTeamEvent, SessionView } from '../types';
+import type { ChatRecord, KTeamEvent, SendRecord, SessionView } from '../types';
 import { Composer } from '../components/Composer';
 import { ComposerRuntime } from '../components/ComposerRuntime';
 import { QuestionForm } from '../components/QuestionForm';
@@ -40,6 +40,15 @@ import {
   peerFrom,
   type TranscriptBlock,
 } from '../lib/transcript';
+import {
+  foldSendRecords,
+  isSendLedgerEvent,
+  parseSendsResponse,
+  reconcileLocalSends,
+  selectLedgerChips,
+  sendBadge,
+  visibleUserRows,
+} from '../lib/sends';
 import {
   attachmentErrorCopy,
   attachmentErrorMessage,
@@ -177,6 +186,11 @@ export function SessionChatPage({
   const { status: liveStatus } = useFleet();
   const [records, setRecords] = useState<ChatRecord[]>([]);
   const [journalEvents, setJournalEvents] = useState<KTeamEvent[]>([]);
+  // THE DURABLE SEND LEDGER. Existence and fate of every message sent to this
+  // session, fetched from `GET /sends` and refreshed on live `control.send_*`
+  // events — NOT derived from the bounded journal tail below, which is exactly why
+  // a send older than that tail no longer loses its badge on refresh.
+  const [ledger, setLedger] = useState<SendRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [nextBefore, setNextBefore] = useState<number | null>(null);
   const [total, setTotal] = useState(0);
@@ -278,6 +292,7 @@ export function SessionChatPage({
     const superseded = () => loadId.current !== generation;
     setRecords([]);
     setJournalEvents([]);
+    setLedger([]);
     setError(null);
     setNextBefore(null);
     setLoadingInitial(true);
@@ -292,7 +307,7 @@ export function SessionChatPage({
         // The view goes through the store (one inflight request per session,
         // shared with the socket-driven refresh) so a deep link and the fleet
         // hydration cannot both GET the same session.
-        const [, page, eventTail] = await Promise.all([
+        const [, page, eventTail, sendLedger] = await Promise.all([
           store.fetchSession(sessionId),
           api.chatHistory(sessionId, undefined, PAGE_SIZE),
           // UI-only bounded fallback: full journals reach 19–47 MB and the
@@ -301,7 +316,15 @@ export function SessionChatPage({
           // degrade to today's slim turn-prompt row instead of downloading the
           // whole journal on every open. Named follow-up: add an indexed
           // server-side `types=` filter before widening or removing this tail.
+          //
+          // This tail is now used ONLY for transcript message placement. Badge and
+          // existence state come from the ledger below, so an eviction here costs a
+          // rewritten row at worst and can no longer lose a send.
           api.replay(sessionId, -2_000, 2_000).catch(() => []),
+          // Bounded and complete: whatever is still open plus recent settled rows.
+          // A daemon too old to serve the route 404s, which degrades to an empty
+          // ledger — i.e. exactly the pre-ledger behaviour, never a crash.
+          api.sends(sessionId).catch(() => []),
         ]);
         if (superseded()) return;
         setTotal(page.total);
@@ -314,6 +337,11 @@ export function SessionChatPage({
         setRecords(live => (live.length === 0 ? fresh : [...fresh, ...live]));
         const freshEvents = takeFreshJournal(eventTail.filter(isTranscriptJournalEvent));
         setJournalEvents(live => (live.length === 0 ? freshEvents : [...freshEvents, ...live]));
+        // Folded, so a live `send_*` refresh that raced this initial fetch is not
+        // thrown away: last snapshot per sendId wins, and the fresher fetch is
+        // folded LAST. That ordering is what makes the UNACCOUNTED → DELIVERED
+        // promotion monotonic instead of dependent on which response landed first.
+        setLedger(live => foldSendRecords(live, parseSendsResponse(sendLedger)));
         setNextBefore(page.offset);
         setAtStart(page.offset === 0);
         setPinSignal(n => n + 1);
@@ -341,7 +369,44 @@ export function SessionChatPage({
   // status/health transitions, quota — is applied by the store to the cached
   // SessionView this page reads, so there is no second copy to keep in sync and
   // no per-page refresh timer.
+  // LEDGER REFRESH ON LIVE TRANSITIONS.
+  //
+  // The event is a TRIGGER, not the data: badge state is always something the
+  // daemon confirmed on disk, so a `send_accepted`/`send_delivered`/
+  // `send_unaccounted`/`send_withdrawn` push causes a re-read of `GET /sends`
+  // rather than being folded in directly. That is what keeps one source of truth
+  // and makes a missed push self-healing (the next transition re-reads everything).
+  //
+  // Coalesced on a short timer because a batch drain settles several sends at
+  // once — three `send_delivered` pushes in one tick must cost one request, not
+  // three. The generation check drops a response that belongs to a session the
+  // reader has already navigated away from, matching the initial load's guard.
+  const ledgerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshLedger = useCallback(() => {
+    if (ledgerTimer.current) return;
+    const generation = loadId.current;
+    ledgerTimer.current = setTimeout(() => {
+      ledgerTimer.current = null;
+      void api
+        .sends(sessionId)
+        .then(payload => {
+          if (loadId.current !== generation) return;
+          setLedger(live => foldSendRecords(live, parseSendsResponse(payload)));
+        })
+        .catch(() => undefined);
+    }, 250);
+  }, [sessionId]);
+
+  useEffect(
+    () => () => {
+      if (ledgerTimer.current) clearTimeout(ledgerTimer.current);
+      ledgerTimer.current = null;
+    },
+    [sessionId],
+  );
+
   useSessionEvents(sessionId, (ev: KTeamEvent) => {
+    if (isSendLedgerEvent(ev)) refreshLedger();
     if (isTranscriptJournalEvent(ev)) {
       const key = journalEventKey(ev);
       if (!seenJournalKeys.current.has(key)) {
@@ -443,16 +508,16 @@ export function SessionChatPage({
   }, [nextBefore, sessionId, takeFresh]);
 
   // ---- derived -------------------------------------------------------------
-  const sendIndex = useMemo(() => buildSendIndex(journalEvents, sessionId), [journalEvents, sessionId]);
-  // The live turn gates inline-queue synthesis: a short send to a busy session
-  // leaves NO chat.user record, so buildTranscript materializes one once the
-  // turn it was queued in has closed — which is also the block the optimistic
-  // "queued" chip reaps against (see SendIndex.queued / synthesizeDeliveredQueued).
-  const currentTurn = view?.state.turn;
-  const blocks = useMemo(
-    () => buildTranscript(records, sendIndex, sessionId, currentTurn),
-    [records, sendIndex, sessionId, currentTurn],
-  );
+  // The ledger is passed in so a send older than the bounded journal tail keeps
+  // its logical message text on screen. It is a REPLACEMENT source only — it never
+  // adds a row the harness did not write.
+  const sendIndex = useMemo(() => buildSendIndex(journalEvents, sessionId, ledger), [journalEvents, sessionId, ledger]);
+  // NO CURRENT TURN. `buildTranscript` used to take it and synthesize a delivered
+  // user block for any inline queued send whose turn had advanced. The corpus
+  // showed drains happen mid-turn and in batches, so turn advancement proves
+  // nothing about a specific message; an unproven send is now a ledger row that
+  // can honestly say "unconfirmed" instead of a transcript row that lies.
+  const blocks = useMemo(() => buildTranscript(records, sendIndex, sessionId), [records, sendIndex, sessionId]);
   const pendingQ = useMemo(
     () =>
       view?.state.pendingQuestion
@@ -637,25 +702,56 @@ export function SessionChatPage({
     pendingRef.current = pending;
   }, [pending]);
 
-  // REAPING. A visible transcript block IS the proof of delivery, so it retires
-  // the optimistic box whatever the box currently claims — including 'sending'
-  // (the POST can outlive the record: the harness writes its transcript entry as
-  // soon as the text is submitted, while the daemon is still polling the pane for
-  // turn-started evidence) and including 'error' (measured: a send whose response
-  // was lost had in fact landed, and the box sat there reading "failed to send"
-  // next to the delivered message forever). Keeping either of those was the
-  // visible half of "message double send": the same text rendered twice.
+  // THE GENERIC CONTENT-BASED REAPER IS GONE. DO NOT REINTRODUCE IT.
   //
-  // Matched only against records that arrived AFTER this send, so re-sending
-  // text that already appears earlier in the transcript ("continue", "ok") is not
-  // reaped by its own predecessor.
-  useEffect(() => {
-    if (!pending.length) return;
-    setPending(p => {
-      const next = p.filter(x => !blocks.some(block => blockConfirmsPending(block, x)));
-      return next.length === p.length ? p : next;
-    });
-  }, [blocks, pending.length]);
+  // It used to DELETE pending rows from state whenever any `chat.user` block matched
+  // on text + time + attachments (`blockConfirmsPending`). Two things made that
+  // unsafe, and the second is why removing it is not optional:
+  //
+  //   1. Text is not identity. A later message that merely QUOTES an earlier send —
+  //      or a second send of the same words — satisfies the match, so an ACCEPTED or
+  //      UNACCOUNTED send could be retired by a row that is not it. That is the same
+  //      class of bug as the daemon's old substring matcher, which produced a
+  //      confirmed false delivery in the corpus.
+  //   2. It was DESTRUCTIVE. Because it removed the row from `pending` state, no
+  //      later correction could bring it back: `reconciled.unclaimedLocal` can only
+  //      re-render a row that still exists. So a wrongly reaped send was gone for
+  //      good, including its retry affordance.
+  //
+  // Local retirement is now owned entirely by the exact `requestId → sendId` ledger
+  // handover in `reconcileLocalSends`, which is IDENTITY-based and, crucially,
+  // NON-DESTRUCTIVE: a claimed row is merely hidden from the footer while its
+  // durable row renders in its place. If that durable row later retracts — a
+  // synchronous injection failure appends a tombstone and the fold drops it — the
+  // local row becomes unclaimed again and its "failed to send" chip and retry button
+  // reappear on their own. Deleting from state would have forfeited that.
+  //
+  // `pending` therefore accumulates claimed-but-hidden rows for the life of the
+  // mounted session. That is deliberate: they are small, bounded by how many messages
+  // one reader sends, and keeping them is what makes retraction recoverable.
+
+  // LOCAL ↔ DURABLE HANDOVER.
+  //
+  // An optimistic row is this browser's promise that it sent something; a durable
+  // row is the daemon's record that it did. Once the durable row exists it is
+  // strictly better information — it survives refresh, it carries a fate, and it is
+  // the same row every other client sees — so the local chip stands down and the
+  // ledger chip takes over.
+  //
+  // The join is exact where it can be (the daemon reuses this browser's request id
+  // as the send id) and conservative where it cannot: equal text, identical
+  // attachments, a forward-only time window, one-to-one. `PendingSend` structurally
+  // satisfies `LocalSend`, so `unclaimedLocal` comes back as the full rows the
+  // footer needs.
+  const reconciled = useMemo(() => reconcileLocalSends(pending, ledger), [pending, ledger]);
+  // Which durable rows still need a chip. Delivered rows are retired ONLY when
+  // their proof-backed row is actually on screen — chat history is paginated, so
+  // retiring on fate alone would render a delivered send whose row has scrolled out
+  // of the loaded page as nothing at all.
+  const ledgerChips = useMemo(() => selectLedgerChips(ledger, visibleUserRows(blocks)), [ledger, blocks]);
+  // Oldest-first for display: the footer reads top-to-bottom under the transcript,
+  // while the ledger hands rows back newest-first.
+  const ledgerRows = useMemo(() => [...ledgerChips].reverse(), [ledgerChips]);
 
   // ---- what a screen reader is told -----------------------------------------
   //
@@ -732,7 +828,10 @@ export function SessionChatPage({
   const [announcement, setAnnouncement] = useState('');
   useDebouncedEffect(() => setAnnouncement(statusMessage), [statusMessage], 600);
 
-  const sendFailed = pending.some(p => p.status === 'error');
+  // Only a send with NO durable row is a failure worth interrupting a screen
+  // reader for. A local row that errored because its RESPONSE was lost, while the
+  // daemon durably accepted it, is claimed by its ledger row and is not a failure.
+  const sendFailed = reconciled.unclaimedLocal.some(p => p.status === 'error');
   const alertMessage = useMemo(() => {
     if (error) return `${who}: this conversation could not be loaded. ${error}`;
     if (actionNotice?.kind === 'err') return `${who}: ${actionNotice.text}`;
@@ -959,9 +1058,14 @@ export function SessionChatPage({
     </>
   );
   const transcriptFooter =
-    pending.length || busy ? (
+    ledgerRows.length || reconciled.unclaimedLocal.length || busy ? (
       <div className="space-y-1 px-1 py-1">
-        {pending.map(p => (
+        {/* DURABLE rows first: they are older than anything this browser is still
+            holding optimistically, and they are what survives a refresh. */}
+        {ledgerRows.map(record => (
+          <LedgerMessage key={record.sendId} record={record} sessionId={sessionId} />
+        ))}
+        {reconciled.unclaimedLocal.map(p => (
           <PendingMessage
             key={p.key}
             text={p.text}
@@ -1280,12 +1384,74 @@ export function PendingAttachmentStrip({
 // edge like every other piece of row metadata. Widths are stable across the four
 // states (the label text changes, nothing around it moves), so the pending →
 // delivered transition cannot jump the layout.
+//
+// `delivered` USED TO BE GREEN AND SAY "delivered". It no longer does, because at
+// this point the only thing that has happened is that the daemon accepted the
+// message and reported a disposition — kteam's own belief, not harness proof. That
+// is exactly the class of claim this change exists to stop making: green
+// "delivered" on an HTTP 200 is how a message that never reached the agent gets
+// reported as read.
+//
+// The wording stays on the kteam side of the boundary for the same reason the
+// ledger's ACCEPTED copy does (lib/sends.ts sendBadge): "sent" would assert that
+// keystrokes reached the pane, which is unknown here. The optimistic row tops out
+// at "accepted — awaiting confirmation" and the durable ledger chip takes over from
+// there, so the reader still gets instant feedback without being told something
+// kteam cannot see. `queued` keeps its wording because that disposition IS the
+// harness's native input queue.
 const PENDING_BADGE: Record<PendingStatus, { label: string; tone: string }> = {
   sending: { label: 'sending', tone: 'border-border bg-surface-2 text-muted' },
   queued: { label: 'queued for next turn', tone: 'border-warn-border bg-warn-bg text-warn' },
-  delivered: { label: 'delivered', tone: 'border-ok-border bg-ok-bg text-ok' },
+  delivered: { label: 'accepted — awaiting confirmation', tone: 'border-warn-border bg-warn-bg text-warn' },
   error: { label: 'failed to send', tone: 'border-err-border bg-err-bg text-err' },
 };
+
+/** A DURABLE send row: one the daemon has recorded and this browser did not have
+ *  to remember. It renders the same bubble shell as the optimistic row so the
+ *  handover from local to durable is invisible — the badge changes, the message
+ *  does not move.
+ *
+ *  The badge sentence rides on `title` AND in visually-hidden text, so the state is
+ *  never communicated by colour alone: "unconfirmed" in muted grey is meaningless
+ *  to a screen reader without the sentence that explains it may still have landed. */
+function LedgerMessage({ record, sessionId }: { record: SendRecord; sessionId: string }) {
+  const { label, tone, detail } = sendBadge(record);
+  // Peer sends carry the daemon's attribution banner inside the text (the harness
+  // only reads text); show the prose and let the sender chip carry the author.
+  const { from, body } = peerFrom(record.message);
+  const attachments: StoredTranscriptImage[] = record.attachmentIds.map(attachmentId => ({
+    kind: 'attachment',
+    sessionId,
+    attachmentId,
+    filename: attachmentId,
+  }));
+  return (
+    <div className="kt-bubble-row">
+      <span className="sr-only">{from ? `${from.name} sent:` : 'You said:'}</span>
+      <div className="kt-bubble">
+        <div className="flex min-w-0 items-center gap-2 px-panel pt-1">
+          {from && <span className="shrink-0 text-[10.5px] font-medium text-muted">{from.name}</span>}
+          <span
+            className={cn(
+              'ml-auto inline-flex shrink-0 select-none items-center gap-1 rounded-sm border px-1.5 py-px text-[10.5px] font-medium leading-[1.5]',
+              tone,
+            )}
+            title={detail}
+          >
+            {label}
+          </span>
+        </div>
+        {body && (
+          <div className="kt-user-copy min-w-0 max-w-full whitespace-pre-wrap break-words px-panel pb-1.5 pt-0.5 text-[13px] leading-snug text-[color:var(--bubble-fg)]">
+            {body}
+          </div>
+        )}
+        <span className="sr-only">{detail}</span>
+        <TranscriptImageGallery images={attachments} className="px-panel pb-2 pt-1" />
+      </div>
+    </div>
+  );
+}
 
 function PendingMessage({
   text,
