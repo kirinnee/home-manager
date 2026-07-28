@@ -14,10 +14,13 @@
 // nodes, and the composer drops them wherever it likes. `DictationControl` is
 // the simple wrapper for mounting them together.
 //
-// THE ONE OUTPUT IS STILL THE DRAFT. On Insert, the EDITED transcript is placed
-// into the composer draft at the caret via the same `insertTranscript` path
-// dictation always used — never sent, never anywhere else. Editing happens in
-// the sheet first, so the reader sees the words before they commit them.
+// THE ONE OUTPUT IS STILL THE DRAFT — AND IT IS AUTOMATIC. `useDictation` now
+// owns insertion: on Stop it runs one clean final decode, enhances once, and
+// calls `onDraft` exactly once with the complete next draft placed at the
+// caret — never sent, never anywhere else. There is no review step and no
+// manual Insert. This bundle simply forwards `draft`/`selectionRef`, adapts the
+// `onDraft` result to the composer's `onDraftChange`, keeps a read-only live
+// caption for the panel, and closes the panel once the single insertion lands.
 //
 // HIDDEN, NOT DISABLED, when the browser has no microphone API. In an insecure
 // context `navigator.mediaDevices` is UNDEFINED — the capability is absent, not
@@ -33,27 +36,25 @@ import {
   type DictationPhase,
   type DictationDraftResult,
 } from '../hooks/useDictation';
-import { insertTranscript, readSelection, type SelectionLike } from '../lib/stt/draft';
-import {
-  completeTranscriptText,
-  editCommittedTranscript,
-  editProvisionalTranscript,
-  emptyLiveTranscript,
-  reduceLiveTranscript,
-} from '../lib/stt/live-transcription';
+import type { SelectionLike } from '../lib/stt/draft';
+import { completeTranscriptText, emptyLiveTranscript, reduceLiveTranscript } from '../lib/stt/live-transcription';
 import { DictationSheet, dictationStage, type DictationStage } from './DictationSheet';
+import { dictationShortcutAria, dictationShortcutLabel } from '../lib/stt/dictation-shortcut';
+import type { DictationShortcutBinding } from '../lib/stt/dictation-shortcut';
+import { useSttSettings } from '../lib/stt/stt-settings';
 
 export interface DictationControlProps {
   /** Only used to mine enhancement vocabulary. Dictation works without it. */
   sessionId?: string;
-  /** The live draft. Read at INSERT time, so text typed during the flow is
-   *  preserved and the transcript lands at the current caret. */
+  /** The live draft. Passed straight to the hook, which reads it at INSERT time
+   *  so text typed during the flow is preserved and the transcript lands at the
+   *  current caret. */
   draft: string;
   /** The composer's textarea, for the caret. Without it the transcript is
    *  appended at the end — the right fallback, not an error. */
   selectionRef?: { current: SelectionLike | null };
-  /** Receives the COMPLETE next draft plus where the caret should sit, exactly
-   *  as before. Called only from the sheet's explicit Insert. */
+  /** Receives the COMPLETE next draft plus where the caret should sit. Called
+   *  exactly once, automatically, after the final on-device decode. */
   onDraftChange: (result: DictationDraftResult) => void;
   disabled?: boolean;
   /** `compact` keeps the 44px square icon-only, for the mobile action column.
@@ -82,7 +83,7 @@ export function dictationStatusCopy(phase: DictationPhase, errorMessage?: string
 
 /** A mic-button press starts only when there is no flow to resume. This is the
  *  safety edge that makes hiding the panel non-destructive: recording,
- *  transcription, review, empty and error states all reopen in place. */
+ *  transcription, empty and error states all reopen in place. */
 export function dictationTriggerStartsFresh(input: {
   phase: DictationPhase;
   hasTranscript: boolean;
@@ -100,7 +101,12 @@ export interface DictationBundle {
   /** The dictation panel. Always returned (renders nothing while closed) so the
    *  composer can drop it in one place regardless of layout. */
   sheet: ReactNode;
+  /** The capture handle, wrapped so `start()` opens the panel too — an external
+   *  push-to-talk shortcut can begin live dictation AND make the panel visible. */
   handle: DictationHandle;
+  /** The same persisted binding printed in the mic tooltip, for the isolated
+   * Composer integration hook. */
+  shortcut: DictationShortcutBinding;
   /** The visible panel stage, exposed for the composer/tests. */
   stage: DictationStage;
 }
@@ -113,33 +119,32 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
   const [elapsedMs, setElapsedMs] = useState(0);
   const [wasCapturing, setWasCapturing] = useState(false);
   const startedAt = useRef(0);
+  const { settings: sttSettings } = useSttSettings();
 
-  // The current draft/selection, read at INSERT time rather than captured when
-  // the flow started — so a word typed while the sheet was open is not lost and
-  // the transcript lands where the caret actually is.
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
-  const onDraftChangeRef = useRef(onDraftChange);
-  onDraftChangeRef.current = onDraftChange;
-  const selectionRefRef = useRef(selectionRef);
-  selectionRefRef.current = selectionRef;
-  const liveTextRef = useRef(liveText);
-  liveTextRef.current = liveText;
+  // Panel-only UI reset. The hook already returns itself to idle after a
+  // successful insertion, so this just tears down the visible flow without
+  // touching a capture that is no longer running.
+  const closePanel = useCallback(() => {
+    setOpen(false);
+    setLiveText(current => emptyLiveTranscript(current.generation));
+    setElapsedMs(0);
+    setWasCapturing(false);
+  }, []);
 
-  // The capture machine. `draft: ''` so its commit returns the RAW spoken text
-  // (it has nothing to insert into); the actual insertion into the composer
-  // draft is done by this bundle on Insert, from the edited value.
+  // The capture machine now owns insertion end-to-end: it reads the real draft
+  // and caret, runs one final decode, enhances once, and calls `onDraft`
+  // exactly once with the complete next draft. Live transcript events are a
+  // disposable read-only preview reduced into `liveText` for the caption.
   const dictation = useDictation({
     sessionId,
-    draft: '',
-    // The live event consumer below owns reconciliation. This fallback exists
-    // only because `useDictation` remains usable without the sheet.
-    onDraft: result =>
-      setLiveText(current => ({
-        ...emptyLiveTranscript(current.generation),
-        committed: result.text,
-        complete: true,
-      })),
+    draft,
+    selectionRef,
+    onDraft: result => {
+      // The single, final output. Forward it, then close the flow — there is no
+      // review stage to leave open.
+      onDraftChange(result);
+      closePanel();
+    },
     onTranscriptEvent: event => setLiveText(current => reduceLiveTranscript(current, event)),
     disabled,
   });
@@ -147,7 +152,7 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
   const phase = dictation.phase;
 
   // Once we have passed through a capturing phase, a return to idle with no
-  // transcript is a too-short clip — a dead end worth naming ("didn't catch
+  // insertion is a too-short clip — a dead end worth naming ("didn't catch
   // that"), not the fresh-open state. Tracked as state so the stage recomputes.
   useEffect(() => {
     if (phase === 'requesting' || phase === 'recording' || phase === 'transcribing') setWasCapturing(true);
@@ -165,11 +170,8 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
 
   const reset = useCallback(() => {
     dictation.cancel();
-    setOpen(false);
-    setLiveText(emptyLiveTranscript());
-    setElapsedMs(0);
-    setWasCapturing(false);
-  }, [dictation]);
+    closePanel();
+  }, [closePanel, dictation]);
 
   const beginRecording = useCallback(() => {
     setLiveText(current => emptyLiveTranscript(current.generation));
@@ -196,29 +198,15 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
   }, [beginRecording, dictation.error, disabled, liveText, phase, wasCapturing]);
 
   const dismissPanel = useCallback(() => {
-    // Hiding is intentionally not cancellation. The recorder, transcript and
-    // elapsed clock continue; the mic button reopens this exact flow.
+    // Hiding is intentionally not cancellation. The recorder and elapsed clock
+    // continue; the mic button reopens this exact flow.
     setOpen(false);
   }, []);
-
-  const insert = useCallback(() => {
-    const text = completeTranscriptText(liveTextRef.current).trim();
-    if (text.length === 0) {
-      reset();
-      return;
-    }
-    const currentDraft = draftRef.current;
-    const [start, end] = readSelection(selectionRefRef.current?.current ?? null, currentDraft);
-    const result = insertTranscript(currentDraft, start, end, text);
-    onDraftChangeRef.current(result);
-    reset();
-  }, [reset]);
 
   const hasTranscript = completeTranscriptText(liveText).trim().length > 0;
 
   const stage = dictationStage({
     phase,
-    hasTranscript,
     hasError: dictation.error !== null,
     wasCapturing,
   });
@@ -239,11 +227,12 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
       disabled={disabled}
       aria-expanded={open}
       aria-pressed={dictation.recording}
+      aria-keyshortcuts={dictationShortcutAria(sttSettings.shortcut)}
       aria-label={flowActive ? 'Show dictation recorder' : 'Dictate a message'}
       title={
         flowActive
           ? 'Show the active dictation recorder'
-          : 'Dictate locally — edit words while recording, then insert. Nothing is ever sent for you.'
+          : `Dictate locally — ${dictationShortcutLabel(sttSettings.shortcut)}. Words appear as you speak and drop into your draft. Nothing is ever sent for you.`
       }
       onClick={openAndRecord}
     >
@@ -259,22 +248,22 @@ export function useDictationBundle(props: DictationControlProps): DictationBundl
       stage={stage}
       elapsedMs={elapsedMs}
       inputMonitor={dictation.inputMonitor}
-      committedText={liveText.committed}
-      provisionalText={liveText.provisional}
+      liveText={completeTranscriptText(liveText)}
       pendingSegments={dictation.pendingSegments}
-      onCommittedTextChange={value => setLiveText(current => editCommittedTranscript(current, value))}
-      onProvisionalTextChange={value => setLiveText(current => editProvisionalTranscript(current, value))}
       errorCode={dictation.error?.code}
       errorMessage={dictation.error?.message}
       onDismiss={dismissPanel}
       onStop={dictation.stop}
       onCancel={reset}
       onRetry={beginRecording}
-      onInsert={insert}
     />
   ) : null;
 
-  return { supported: dictation.supported, control, sheet, handle: dictation, stage };
+  // Wrap `start()` so a push-to-talk shortcut opens the panel before delegating
+  // to the real capture start; the rest of the handle contract is preserved.
+  const handle: DictationHandle = { ...dictation, start: openAndRecord };
+
+  return { supported: dictation.supported, control, sheet, handle, shortcut: sttSettings.shortcut, stage };
 }
 
 /** The simple mounting form: mic button and its non-modal panel together. */

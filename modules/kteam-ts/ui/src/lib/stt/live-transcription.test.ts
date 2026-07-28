@@ -1,14 +1,17 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  LiveTranscriptionError,
-  LocalSegmentQueue,
+  LocalAgreementTranscriber,
   completeTranscriptText,
-  editCommittedTranscript,
-  editProvisionalTranscript,
   emptyLiveTranscript,
-  padWithSilence,
+  longestCommonWordPrefix,
+  normalizeAgreementWord,
+  padTrailingSilence,
+  peakFrameRms,
   reduceLiveTranscript,
-  type SegmentTranscript,
+  unreadableTranscriptReason,
+  type LiveTranscriptSnapshot,
+  type TimedTranscriptWord,
+  type TranscriptHypothesis,
 } from './live-transcription';
 
 function deferred<T>() {
@@ -22,135 +25,293 @@ function deferred<T>() {
 }
 
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+const tone = (milliseconds: number, amplitude = 0.1) => new Float32Array(milliseconds).fill(amplitude);
 
-describe('LocalSegmentQueue', () => {
-  test('runs exactly one local decode at a time and publishes in segment order', async () => {
-    const first = deferred<string>();
-    const second = deferred<string>();
-    const calls: number[] = [];
-    const results: SegmentTranscript[] = [];
-    const queue = new LocalSegmentQueue({
-      transcribe: samples => {
-        calls.push(samples[0] as number);
-        return calls.length === 1 ? first.promise : second.promise;
-      },
-      onTranscript: result => results.push(result),
-    });
-    queue.enqueue({ id: 0, samples: new Float32Array([1]) });
-    queue.enqueue({ id: 1, samples: new Float32Array([2]) });
-    await tick();
-    expect(calls).toEqual([1]);
-    first.resolve('one');
-    await tick();
-    expect(calls).toEqual([1, 2]);
-    second.resolve('two');
-    await queue.finish();
-    expect(results.map(result => [result.id, result.text])).toEqual([
-      [0, 'one'],
-      [1, 'two'],
-    ]);
+function words(...items: Array<string | [string, number]>): TimedTranscriptWord[] {
+  return items.map((item, index) => {
+    const [text, confidence] = Array.isArray(item) ? item : [item, 0.9];
+    return {
+      text,
+      startTime: index * 0.2,
+      endTime: index * 0.2 + 0.16,
+      confidence,
+    };
   });
+}
 
-  test('retries one empty result with leading and trailing silence', async () => {
-    const lengths: number[] = [];
-    const results: SegmentTranscript[] = [];
-    const queue = new LocalSegmentQueue({
-      sampleRate: 1_000,
-      retryPaddingMs: 100,
-      transcribe: async samples => {
-        lengths.push(samples.length);
-        return lengths.length === 1 ? '' : 'recovered';
-      },
-      onTranscript: result => results.push(result),
-    });
-    queue.enqueue({ id: 0, samples: new Float32Array(300).fill(0.2) });
-    await queue.finish();
-    expect(lengths).toEqual([300, 500]);
-    expect(results).toEqual([{ id: 0, text: 'recovered', attempts: 2 }]);
+function hypothesis(items: Array<string | [string, number]>, processingMs = 5): TranscriptHypothesis {
+  const timed = words(...items);
+  return {
+    text: timed.map(word => word.text).join(' '),
+    words: timed,
+    confidence: timed.reduce((total, word) => total + (word.confidence ?? 0), 0) / Math.max(1, timed.length),
+    processingMs,
+  };
+}
+
+function make(
+  transcribe: (samples: Float32Array, signal: AbortSignal) => Promise<TranscriptHypothesis>,
+  updates: LiveTranscriptSnapshot[],
+  overrides: Partial<ConstructorParameters<typeof LocalAgreementTranscriber>[0]> = {},
+) {
+  return new LocalAgreementTranscriber({
+    sampleRate: 1_000,
+    intervalMs: 1_000,
+    maxBufferMs: 4_000,
+    contextMs: 0,
+    edgeGuardMs: 0,
+    paddingMs: 0,
+    minAudioMs: 100,
+    minPeakRms: 0.001,
+    minPassConfidence: 0.15,
+    minWordConfidence: 0.15,
+    minStableWords: 2,
+    transcribe,
+    onUpdate: update => updates.push(update),
+    ...overrides,
   });
+}
 
-  test('two empty voiced decodes are explicit data-loss prevention, not a skipped id', async () => {
-    let reported: unknown = null;
-    const queue = new LocalSegmentQueue({
-      transcribe: async () => '',
-      onTranscript: () => {
-        throw new Error('must not publish empty text');
-      },
-      onError: error => {
-        reported = error;
-      },
-    });
-    queue.enqueue({ id: 0, samples: new Float32Array([0.2]) });
-    await expect(queue.finish()).rejects.toMatchObject({ code: 'empty-segment' });
-    expect(reported).toBeInstanceOf(LiveTranscriptionError);
-  });
-
-  test('caps backlog instead of accumulating increasingly stale audio', async () => {
-    const blocked = deferred<string>();
-    const queue = new LocalSegmentQueue({
-      maxPending: 2,
-      transcribe: () => blocked.promise,
-      onTranscript: () => {},
-    });
-    queue.enqueue({ id: 0, samples: new Float32Array([1]) });
-    queue.enqueue({ id: 1, samples: new Float32Array([2]) });
-    expect(() => queue.enqueue({ id: 2, samples: new Float32Array([3]) })).toThrow(
-      expect.objectContaining({ code: 'backlog' }),
+describe('hypothesis quality', () => {
+  test('uses concrete empty, gibberish, confidence, and timestamp rules', () => {
+    expect(unreadableTranscriptReason({ text: '', words: [], confidence: null })).toBe('empty');
+    expect(unreadableTranscriptReason({ text: '........', words: [], confidence: null })).toBe('gibberish');
+    expect(unreadableTranscriptReason({ text: 'aaaaaaaa', words: words('aaaaaaaa'), confidence: 0.9 })).toBe(
+      'gibberish',
     );
-    queue.cancel();
-    blocked.resolve('late');
+    expect(unreadableTranscriptReason({ text: 'hello', words: words('hello'), confidence: 0.1 })).toBe(
+      'low-confidence',
+    );
+    expect(unreadableTranscriptReason({ text: 'hello', words: [], confidence: 0.9 })).toBe('missing-timestamps');
+    expect(
+      unreadableTranscriptReason({
+        text: 'hello',
+        words: [{ text: 'hello', startTime: 2, endTime: 1, confidence: 0.9 }],
+        confidence: 0.9,
+      }),
+    ).toBe('invalid-timestamps');
+    expect(
+      unreadableTranscriptReason({
+        text: 'hello world',
+        words: words('hello'),
+        timestampsValid: false,
+        confidence: 0.9,
+      }),
+    ).toBe('invalid-timestamps');
+  });
+
+  test('a final batch result may be readable without timestamps', () => {
+    expect(
+      unreadableTranscriptReason({ text: 'hello there', words: [], confidence: null }, { requireTimestamps: false }),
+    ).toBeNull();
+  });
+});
+
+describe('word agreement primitives', () => {
+  test('normalizes casing/Unicode but keeps punctuation provisional', () => {
+    expect(normalizeAgreementWord('  HéLLo  ')).toBe('héllo');
+    expect(longestCommonWordPrefix(words('Hello', 'world,'), words('hello', 'world.'))).toBe(1);
+  });
+
+  test('finds only the consecutive shared prefix', () => {
+    expect(longestCommonWordPrefix(words('one', 'two', 'three'), words('one', 'two', 'changed'))).toBe(2);
+    expect(longestCommonWordPrefix(words('one'), words('changed', 'one'))).toBe(0);
+  });
+});
+
+describe('audio helpers', () => {
+  test('trailing padding preserves the live samples exactly', () => {
+    const padded = padTrailingSilence(new Float32Array([0.25, -0.5]), 1_000, 2);
+    expect([...padded]).toEqual([0.25, -0.5, 0, 0]);
+  });
+
+  test('peak-frame RMS still sees a short word inside a long quiet buffer', () => {
+    const audio = new Float32Array(1_000);
+    audio.fill(0.1, 400, 420);
+    expect(peakFrameRms(audio, 1_000)).toBeCloseTo(0.1, 6);
+  });
+});
+
+describe('LocalAgreementTranscriber', () => {
+  test('publishes while speech is continuous; no pause or VAD endpoint is involved', async () => {
+    const updates: LiveTranscriptSnapshot[] = [];
+    const stream = make(async () => hypothesis(['hello', 'world']), updates);
+    stream.push(tone(1_000));
+    await tick();
+    expect(updates.at(-1)?.text).toBe('hello world');
+    expect(updates.at(-1)?.stats.firstVisibleAudioMs).toBe(1_000);
+    stream.cancel();
+  });
+
+  test('never publishes a word that begins wholly inside synthetic padding', async () => {
+    const updates: LiveTranscriptSnapshot[] = [];
+    const stream = make(
+      async samples => ({
+        text: 'real hallucination',
+        words: [
+          { text: 'real', startTime: 0.2, endTime: 0.5, confidence: 0.9 },
+          { text: 'hallucination', startTime: 1.1, endTime: 1.3, confidence: 0.9 },
+        ],
+        confidence: 0.9,
+        audioMs: samples.length,
+      }),
+      updates,
+      { paddingMs: 500 },
+    );
+
+    stream.push(tone(1_000));
+    await tick();
+
+    expect(updates.at(-1)?.text).toBe('real');
+    stream.cancel();
+  });
+
+  test('LocalAgreement-2 commits a stable prefix and freely back-edits only the tail', async () => {
+    const passes = [
+      hypothesis(['hello', 'how', 'ar']),
+      hypothesis(['hello', 'how', 'are', 'you']),
+      hypothesis(['are', 'they']),
+    ];
+    const updates: LiveTranscriptSnapshot[] = [];
+    let call = 0;
+    const stream = make(async () => passes[call++]!, updates);
+
+    stream.push(tone(1_000));
+    await tick();
+    stream.push(tone(1_000));
+    await tick();
+    expect(updates.at(-1)).toMatchObject({ committed: 'hello how', provisional: 'are you' });
+
+    stream.push(tone(1_000));
+    await tick();
+    expect(updates.at(-1)).toMatchObject({ committed: 'hello how', provisional: 'are they' });
+    expect(updates.at(-1)?.stats.committedRevisionCount).toBe(0);
+    expect(updates.at(-1)?.stats.provisionalRewriteCount).toBeGreaterThan(0);
+    stream.cancel();
+  });
+
+  test('coalesces every stale cadence boundary into one newest snapshot', async () => {
+    const blocked = deferred<TranscriptHypothesis>();
+    const updates: LiveTranscriptSnapshot[] = [];
+    const lengths: number[] = [];
+    let call = 0;
+    const stream = make(
+      async samples => {
+        lengths.push(samples.length);
+        call += 1;
+        return call === 1 ? blocked.promise : hypothesis(['newest', 'audio']);
+      },
+      updates,
+      { maxBufferMs: 8_000 },
+    );
+
+    stream.push(tone(1_000));
+    await tick();
+    stream.push(tone(1_000));
+    stream.push(tone(1_000));
+    stream.push(tone(1_000));
+    stream.push(tone(1_000));
+    expect(lengths).toEqual([1_000]);
+
+    blocked.resolve(hypothesis(['first', 'pass']));
+    await tick();
+    await tick();
+    expect(lengths).toEqual([1_000, 5_000]);
+    stream.cancel();
+  });
+
+  test('discards bad passes without killing the stream', async () => {
+    const passes: TranscriptHypothesis[] = [
+      { text: '', words: [], confidence: null },
+      hypothesis([['uncertain', 0.05]]),
+      hypothesis(['clear', 'speech']),
+    ];
+    const updates: LiveTranscriptSnapshot[] = [];
+    const discarded: string[] = [];
+    let call = 0;
+    const stream = make(async () => passes[call++]!, updates, { onDiscard: reason => discarded.push(reason) });
+
+    for (let index = 0; index < 3; index += 1) {
+      stream.push(tone(1_000));
+      await tick();
+    }
+    expect(discarded).toEqual(['empty', 'low-confidence']);
+    expect(updates.at(-1)?.text).toBe('clear speech');
+    expect(updates.at(-1)?.stats.discardedPasses).toBe(2);
+    stream.cancel();
+  });
+
+  test('hard-bounds per-iteration audio when nothing ever stabilizes', async () => {
+    const updates: LiveTranscriptSnapshot[] = [];
+    let call = 0;
+    const stream = make(async () => hypothesis([`word-${call++}`, 'tail']), updates, {
+      intervalMs: 500,
+      maxBufferMs: 2_000,
+    });
+    for (let index = 0; index < 16; index += 1) {
+      stream.push(tone(500));
+      await tick();
+    }
+    const snapshot = stream.snapshot();
+    expect(snapshot.stats.decodeCount).toBeGreaterThan(8);
+    expect(Math.max(...snapshot.stats.iterationAudioMs)).toBeLessThanOrEqual(2_000);
+    expect(snapshot.stats.maxDecodedAudioMs).toBeLessThanOrEqual(2_000);
+    expect(snapshot.stats.maxModelInputAudioMs).toBeLessThanOrEqual(2_000);
+    expect(snapshot.stats.forcedAudioDropMs).toBeGreaterThan(0);
+    stream.cancel();
+  });
+
+  test('finish decodes a short final tail once and marks the result complete', async () => {
+    const updates: LiveTranscriptSnapshot[] = [];
+    const stream = make(async () => hypothesis(['short', 'tail']), updates, { intervalMs: 2_000 });
+    stream.push(tone(500));
+    const final = await stream.finish();
+    expect(final).toMatchObject({ text: 'short tail', committed: 'short tail', provisional: '', complete: true });
   });
 
   test('logical cancellation suppresses a late non-abortable model result', async () => {
-    const blocked = deferred<string>();
-    const results: SegmentTranscript[] = [];
-    const queue = new LocalSegmentQueue({
-      transcribe: () => blocked.promise,
-      onTranscript: result => results.push(result),
-    });
-    queue.enqueue({ id: 0, samples: new Float32Array([1]) });
+    const blocked = deferred<TranscriptHypothesis>();
+    const updates: LiveTranscriptSnapshot[] = [];
+    const stream = make(() => blocked.promise, updates);
+    stream.push(tone(1_000));
     await tick();
-    queue.cancel();
-    blocked.resolve('too late');
+    stream.cancel();
+    blocked.resolve(hypothesis(['too', 'late']));
     await tick();
-    expect(results).toEqual([]);
-    expect(queue.pending).toBe(0);
+    expect(updates).toEqual([]);
+    expect(stream.pendingDecodes).toBe(0);
   });
 });
 
-describe('silence padding', () => {
-  test('preserves samples exactly between zero pads', () => {
-    const original = new Float32Array([0.25, -0.5]);
-    const padded = padWithSilence(original, 1_000, 2);
-    expect([...padded]).toEqual([0, 0, 0.25, -0.5, 0, 0]);
-  });
-});
-
-describe('live transcript ownership', () => {
-  test('reader edits to committed and provisional text survive later segments', () => {
+describe('read-only preview reducer', () => {
+  test('replaces only the model-owned hypothesis and ignores stale generations', () => {
     let state = reduceLiveTranscript(emptyLiveTranscript(), { type: 'reset', generation: 7 });
-    state = reduceLiveTranscript(state, { type: 'segment', generation: 7, id: 0, text: 'hello' });
-    state = editProvisionalTranscript(state, 'Hello, Kirin');
-    state = reduceLiveTranscript(state, { type: 'segment', generation: 7, id: 1, text: 'second phrase' });
-    expect(state.committed).toBe('Hello, Kirin');
-    expect(state.provisional).toBe('second phrase');
+    state = reduceLiveTranscript(state, {
+      type: 'hypothesis',
+      generation: 7,
+      committed: 'hello',
+      provisional: 'how ar',
+    });
+    expect(completeTranscriptText(state)).toBe('hello how ar');
+    const current = state;
+    expect(
+      reduceLiveTranscript(state, {
+        type: 'hypothesis',
+        generation: 6,
+        committed: 'old',
+        provisional: 'result',
+      }),
+    ).toBe(current);
 
-    state = editCommittedTranscript(state, 'Reader-owned first phrase');
-    state = reduceLiveTranscript(state, { type: 'complete', generation: 7 });
-    expect(state.committed).toBe('Reader-owned first phrase second phrase');
-    expect(state.provisional).toBe('');
-    expect(state.complete).toBe(true);
-  });
-
-  test('stale generations, skipped ids and post-completion results cannot overwrite text', () => {
-    let state = reduceLiveTranscript(emptyLiveTranscript(), { type: 'reset', generation: 4 });
-    const original = state;
-    expect(reduceLiveTranscript(state, { type: 'segment', generation: 3, id: 0, text: 'old' })).toBe(original);
-    expect(reduceLiveTranscript(state, { type: 'segment', generation: 4, id: 2, text: 'skipped' })).toBe(original);
-    state = reduceLiveTranscript(state, { type: 'segment', generation: 4, id: 0, text: 'kept' });
-    state = reduceLiveTranscript(state, { type: 'complete', generation: 4 });
-    const completed = state;
-    expect(reduceLiveTranscript(state, { type: 'segment', generation: 4, id: 1, text: 'late' })).toBe(completed);
-    expect(completeTranscriptText(completed)).toBe('kept');
+    state = reduceLiveTranscript(state, { type: 'complete', generation: 7, text: 'Hello, how are you?' });
+    expect(state).toMatchObject({ committed: 'Hello, how are you?', provisional: '', complete: true });
+    expect(
+      reduceLiveTranscript(state, {
+        type: 'hypothesis',
+        generation: 7,
+        committed: 'cannot',
+        provisional: 'overwrite',
+      }),
+    ).toBe(state);
   });
 });

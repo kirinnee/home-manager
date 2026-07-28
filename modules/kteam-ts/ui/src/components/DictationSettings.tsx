@@ -29,6 +29,7 @@ import {
   type PrepareProgress,
 } from '../lib/stt/local-engine';
 import { readSttCapabilities } from '../lib/stt/capabilities';
+import { DictationShortcutPicker } from './DictationShortcutPicker';
 
 /** Human bytes, one decimal, MB/GB only — the two units these numbers live in. */
 export function formatBytes(bytes: number): string {
@@ -53,7 +54,7 @@ export const LOCAL_MODE_TRADEOFFS: readonly string[] = [
 ] as const;
 
 export const LOCAL_MODE_SUMMARY =
-  'Everything happens inside this browser. Silence-aligned phrases are transcribed while you keep speaking; microphone audio is never sent to your box or a third party.';
+  'Everything happens inside this browser. Fresh snapshots are transcribed while you keep speaking, without waiting for a pause; microphone audio is never sent to your box or a third party.';
 
 /** Said plainly next to the enhancement toggle. The capitalised phrase is the
  *  promise: a separate verifier compares the before and after and throws the
@@ -68,7 +69,7 @@ export const ENHANCEMENT_SOURCES_EXPLANATION =
   'It knows a word three ways, tried in this order: your words below (which always win), your context, and words used in the recent conversation. Everything runs instantly on this device — no AI model, nothing sent anywhere. When it is not sure, it changes nothing.';
 
 export const DICTATION_SAFETY_NOTE =
-  'Microphone audio stays in this browser. Dictated text remains editable and only lands in the message box when you choose Insert. Nothing is ever sent for you.';
+  'Microphone audio stays in this browser. Stop runs one final local decode and enhancement pass, then inserts the result once at your current caret. Nothing is ever sent for you.';
 
 /** Above the free-text context field. It has to establish two things fast:
  *  paste anything (it is prose, not a format), and only single words can ever
@@ -306,6 +307,9 @@ export function DictationSettings() {
           )}
         </div>
       </section>
+
+      {/* ---- push-to-talk shortcut ---- */}
+      <DictationShortcutPicker binding={settings.shortcut} onChange={shortcut => update({ shortcut })} />
 
       {/* ---- enhancement ---- */}
       <div className="flex flex-col gap-2">
