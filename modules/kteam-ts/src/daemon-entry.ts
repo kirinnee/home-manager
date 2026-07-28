@@ -18,6 +18,8 @@ import { loadDaemonSecretsEnvironment } from './daemon-secrets';
 import { PushService } from './push-service';
 import { TerminalApi } from './terminal-api';
 import { TerminalService } from './terminal-service';
+import { BrowserApi } from './browser-api';
+import { BrowserService } from './browser-service';
 
 const secretsStatus = loadDaemonSecretsEnvironment();
 if (secretsStatus === 'failed') {
@@ -113,6 +115,16 @@ const terminalService = new TerminalService(paths, {
     ),
 });
 const terminalApi = new TerminalApi(terminalService);
+// Remote browsers share the daemon's canonical session registry. The service
+// owns all Chrome/Playwright children so daemon shutdown can drain them.
+const browserService = new BrowserService(paths, {
+  resolve: async ref =>
+    manager.get(ref).then(
+      view => view.config.id,
+      () => undefined,
+    ),
+});
+const browserApi = new BrowserApi(browserService);
 // Attention is a separate durable primitive; its source adapter listens to the
 // existing task/session streams but never presents notifications itself.
 const attentionSessions = {
@@ -145,6 +157,7 @@ const apiOptions = {
   tasks: taskApi,
   pins: pinApi,
   terminals: terminalApi,
+  browser: browserApi,
   attention: attentionApi,
   push: pushService.api,
   analytics,
@@ -154,7 +167,7 @@ const apiOptions = {
 const server = await bindWithRetry(() => startApiServer(apiOptions)).catch(async error => {
   attentionSources.close();
   await pushService.close();
-  await Promise.allSettled([manager.close(), stt.close(), terminalService.close()]);
+  await Promise.allSettled([manager.close(), stt.close(), terminalService.close(), browserService.close()]);
   throw error;
 });
 // Write the pid file only AFTER the bind succeeded — a loser of the bind race
@@ -190,6 +203,7 @@ const stop = async (reason: string) => {
         manager.close(),
         stt.close(),
         terminalService.close(),
+        browserService.close(),
         ...(analytics ? [analytics.close()] : []),
       ]);
       return true;

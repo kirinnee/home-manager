@@ -8,12 +8,13 @@
   },
   "scripts": {
     "dev": "bun run ./src/index.ts",
-    "build": "bun build ./src/index.ts ./src/daemon-entry.ts ./src/stt-worker.ts --outdir ./dist --target bun",
+    "build": "bun build ./src/index.ts ./src/daemon-entry.ts ./src/stt-worker.ts --outdir ./dist --target bun && bun build ./src/browser-playwright-worker.mjs --outfile ./dist/browser-playwright-worker.mjs --target node --external playwright-core",
     "test": "bun test",
     "check": "tsc --noEmit && bun test"
   },
   "dependencies": {
     "commander": "^12.0.0",
+    "playwright-core": "^1.62.0",
     "web-push": "^3.6.7"
   },
   "devDependencies": {

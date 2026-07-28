@@ -29,6 +29,10 @@ import type { TerminalApi } from './terminal-api';
 import { isTerminalPath, matchTerminalRoute, terminalWardenDenial } from './terminal-api';
 import type { TerminalStreamBridge, TerminalStreamChunk } from './terminal-stream';
 import { isTerminalError } from './terminal-types';
+import type { BrowserApi } from './browser-api';
+import { browserWardenDenial, isBrowserPath, matchBrowserRoute } from './browser-api';
+import type { BrowserStreamBridge, BrowserStreamChunk } from './browser-stream';
+import { isBrowserError } from './browser-types';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
 // single-file shell remains the fallback so the daemon never 404s its own UI.
@@ -62,9 +66,22 @@ interface TerminalSocketData {
   closed: boolean;
 }
 
-type SocketData = EventSocketData | TerminalSocketData;
+interface BrowserSocketData {
+  kind: 'browser';
+  sessionId: string;
+  /** Resolved from the authenticated request before the upgrade. */
+  actor: KTeamEvent['source'];
+  bridge?: BrowserStreamBridge;
+  /** Input can arrive while the async screencast attachment is opening. */
+  pending: BrowserStreamChunk[];
+  pendingBytes: number;
+  closed: boolean;
+}
+
+type SocketData = EventSocketData | TerminalSocketData | BrowserSocketData;
 
 const MAX_PENDING_TERMINAL_INPUT_BYTES = 1024 * 1024;
+const MAX_PENDING_BROWSER_INPUT_BYTES = 1024 * 1024;
 
 /** Parse `?sessionId=a&sessionId=b` and `?sessionId=a,b` into a de-duplicated list. */
 function subscribedSessions(url: URL): string[] {
@@ -97,6 +114,8 @@ export interface ApiServerOptions {
   pins?: PinApi;
   /** Admin-only independent shell terminals, including their WebSocket stream. */
   terminals?: TerminalApi;
+  /** Per-session remote browser actions and the human-admin screencast. */
+  browser?: BrowserApi;
   /** Durable, daemon-owned per-session attention records. */
   attention?: AttentionApi;
   /** Admin-only Web Push enrollment and per-device management. */
@@ -148,6 +167,8 @@ async function wardenScopeDenial(
   if (pinDenial) return forbidden(pinDenial);
   const terminalDenial = terminalWardenDenial(method, pathname);
   if (terminalDenial) return forbidden(terminalDenial);
+  const browserDenial = browserWardenDenial(method, pathname);
+  if (browserDenial) return forbidden(browserDenial);
   const attentionDenial = attentionWardenDenial(method, pathname);
   if (attentionDenial) return forbidden(attentionDenial);
   const pushDenial = pushWardenDenial(method, pathname);
@@ -369,6 +390,11 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
     idleTimeout: 255,
     async fetch(request, serverInstance) {
       const url = new URL(request.url);
+      // WHATWG URL parsing canonicalizes dot segments (including encoded dot
+      // segments) before routing. Keep every browser classifier on this one
+      // normalized pathname so the warden gate, upgrade, and HTTP mount cannot
+      // disagree about which surface a request targets.
+      const pathname = url.pathname;
       if (url.pathname === '/stt-models' || url.pathname.startsWith('/stt-models/')) {
         if (!options.stt) return json(unknownRoute(request.method, url.pathname), 404);
         return await options.stt.handlePublicModel(request, url);
@@ -379,7 +405,9 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
       // traversal-shaped session id into a route that TerminalApi rejected.
       const terminalRoute = options.terminals ? matchTerminalRoute(url.pathname) : null;
       const isTerminalWebSocket = terminalRoute?.kind === 'stream' && wantsWebSocket;
-      const isWebSocket = isEventWebSocket || isTerminalWebSocket;
+      const browserRoute = options.browser ? matchBrowserRoute(pathname) : null;
+      const isBrowserWebSocket = browserRoute?.kind === 'stream' && wantsWebSocket;
+      const isWebSocket = isEventWebSocket || isTerminalWebSocket || isBrowserWebSocket;
       const bearer = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
       // Loopback requesters may already read the token file, so serving them
       // the token grants nothing new. NON-loopback requesters (KTEAM_HOST set,
@@ -485,6 +513,23 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
                 kind: 'terminal',
                 sessionId: canonical.sessionId,
                 terminalId: canonical.terminalId,
+                actor,
+                pending: [],
+                pendingBytes: 0,
+                closed: false,
+              },
+            });
+            return upgraded ? undefined : json({ error: 'websocket upgrade failed' }, 400);
+          }
+          if (isBrowserWebSocket && browserRoute?.kind === 'stream' && options.browser) {
+            // BrowserApi proves human-admin authorization and canonical session
+            // ownership before the protocol switch, then repeats it while the
+            // stream opens. `actor` is derived only by resolveApiActor above.
+            const sessionId = await options.browser.authorizeStream(browserRoute.sessionId, actor);
+            const upgraded = serverInstance.upgrade(request, {
+              data: {
+                kind: 'browser',
+                sessionId,
                 actor,
                 pending: [],
                 pendingBytes: 0,
@@ -681,6 +726,21 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             });
             if (terminalResponse) return json(terminalResponse.body, terminalResponse.status);
             return json(unknownRoute(request.method, url.pathname), 404);
+          }
+
+          // MUST precede the generic session match: `browser` is a daemon API,
+          // not a session action. BrowserApi enforces owning-peer/admin access
+          // using only the resolved actor supplied here.
+          if (options.browser && isBrowserPath(pathname)) {
+            const browserResponse = await options.browser.handle({
+              method: request.method,
+              url,
+              body: request.method === 'POST' ? await body<unknown>(request) : undefined,
+              actor,
+              requestId: request.headers.get('x-kteam-request-id') ?? undefined,
+            });
+            if (browserResponse) return json(browserResponse.body, browserResponse.status);
+            return json(unknownRoute(request.method, pathname), 404);
           }
 
           // MUST precede the generic session match, or `pins` is parsed as an
@@ -982,6 +1042,9 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           const unknown = unknownRoute(request.method, url.pathname);
           return isFsPath(url.pathname) ? fsJson(unknown, 404) : json(unknown, 404);
         } catch (error) {
+          if (isBrowserError(error)) {
+            return json({ error: error.message, code: error.code }, error.status);
+          }
           if (isTerminalError(error)) {
             return json({ error: error.message, code: error.code }, error.status);
           }
@@ -1026,6 +1089,33 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
     websocket: {
       open(socket) {
         const socketData = socket.data;
+        if (socketData.kind === 'browser') {
+          const browser = options.browser;
+          if (!browser) {
+            socket.close(1011, 'browser service unavailable');
+            return;
+          }
+          void browser
+            .openStream(socketData.sessionId, socketData.actor, {
+              send: chunk => socket.send(chunk),
+              close: (code, reason) => socket.close(code, reason),
+              getBufferedAmount: () => socket.getBufferedAmount(),
+            })
+            .then(bridge => {
+              if (socketData.closed) {
+                bridge.close();
+                return;
+              }
+              socketData.bridge = bridge;
+              const pending = socketData.pending.splice(0);
+              socketData.pendingBytes = 0;
+              for (const chunk of pending) bridge.fromClient(chunk);
+            })
+            .catch(() => {
+              if (!socketData.closed) socket.close(1011, 'browser stream unavailable');
+            });
+          return;
+        }
         if (socketData.kind === 'terminal') {
           const terminals = options.terminals;
           if (!terminals) {
@@ -1096,7 +1186,7 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
       },
       close(socket) {
         sockets.delete(socket);
-        if (socket.data.kind === 'terminal') {
+        if (socket.data.kind === 'terminal' || socket.data.kind === 'browser') {
           socket.data.closed = true;
           socket.data.pending.length = 0;
           socket.data.pendingBytes = 0;
@@ -1104,15 +1194,17 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
         }
       },
       message(socket, message) {
-        if (socket.data.kind !== 'terminal' || socket.data.closed) return;
+        if (socket.data.kind === 'events' || socket.data.closed) return;
         if (socket.data.bridge) {
           socket.data.bridge.fromClient(message);
           return;
         }
         const size = typeof message === 'string' ? Buffer.byteLength(message) : message.byteLength;
-        if (socket.data.pendingBytes + size > MAX_PENDING_TERMINAL_INPUT_BYTES) {
+        const maximum =
+          socket.data.kind === 'terminal' ? MAX_PENDING_TERMINAL_INPUT_BYTES : MAX_PENDING_BROWSER_INPUT_BYTES;
+        if (socket.data.pendingBytes + size > maximum) {
           socket.data.closed = true;
-          socket.close(1009, 'terminal input queue exceeded');
+          socket.close(1009, `${socket.data.kind} input queue exceeded`);
           return;
         }
         socket.data.pendingBytes += size;

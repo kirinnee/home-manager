@@ -96,11 +96,14 @@ function harness(maximumInstances = 3, idleTimeoutMs = 1_000) {
 describe('browser lifecycle', () => {
   test('one runtime per canonical session, persistent root, and a hard fleet cap', async () => {
     const { service, runtimes, roots } = harness(2);
-    await service.start('one', 'agent');
-    await service.start('s1', 'agent');
+    const first = await service.start('one', 'agent');
+    expect(first.capacity).toEqual({ running: 1, maximum: 2 });
+    const same = await service.start('s1', 'agent');
+    expect(same.capacity).toEqual({ running: 1, maximum: 2 });
     expect(runtimes.size).toBe(1);
     expect(roots.get('s1')).toEndWith('/s1/browser');
-    await service.start('s2', 'human');
+    const second = await service.start('s2', 'human');
+    expect(second.capacity).toEqual({ running: 2, maximum: 2 });
     await expect(service.start('s3', 'agent')).rejects.toMatchObject({ code: 'capacity', status: 429 });
     await service.close();
   });
