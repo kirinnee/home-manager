@@ -467,6 +467,23 @@ describe('recommendTeam: account rules', () => {
     expect(mm3).not.toContain('kfleet login');
   });
 
+  test('excludes a proxy-down wrapper with its cause instead of calling it generic quota', () => {
+    const team = recommendTeam('Implement the feature', ['claude-auto-loge', 'claude-auto-atomi'], {
+      usage: [
+        {
+          binary: 'claude-auto-loge',
+          ok: true,
+          unavailable: true,
+          unavailableReason: 'spend_limit',
+          atLimit: true,
+          authOk: true,
+        },
+      ],
+    });
+    expect(everyone(team).some(option => option.binary === 'claude-auto-loge')).toBe(false);
+    expect(team.exclusions.find(item => item.binary === 'claude-auto-loge')?.reason).toContain('monthly spend limit');
+  });
+
   test('loge-first: same tier, the loge account wins', () => {
     const team = recommendTeam('Implement the hard distributed consensus rewrite', FLEET);
     expect(role(team, 'implementer')!.primary.binary).toContain('loge');

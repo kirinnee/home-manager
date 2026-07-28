@@ -65,6 +65,23 @@ describe('failover candidate selection', () => {
     expect(pick).toBe('claude-auto-kirin');
   });
 
+  test('excludes a positively unavailable proxy even when it is not a numerical limit', () => {
+    const pick = selectFailoverCandidate({
+      currentBinary: 'claude-auto-glm52a',
+      harness: 'claude',
+      agents: ['claude-auto-glm52a', 'claude-auto-loge', 'claude-auto-kirin'],
+      usage: [
+        usage({
+          binary: 'claude-auto-loge',
+          unavailable: true,
+          unavailableReason: 'provider',
+          atLimit: false,
+        }),
+      ],
+    });
+    expect(pick).toBe('claude-auto-kirin');
+  });
+
   test('falls back across families by least usage when no same-family option remains', () => {
     const pick = selectFailoverCandidate({
       currentBinary: 'claude-auto-glm52a',
@@ -100,6 +117,21 @@ describe('failover candidate selection', () => {
     expect(rankFailoverCandidates({ ...input, requireConfirmedUsage: true })).toEqual(['claude-auto-glm52b']);
     // Loose (default): the unscored account is still a candidate.
     expect(rankFailoverCandidates(input)).toContain('claude-auto-kirin');
+  });
+
+  test('requireConfirmedUsage rejects failed probes and unavailable pools', () => {
+    const input = {
+      currentBinary: 'claude-auto-glm52a',
+      harness: 'claude' as const,
+      agents: ['claude-auto-glm52a', 'claude-auto-glm52b', 'claude-auto-loge', 'claude-auto-kirin'],
+      usage: [
+        usage({ binary: 'claude-auto-glm52b', ok: false }),
+        usage({ binary: 'claude-auto-loge', unavailable: true }),
+        usage({ binary: 'claude-auto-kirin', ok: true }),
+      ],
+      requireConfirmedUsage: true,
+    };
+    expect(rankFailoverCandidates(input)).toEqual(['claude-auto-kirin']);
   });
 
   test('same-family tiebreak by usage then name is deterministic', () => {

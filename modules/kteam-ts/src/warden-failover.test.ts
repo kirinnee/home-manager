@@ -102,6 +102,34 @@ describe('eligibility', () => {
     ).toContain('credentials');
   });
 
+  test('provider-down is ineligible with cause/retry while transport unknown stays eligible', () => {
+    const base = { installedAgents: INSTALLED, state: {}, nowMs: NOW };
+    const retryAt = NOW + 60_000;
+    expect(
+      ineligibilityReason(
+        { wrapper: 'claude-auto-a' },
+        {
+          ...base,
+          usage: [
+            usage({
+              binary: 'claude-auto-a',
+              ok: true,
+              unavailable: true,
+              unavailableReason: 'cooldown',
+              retryAt,
+            }),
+          ],
+        },
+      ),
+    ).toContain('cooldown');
+    expect(
+      ineligibilityReason(
+        { wrapper: 'claude-auto-a' },
+        { ...base, usage: [usage({ binary: 'claude-auto-a', ok: false, atLimit: false })] },
+      ),
+    ).toBeUndefined();
+  });
+
   test('a demoted wrapper is ineligible until the cooldown elapses', () => {
     const state: WardenFailoverState = { demotedUntil: { 'claude-auto-a': iso(NOW + 60_000) } };
     expect(isDemoted(state, 'claude-auto-a', NOW)).toBe(true);
@@ -259,8 +287,8 @@ describe('strikes and demotion', () => {
     expect(again.demoted).toBe(false); // back to strike 1, not 2
   });
 
-  test('quota and auth evidence demote in ONE strike (corroborated at source)', () => {
-    for (const kind of ['quota', 'auth'] as const) {
+  test('quota, auth, and provider evidence demote in ONE strike (corroborated at source)', () => {
+    for (const kind of ['quota', 'auth', 'provider'] as const) {
       const result = recordWardenFailure({}, 'claude-auto-a', kind, `${kind} says no`, NOW, knobs);
       expect(result.demoted).toBe(true);
     }
@@ -275,6 +303,7 @@ describe('strikes and demotion', () => {
         "wrapper claude-auto-a's credentials were rejected (kfleet usage reports auth failure); run `kfleet login`",
       ),
     ).toBe('auth');
+    expect(classifyWardenFailure('wrapper claude-auto-a CLI/provider is unavailable: cooldown')).toBe('provider');
     expect(classifyWardenFailure('tmux new-session exited 1')).toBe('generic');
   });
 

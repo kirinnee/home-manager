@@ -81,6 +81,9 @@ export function discoverAutoAgents(binDir: string): string[] {
 }
 
 /** Per-binary account health from `kfleet usage` (the kfleet serve /usage feed). */
+export type AgentAvailability = 'available' | 'unavailable';
+export type AgentUnavailableReason = 'cooldown' | 'spend_limit' | 'auth' | 'provider' | 'no_credentials';
+
 export interface AgentUsage {
   binary: string;
   /** The account's usage provider from the kfleet feed: `anthropic`/`codex` are
@@ -90,6 +93,11 @@ export interface AgentUsage {
   provider?: string;
   ok?: boolean;
   usageBased?: boolean;
+  /** Runtime provider/pool availability, independent of numerical quota. */
+  availability?: AgentAvailability;
+  unavailable?: boolean;
+  unavailableReason?: AgentUnavailableReason;
+  retryAt?: number | null;
   atLimit?: boolean;
   authOk?: boolean;
   fiveHourPercent?: number | null;
@@ -105,7 +113,7 @@ export function usageScore(usage: AgentUsage | undefined): number {
 }
 
 export function usableAgent(usage: AgentUsage | undefined): boolean {
-  return usage?.atLimit !== true && usage?.authOk !== false;
+  return usage?.unavailable !== true && usage?.atLimit !== true && usage?.authOk !== false;
 }
 
 /** Stricter than `usableAgent`: requires POSITIVELY confirmed headroom. Absent or
@@ -113,7 +121,22 @@ export function usableAgent(usage: AgentUsage | undefined): boolean {
  *  account failover — which acts without a human in the loop — only ever targets
  *  an account the usage feed says is genuinely below its limit and logged in. */
 export function confirmedUsableAgent(usage: AgentUsage | undefined): boolean {
-  return usage?.atLimit === false && usage?.authOk !== false;
+  return usage?.ok !== false && usage?.unavailable !== true && usage?.atLimit === false && usage?.authOk !== false;
+}
+
+function unavailableAgentReason(usage: AgentUsage): string {
+  const reason =
+    usage.unavailableReason === 'cooldown'
+      ? 'all proxy credentials are cooling down'
+      : usage.unavailableReason === 'spend_limit'
+        ? 'monthly spend limit reached'
+        : usage.unavailableReason === 'no_credentials'
+          ? 'no active proxy credentials'
+          : usage.unavailableReason === 'auth'
+            ? 'all proxy credentials were rejected'
+            : 'proxy/provider unavailable';
+  const retry = typeof usage.retryAt === 'number' ? ` (retry after ${new Date(usage.retryAt).toISOString()})` : '';
+  return `${reason}${retry}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -699,12 +722,13 @@ export function recommendTeam(task: string, agents: string[], options: Recommend
     const health = usageByBinary.get(binary);
     if (account?.banned) exclusions.push({ binary, reason: account.banned });
     else if (!account) exclusions.push({ binary, reason: 'no doctrine entry for this wrapper — routed manually only' });
-    else if (health?.atLimit === true) exclusions.push({ binary, reason: 'at its usage limit' });
     else if (health?.authOk === false)
       exclusions.push({
         binary,
         reason: `credentials rejected (kfleet usage reports auth failure) — ${authFailureRemedy(health.provider)}`,
       });
+    else if (health?.unavailable === true) exclusions.push({ binary, reason: unavailableAgentReason(health) });
+    else if (health?.atLimit === true) exclusions.push({ binary, reason: 'at its usage limit' });
     else pool.push(binary);
   }
 

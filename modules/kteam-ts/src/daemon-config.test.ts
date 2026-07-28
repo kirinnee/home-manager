@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createPaths } from './paths';
-import { defaultWardenConfig, loadDaemonConfig } from './daemon-config';
+import { defaultProviderOutageConfig, defaultWardenConfig, loadDaemonConfig } from './daemon-config';
 
 const temporaryDirectories: string[] = [];
 
@@ -28,6 +28,7 @@ describe('warden config merge (failover fields)', () => {
     expect(config.warden.enabled).toBe(true);
     expect(config.warden.accounts).toBeUndefined();
     expect(config.warden.failover).toEqual({ policy: 'fallback', failureThreshold: 2, cooldownMinutes: 30 });
+    expect(config.warden.providerOutage).toEqual(defaultProviderOutageConfig());
     // The legacy model field stays absent — never resurrected by defaults.
     expect(config.warden.model).toBeUndefined();
   });
@@ -49,9 +50,16 @@ describe('warden config merge (failover fields)', () => {
     expect(config.warden.accounts).toEqual([{ wrapper: 'claude-auto-a', model: 'opus' }, 'claude-auto-b']);
   });
 
+  test('a partial provider-outage block deep-merges with safe defaults', async () => {
+    const paths = await pathsWithConfig({ warden: { providerOutage: { tailLines: 40 } } });
+    const config = await loadDaemonConfig(paths);
+    expect(config.warden.providerOutage).toEqual({ minDistinctSessions: 2, persistenceSweeps: 2, tailLines: 40 });
+  });
+
   test('defaults ship fallback failover and NO model field', async () => {
     const warden = defaultWardenConfig();
     expect(warden.failover).toEqual({ policy: 'fallback', failureThreshold: 2, cooldownMinutes: 30 });
+    expect(warden.providerOutage).toEqual(defaultProviderOutageConfig());
     expect(warden.model).toBeUndefined();
     expect(warden.accounts).toBeUndefined();
   });

@@ -36,6 +36,15 @@ export interface WardenFailoverConfig {
   cooldownMinutes: number;
 }
 
+export interface ProviderOutageConfig {
+  /** Matching evidence required in one sweep; minimum two by validation. */
+  minDistinctSessions: number;
+  /** Consecutive, cadence-separated sweeps required; minimum two. */
+  persistenceSweeps: number;
+  /** Final non-empty pane rows inspected for current evidence. */
+  tailLines: number;
+}
+
 export interface WardenConfig {
   /** Deterministic detection always runs; this only gates LLM escalation. */
   enabled: boolean;
@@ -53,6 +62,9 @@ export interface WardenConfig {
   /** Failover policy + hysteresis knobs. Absent => defaults
    *  (fallback / 2 strikes / 30 min cooldown). */
   failover?: WardenFailoverConfig;
+  /** Deterministic provider-failure damping. Detection remains always-on;
+   *  `enabled` above gates only LLM escalation. */
+  providerOutage?: ProviderOutageConfig;
   /** Fleet sweep cadence, minutes. */
   intervalMinutes: number;
   /** A waiting session idle this long is an unanswered question. */
@@ -136,6 +148,12 @@ export const defaultWardenFailoverConfig = (): WardenFailoverConfig => ({
   cooldownMinutes: 30,
 });
 
+export const defaultProviderOutageConfig = (): ProviderOutageConfig => ({
+  minDistinctSessions: 2,
+  persistenceSweeps: 2,
+  tailLines: 24,
+});
+
 export const defaultWardenConfig = (): WardenConfig => ({
   enabled: false,
   // Wardens JUDGE sus sessions (A6): understand the task, deep-dive the process,
@@ -152,6 +170,7 @@ export const defaultWardenConfig = (): WardenConfig => ({
   // the default. Listing accounts (in config.json or via the settings surface)
   // opts into failover; the failover knobs below then govern selection.
   failover: defaultWardenFailoverConfig(),
+  providerOutage: defaultProviderOutageConfig(),
   intervalMinutes: 5,
   unattendedMinutes: 30,
   minSpawnGapMinutes: 15,
@@ -215,6 +234,7 @@ export async function loadDaemonConfig(paths: KTeamPaths): Promise<DaemonConfig>
       // One level deeper for failover so a partial `{ failover: { policy } }`
       // keeps the default threshold/cooldown rather than dropping them.
       failover: { ...defaultWardenFailoverConfig(), ...(onDisk.warden?.failover ?? {}) },
+      providerOutage: { ...defaultProviderOutageConfig(), ...(onDisk.warden?.providerOutage ?? {}) },
     },
     scratch: { ...defaultScratchConfig(), ...(onDisk.scratch ?? {}) },
     retention: { ...defaultRetentionConfig(), ...(onDisk.retention ?? {}) },
