@@ -107,7 +107,7 @@ describe('workspace', () => {
     expect(html).toContain('data-conversation="visible"');
     expect(html).toContain('role="complementary"');
     expect(html).toContain('role="tablist"');
-    expect(html.match(/role="tab"/g)?.length).toBe(8);
+    expect(html.match(/role="tab"/g)?.length).toBe(9);
     expect(html).toContain('role="tabpanel"');
     expect(html).toContain('Opened Tasks beside the conversation');
     expect(html).not.toContain('aria-modal');
@@ -163,7 +163,7 @@ describe('workspace', () => {
     expect(html).toContain('data-conversation="visible"');
     expect(html).toContain('aria-modal="true"');
     expect(html).toContain('kt-sheet-tabs');
-    expect(html.match(/role="tab"/g)?.length).toBe(8);
+    expect(html.match(/role="tab"/g)?.length).toBe(9);
     expect(html).toContain(SIDE_PANE_SURFACES.pins.closeLabel);
     expect(html).not.toContain('role="complementary"');
   });
