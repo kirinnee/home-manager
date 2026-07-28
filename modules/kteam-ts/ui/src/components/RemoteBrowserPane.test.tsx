@@ -346,6 +346,83 @@ afterEach(() => {
 });
 
 describe('RemoteBrowserPane', () => {
+  test('shows the backend launch failure instead of the stopped call-to-action', async () => {
+    const reason = 'Google Chrome was not found for linux; set KTEAM_CHROME_BIN to its executable';
+    const failedDependencies: RemoteBrowserDependencies = {
+      ...dependencies,
+      api: {
+        ...remoteBrowserApi,
+        status: async () => ({
+          ...status,
+          state: 'error',
+          viewers: 0,
+          capacity: { running: 0, maximum: 2 },
+          error: reason,
+        }),
+      },
+    };
+
+    mount(() => RemoteBrowserPane({ sessionId: 'session-1', dependencies: failedDependencies }));
+    await flush();
+
+    expect(visit(harness!.output, element => element.props?.children === 'Browser unavailable')).toBeDefined();
+    expect(visit(harness!.output, element => element.props?.children === reason)).toBeDefined();
+    expect(visit(harness!.output, element => element.props?.children === 'Browser is stopped')).toBeUndefined();
+  });
+
+  test('switches the overlay immediately when start fails before the next status poll', async () => {
+    const reason = 'Google Chrome was not found for linux; set KTEAM_CHROME_BIN to its executable';
+    const failedStartDependencies: RemoteBrowserDependencies = {
+      ...dependencies,
+      api: {
+        ...remoteBrowserApi,
+        status: async () => ({
+          ...status,
+          state: 'stopped',
+          viewers: 0,
+          capacity: { running: 0, maximum: 2 },
+        }),
+        start: async () => {
+          throw new Error(reason);
+        },
+      },
+    };
+
+    mount(() => RemoteBrowserPane({ sessionId: 'session-1', dependencies: failedStartDependencies }));
+    await flush();
+    const startButton = visit(
+      harness!.output,
+      element => element.props?.variant === 'primary' && typeof element.props?.onClick === 'function',
+    )!;
+    (startButton.props!.onClick as () => void)();
+    await flush();
+
+    expect(visit(harness!.output, element => element.props?.children === 'Browser unavailable')).toBeDefined();
+    expect(visit(harness!.output, element => element.props?.children === reason)).toBeDefined();
+    expect(visit(harness!.output, element => element.props?.children === 'Browser is stopped')).toBeUndefined();
+  });
+
+  test('keeps the normal stopped guidance for a genuinely idle browser', async () => {
+    const stoppedDependencies: RemoteBrowserDependencies = {
+      ...dependencies,
+      api: {
+        ...remoteBrowserApi,
+        status: async () => ({
+          ...status,
+          state: 'stopped',
+          viewers: 0,
+          capacity: { running: 0, maximum: 2 },
+        }),
+      },
+    };
+
+    mount(() => RemoteBrowserPane({ sessionId: 'session-1', dependencies: stoppedDependencies }));
+    await flush();
+
+    expect(visit(harness!.output, element => element.props?.children === 'Browser is stopped')).toBeDefined();
+    expect(visit(harness!.output, element => element.props?.children === 'Browser unavailable')).toBeUndefined();
+  });
+
   test('ignores a stale status poll that resolves after a newer location sample', async () => {
     const stale = deferred<typeof status>();
     const fresh = deferred<typeof status>();

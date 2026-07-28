@@ -487,6 +487,12 @@ export function RemoteBrowserPane({
     : 'No input yet';
   const actorIcon = lastActor?.kind === 'human' ? <UserRound size={13} /> : <Bot size={13} />;
   const running = status?.state === 'running';
+  // A failed start leaves the last status snapshot at `stopped` until the next
+  // poll returns the daemon's durable `error` state. Treat the preserved API
+  // error as authoritative during that interval so the empty canvas never
+  // contradicts the red alert by claiming the browser is merely idle.
+  const unavailable = !running && (status?.state === 'error' || error !== null);
+  const unavailableReason = status?.error ?? error ?? 'The remote browser could not start.';
 
   return (
     <section className="flex min-h-0 flex-1 flex-col bg-surface" aria-label="Shared remote browser">
@@ -648,11 +654,20 @@ export function RemoteBrowserPane({
         {!running && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-panel text-center">
             <div className="max-w-xs">
-              <Monitor size={30} aria-hidden="true" className="mx-auto text-muted" />
-              <p className="mb-0 mt-3 text-ui font-medium text-fg">Browser is stopped</p>
-              <p className="mb-0 mt-1 text-meta leading-base text-muted">
-                Start it here or run <code>kteam browser open</code>. Login state remains in the persistent profile.
-              </p>
+              <Monitor size={30} aria-hidden="true" className={`mx-auto ${unavailable ? 'text-err' : 'text-muted'}`} />
+              {unavailable ? (
+                <>
+                  <p className="mb-0 mt-3 text-ui font-medium text-err">Browser unavailable</p>
+                  <p className="mb-0 mt-1 break-words text-meta leading-base text-err">{unavailableReason}</p>
+                </>
+              ) : (
+                <>
+                  <p className="mb-0 mt-3 text-ui font-medium text-fg">Browser is stopped</p>
+                  <p className="mb-0 mt-1 text-meta leading-base text-muted">
+                    Start it here or run <code>kteam browser open</code>. Login state remains in the persistent profile.
+                  </p>
+                </>
+              )}
             </div>
           </div>
         )}
