@@ -849,6 +849,131 @@ describe('structured-answer visibility matcher', () => {
     ).toBeNull();
   });
 
+  test('live Claude preview panel top border is not parsed as option text', () => {
+    // Exact option/pane wording from corinne (ms3s3fk9), whose three answer
+    // attempts all failed `menu_unbound` against the same b09e… pane hash. The
+    // top preview row starts with `┌`, so there is no `│` for the old parser to
+    // split on; the label itself also wraps onto the next physical line.
+    const options = ['zinc endpoint + argon button (Recommended)', 'argon frontend only'];
+    const pane = [
+      '←  ☐ Approach  ☐ Format  ✔ Submit  →',
+      '',
+      'Where should the export be built?',
+      '',
+      '❯ 1. zinc endpoint + argon        ┌──────────────────────────────────┐',
+      '    button (Recommended)          │ zinc: GET /Withdrawal/export    │',
+      '  2. argon frontend only          │ streams CSV                     │',
+      '                                  └──────────────────────────────────┘',
+      '',
+      'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    ].join('\n');
+
+    const block = liveMenuBlock(pane)!;
+    expect(block.rows.map(row => row.text)).toEqual(['zinc endpoint + argon', 'argon frontend only']);
+    expect(
+      resolveVisibleQuestion(pane, [
+        {
+          question: 'Where should the export be built?',
+          options: options.map(label => ({ label })),
+          multiSelect: false,
+        },
+      ]),
+    ).toMatchObject({ index: 0, candidates: [0] });
+    expect(
+      structuredQuestionPaneMatch({
+        pane,
+        question: 'Where should the export be built?',
+        options,
+        selected: [options[0]!],
+        promptReady: false,
+      }),
+    ).toMatchObject({ ok: true, reason: undefined });
+  });
+
+  test('Codex 0.145 inline descriptions are not parsed as option labels', () => {
+    // Shape from the installed Codex 0.145.0 request_user_input snapshot. Codex
+    // has no Claude preview panel: it puts each description in a second
+    // space-aligned column on the SAME row as the label.
+    const pane = [
+      'Question 1/1 (1 unanswered)',
+      'Choose an option.',
+      '',
+      '› 1. Option 1  First choice.',
+      '  2. Option 2  Second choice.',
+      '  3. Option 3  Third choice.',
+      '',
+      'tab to add notes | enter to submit answer | esc to interrupt',
+    ].join('\n');
+    const options = ['Option 1', 'Option 2', 'Option 3'];
+    const questions = [
+      {
+        question: 'Choose an option.',
+        header: 'First',
+        options: options.map(label => ({ label })),
+        multiSelect: false,
+      },
+    ];
+
+    expect(liveMenuBlock(pane)!.rows.map(row => row.text)).toEqual(options);
+    expect(resolveVisibleQuestion(pane, questions)).toMatchObject({ index: 0, candidates: [0] });
+    expect(
+      structuredQuestionPaneMatch({
+        pane,
+        question: 'Choose an option.',
+        options,
+        selected: ['Option 2'],
+        promptReady: false,
+      }),
+    ).toMatchObject({ ok: true, reason: undefined });
+  });
+
+  test('a Codex description-column split cannot bind a different longer label', () => {
+    const pane = [
+      'Question 1/1 (1 unanswered)',
+      'Choose a release.',
+      '',
+      '› 1. Ship  current release',
+      '  2. Hold  wait for approval',
+      '',
+      'tab to add notes | enter to submit answer | esc to interrupt',
+    ].join('\n');
+    const options = ['Ship soon', 'Hold'];
+
+    // The presentation parser still exposes the left cell, but authorization
+    // retains the raw row and sees that the complete expected label never
+    // appeared before Codex's description column.
+    expect(liveMenuBlock(pane)!.rows.map(row => row.text)).toEqual(['Ship', 'Hold']);
+    expect(
+      structuredQuestionPaneMatch({
+        pane,
+        question: 'Choose a release.',
+        options,
+        selected: ['Ship soon'],
+        promptReady: false,
+      }),
+    ).toMatchObject({ ok: false, reason: 'menu_unbound' });
+  });
+
+  test('a preview panel permits a partial row only when its wrapped label continues', () => {
+    const pane = [
+      '? Choose a release.',
+      '❯ 1. Ship                     ┌────────────────────┐',
+      '                             │ current release    │',
+      '  2. Hold                    │ wait for approval  │',
+      'Enter to select · Esc to cancel',
+    ].join('\n');
+
+    expect(
+      structuredQuestionPaneMatch({
+        pane,
+        question: 'Choose a release.',
+        options: ['Ship soon', 'Hold'],
+        selected: ['Ship soon'],
+        promptReady: false,
+      }),
+    ).toMatchObject({ ok: false, reason: 'menu_unbound' });
+  });
+
   test('ellipsis-truncated long label is answerable', () => {
     const options = ['Blue-green with automatic rollback on health-check failure', 'Canary', 'Recreate'];
     const pane = [
@@ -1146,16 +1271,25 @@ describe('structured answers are verified after driving the pane', () => {
     expect(controller.sent).toEqual([['Escape']]);
   });
 
-  test('abandon refuses with ZERO keys when the frame is not a recognizable menu', async () => {
-    // Mid-repaint: the question text is on the pane (so promptReady is false and
-    // there is no active work) but no menu row is rendered. The old gate checked
-    // only promptReady/active-work and would have sent Escape into this frame —
-    // at an idle Codex prompt that quits the TUI.
+  test('explicit abandon still sends exactly one Escape when the matcher cannot bind', async () => {
+    // Mid-repaint: question state is durably bound by toolUseId but no menu row
+    // is readable. This is the escape hatch, not an answer drive, so it must not
+    // ask the failed pane matcher for permission. It still never retries.
     const repaint = ['? Which rollout should we use?', '  …', ''].join('\n');
     const controller = new QuestionController([{ pane: repaint }, { pane: repaint }, { pane: repaint }]);
     await expect(controller.cancelQuestion(config, { pendingQuestion: pending } as never)).rejects.toThrow(
-      /does not show this question as a live menu/,
+      /Escape was sent.*did not visibly advance/,
     );
+    expect(controller.sent).toEqual([['Escape']]);
+  });
+
+  test('failed-answer cleanup sends zero keys when the question is no longer bound', async () => {
+    const otherSelector = ['Choose a command', '❯ 1. Ship', '  2. Hold', 'Enter to select · Esc to cancel'].join('\n');
+    const controller = new QuestionController([{ pane: otherSelector }, { pane: otherSelector }]);
+
+    await expect(
+      controller.cancelQuestion(config, { pendingQuestion: pending } as never, { requireBound: true }),
+    ).rejects.toThrow(/refusing automatic Escape/);
     expect(controller.sent).toEqual([]);
   });
 
@@ -1753,12 +1887,12 @@ describe('all evidence is bound to ONE live menu block', () => {
     expect(controller.sent).toEqual([]);
   });
 
-  test('CANCEL refuses across menus and sends exactly zero keys', async () => {
+  test('CANCEL remains an explicit one-Escape escape hatch across an unbound frame', async () => {
     const controller = new BlockController([crossMenuPane, crossMenuPane, crossMenuPane]);
     await expect(controller.cancelQuestion(config, { pendingQuestion: pending } as never)).rejects.toThrow(
-      /does not show this question as a live menu/,
+      /Escape was sent.*did not visibly advance/,
     );
-    expect(controller.sent).toEqual([]);
+    expect(controller.sent).toEqual([['Escape']]);
   });
 
   test('a question PHRASE in unrelated prose authorizes nothing — answer or cancel', async () => {
@@ -1780,9 +1914,9 @@ describe('all evidence is bound to ONE live menu block', () => {
 
     const cancelling = new BlockController([prosePane, prosePane, prosePane]);
     await expect(cancelling.cancelQuestion(config, { pendingQuestion: pending } as never)).rejects.toThrow(
-      /does not show this question as a live menu/,
+      /Escape was sent.*did not visibly advance/,
     );
-    expect(cancelling.sent).toEqual([]);
+    expect(cancelling.sent).toEqual([['Escape']]);
   });
 
   test('a FREEFORM answer never fills a composer that sits above a live selector', async () => {
@@ -1900,12 +2034,12 @@ describe('all evidence is bound to ONE live menu block', () => {
     expect(controller.sent).toEqual([]);
   });
 
-  test('SAME-option-set prose: CANCEL sends exactly zero keys', async () => {
+  test('SAME-option-set prose: CANCEL is still one explicit Escape, never a retry loop', async () => {
     const controller = new BlockController([sameOptionsProsePane, sameOptionsProsePane, sameOptionsProsePane]);
     await expect(controller.cancelQuestion(config, { pendingQuestion: pending } as never)).rejects.toThrow(
-      /does not show this question as a live menu/,
+      /Escape was sent.*did not visibly advance/,
     );
-    expect(controller.sent).toEqual([]);
+    expect(controller.sent).toEqual([['Escape']]);
   });
 
   test('questionRowIndex needs the WHOLE question, not a shared opening clause', () => {

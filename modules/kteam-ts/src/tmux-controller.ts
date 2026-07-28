@@ -426,6 +426,26 @@ export function optionVisibleOnPane(normalizedPane: string, label: string, allOp
 const CHECKED_MARKERS = ['☑', '☒', '●', '◉', '✓', '✔', '[x]', '[X]', '(x)', '(X)'];
 const UNCHECKED_MARKERS = ['☐', '○', '◯', '[ ]', '( )', '[]', '()'];
 
+/** The left/label cell of one rendered menu row.
+ *
+ * The two harnesses put different chrome on the SAME physical line as an
+ * option label:
+ *  - Claude's preview panel normally starts behind `│`, but its TOP row starts
+ *    with a box corner (`┌`) before there is any vertical separator;
+ *  - Codex renders the option description as a second, space-aligned column.
+ *
+ * Neither suffix belongs to the label stored in the structured-question
+ * payload. Keeping it made a perfectly visible menu resolve as `menu_unbound`
+ * (live Claude repro: `zinc endpoint + argon        ┌────`; Codex 0.145.0
+ * snapshot: `Option 1  First choice.`). Split only at structural column
+ * boundaries: an explicit panel edge/corner or a run of at least two spaces.
+ * Ordinary single spaces and punctuation inside a label remain untouched. */
+function menuRowLabelCell(value: string): string {
+  const beforePanel = value.split(/[│┃║]/u)[0] ?? value;
+  const beforePanelTop = beforePanel.split(/\s{2,}[┌╭┏╔]/u)[0] ?? beforePanel;
+  return (beforePanelTop.split(/\s{2,}/u)[0] ?? beforePanelTop).trim();
+}
+
 /** The label text of a STRUCTURALLY NUMBERED menu row, or `null` when the line
  * is not one. Chrome is stripped in the order a TUI paints it: the right-hand
  * panel column, the native cursor glyph, the ordinal, then an optional checkbox
@@ -434,13 +454,13 @@ const UNCHECKED_MARKERS = ['☐', '○', '◯', '[ ]', '( )', '[]', '()'];
  * happens to read exactly like an option label. Accepting an unnumbered line
  * let any of those masquerade as the live menu. */
 function numberedOptionRowText(line: string): string | null {
-  const left = (line.split(/[│┃]/u)[0] ?? line).trim().replace(/^[❯›>»]\s*/u, '');
+  const left = (line.split(/[│┃║]/u)[0] ?? line).trim().replace(/^[❯›>»]\s*/u, '');
   const numbered = left.match(/^\d+[.)]\s*(.*)$/);
   if (!numbered) return null;
   let rest = (numbered[1] ?? '').trim();
   const marker = [...CHECKED_MARKERS, ...UNCHECKED_MARKERS].find(candidate => rest.startsWith(candidate));
   if (marker) rest = rest.slice(marker.length).trim();
-  return rest;
+  return menuRowLabelCell(rest);
 }
 
 /** A whole labelled menu row is stronger evidence than a fleet-wide substring.
@@ -575,6 +595,13 @@ export interface MenuBlockRow {
   ordinal: number;
   /** The row's label text, chrome removed. */
   text: string;
+  /** The whole post-ordinal cell before generic whitespace-column stripping.
+   *  This keeps enough provenance to distinguish a genuine label from a
+   *  shorter label followed by Codex's inline description column. */
+  rawText: string;
+  /** Label fragments continued on later physical rows in Claude's explicit
+   *  preview-panel left column. Empty when no structural wrap was observed. */
+  panelContinuation: string[];
   /** The native selection cursor (`❯`) sits on this row. */
   cursor: boolean;
   /** Checkbox state when the row carries a marker we recognize. */
@@ -619,7 +646,7 @@ function menuFooterLine(value: string): boolean {
 }
 
 function parseMenuRow(line: string, index: number): MenuBlockRow | null {
-  const left = (line.split(/[│┃]/u)[0] ?? line).trim();
+  const left = (line.split(/[│┃║]/u)[0] ?? line).trim();
   const cursor = /^[❯›>»]/u.test(left);
   const withoutCursor = left.replace(/^[❯›>»]\s*/u, '');
   const numbered = withoutCursor.match(/^(\d+)[.)]\s*(.*)$/);
@@ -633,7 +660,15 @@ function parseMenuRow(line: string, index: number): MenuBlockRow | null {
     checked = CHECKED_MARKERS.includes(marker);
     rest = rest.slice(marker.length).trim();
   }
-  return { line: index, ordinal, text: rest, cursor, checked };
+  return {
+    line: index,
+    ordinal,
+    text: menuRowLabelCell(rest),
+    rawText: rest,
+    panelContinuation: [],
+    cursor,
+    checked,
+  };
 }
 
 /** Derive the ONE bottom/live structured-menu block, or `null` when no such
@@ -705,6 +740,22 @@ export function liveMenuBlock(pane: string): LiveMenuBlock | null {
 
   const firstRow = rows[0]!.line;
   const lastRow = rows[rows.length - 1]!.line;
+  // Claude's preview panel makes the option's left cell explicit. When a label
+  // wraps, its remaining fragments appear before `│` on the following physical
+  // row(s). Preserve those fragments so a partial first row is accepted only
+  // when the capture actually contains the rest of the label. Ordinary
+  // unnumbered description prose has no panel boundary and is never promoted
+  // into label evidence.
+  for (const [rowIndex, row] of rows.entries()) {
+    const nextRowLine = rows[rowIndex + 1]?.line ?? Math.min(lines.length, row.line + MENU_ROW_GAP_LINES + 1);
+    for (let index = row.line + 1; index < nextRowLine; index++) {
+      const line = lines[index]!;
+      if (menuFooterLine(line) || isQuestionAnchorLine(line) || isComposerRow(line)) break;
+      if (!/[│┃║]/u.test(line)) continue;
+      const left = (line.split(/[│┃║]/u)[0] ?? '').trim();
+      if (left) row.panelContinuation.push(left);
+    }
+  }
   // A bare composer BELOW the rows means an input prompt has the keyboard and
   // this menu is scrollback — the idle-prompt-under-an-old-question shape that
   // otherwise pinned a pending question forever.
@@ -770,20 +821,40 @@ export function blockBindsOptions(block: LiveMenuBlock, labels: string[]): boole
   for (const [index, label] of labels.entries()) {
     const row = block.rows.find(candidate => candidate.ordinal === index + 1);
     if (!row) continue;
-    if (!rowAgreesWithLabel(row.text, label)) return false;
+    if (!rowAgreesWithLabel(row, label)) return false;
     observed++;
   }
   return observed > 0;
 }
 
-/** Does a row's text belong to `label` — exactly, or as the prefix a wrap or an
- * ellipsis truncation leaves behind? Deliberately one-directional: the row must
- * be a prefix of the LABEL, so a longer unrelated row never agrees. */
-function rowAgreesWithLabel(text: string, label: string): boolean {
-  if (rowTextMatchesLabel(text, label)) return true;
-  const row = normalizeForMatch(text).replace(/[….]+$/u, '');
+/** Does a row belong to `label`? Partial text is accepted only with concrete
+ * rendering provenance: a terminal ellipsis, or the remaining label fragments
+ * in Claude's explicit preview-panel left column. Codex's inline description
+ * column is accepted only when the complete expected label precedes its
+ * whitespace boundary. A bare `Ship` row can therefore never bind the pending
+ * label `Ship soon` merely because both share a prefix. */
+function rowAgreesWithLabel(row: MenuBlockRow, label: string): boolean {
+  if (rowTextMatchesLabel(row.text, label)) return true;
   const wanted = normalizeForMatch(label);
-  return row.length >= 4 && wanted.startsWith(row);
+  if (!wanted) return false;
+
+  // Codex prints `Option label  Description` on one physical row. Try every
+  // structural whitespace boundary because a label itself may intentionally
+  // contain repeated spaces; only a boundary after the COMPLETE label counts.
+  const raw = row.rawText.trim();
+  for (const match of raw.matchAll(/\s{2,}/gu)) {
+    if (normalizeForMatch(raw.slice(0, match.index)) === wanted) return true;
+  }
+
+  const first = normalizeForMatch(row.text);
+  const clipped = first.replace(/[….]+$/u, '');
+  if (clipped !== first) return clipped.length >= 4 && wanted.startsWith(clipped);
+
+  if (row.panelContinuation.length === 0) return false;
+  const continued = normalizeForMatch([row.text, ...row.panelContinuation].join(' '));
+  if (continued === wanted) return true;
+  const continuedClipped = continued.replace(/[….]+$/u, '');
+  return continuedClipped !== continued && continuedClipped.length >= 4 && wanted.startsWith(continuedClipped);
 }
 
 export type StructuredQuestionMatchReason =
@@ -2108,15 +2179,20 @@ export class TmuxController {
     return { toolUseId: pending.toolUseId, startedAtQuestion, answeredQuestions, confirmedBy };
   }
 
-  /** Explicit structured-question abandon. Escape is sent only while a menu is
-   * STRUCTURALLY on screen (a question of this set plus a real menu row); every
-   * poll re-checks before another key. Checking only promptReady/active-work was
-   * not enough: an ambiguous repaint frame is neither, and Escape at an idle
-   * Codex prompt quits the TUI — so an unrecognizable frame refuses with zero
-   * keys and leaves the question pending for a retry. */
+  /** Structured-question abandon. The explicit client action is the HUMAN'S
+   * Escape key: once the bound tool id is still pending, it remains an escape
+   * hatch even when the pane matcher cannot bind the rendered menu. The matcher
+   * is exactly what a broken answer is escaping, so consulting it there
+   * recreated the trap (`menu_unbound` answer -> `menu_not_visible` cancel).
+   *
+   * An automatic cleanup after a failed answer is different: it was not an
+   * explicit abandon request, so `requireBound` makes it refuse with ZERO keys
+   * unless the current pane still positively belongs to this question. Both
+   * modes send at most one Escape and never retry blindly. */
   async cancelQuestion(
     config: SessionConfig,
     state: SessionState,
+    options: { requireBound?: boolean } = {},
   ): Promise<{ confirmedBy: 'already-advanced' | 'prompt-ready' | 'turn-started' | 'pane-advanced'; pane: PaneState }> {
     const pending = state.pendingQuestion;
     if (!pending) throw new Error('session has no pending structured question');
@@ -2135,49 +2211,44 @@ export class TmuxController {
     await this.exitCopyMode(config.tmuxSession).catch(() => undefined);
     current = await this.state(config.tmuxSession);
     const before = current.visiblePane;
-    /** Escape is only safe against a frame we can positively identify as this
-     * set's live menu. Refuse rather than send a key into an unknown frame. */
-    const refuseUnlessMenu = (phase: string) => {
-      if (structuredMenuVisible(current.visiblePane, pending.questions)) return;
+    const advanced = alreadyAdvanced();
+    if (advanced) return { confirmedBy: advanced, pane: current };
+    if (options.requireBound && !anyQuestionVisible(current.visiblePane, pending.questions)) {
       const resolution = resolveVisibleQuestion(current.visiblePane, pending.questions);
       throw new StructuredQuestionDriveError(
-        'the pane does not show this question as a live menu, so Escape was not sent; retry or abandon the question',
+        'the failed answer no longer has a positively bound question menu; refusing automatic Escape',
         {
-          phase,
-          reason: 'menu_not_visible',
+          phase: 'cancel-preflight',
+          reason: resolution.reason ?? 'menu_not_visible',
+          activeQuestionIndex: resolution.index,
           candidates: resolution.candidates,
-          ambiguous: resolution.reason === 'ambiguous',
-          promptReady: current.promptReady,
-          activeWork: paneShowsActiveWork(current.visiblePane),
         },
       );
-    };
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const advanced = alreadyAdvanced();
-      if (advanced) return { confirmedBy: advanced, pane: current };
-      refuseUnlessMenu('cancel-preflight');
-      await this.questionKey(config.tmuxSession, 'Escape');
-      for (let poll = 0; poll < Math.max(2, Math.ceil(2_000 / Math.max(1, this.questionPollMs))); poll++) {
-        await Bun.sleep(this.questionPollMs);
-        current = await this.state(config.tmuxSession);
-        if (!current.alive || current.dead) throw new Error('session pane died while abandoning the question');
-        const confirmation = alreadyAdvanced();
-        if (confirmation) return { confirmedBy: confirmation, pane: current };
-        if (!anyQuestionVisible(current.visiblePane, pending.questions) && current.visiblePane !== before)
-          return { confirmedBy: 'pane-advanced', pane: current };
-      }
+    }
+    await this.questionKey(config.tmuxSession, 'Escape');
+    const confirmationPolls =
+      this.questionPollMs === 0 ? this.questionConfirmationPolls : Math.max(2, Math.ceil(2_000 / this.questionPollMs));
+    for (let poll = 0; poll < confirmationPolls; poll++) {
+      await Bun.sleep(this.questionPollMs);
+      current = await this.state(config.tmuxSession);
+      if (!current.alive || current.dead) throw new Error('session pane died while abandoning the question');
+      const confirmation = alreadyAdvanced();
+      if (confirmation) return { confirmedBy: confirmation, pane: current };
+      // A changed frame with no live numbered block is useful weaker evidence
+      // even when this question's own matcher was unbound before Escape. A live
+      // block that remains on screen is not confirmation — let the manager
+      // release state loudly after the bounded wait instead of guessing.
+      if (liveMenuBlock(current.visiblePane) === null && current.visiblePane !== before)
+        return { confirmedBy: 'pane-advanced', pane: current };
     }
     const remaining = resolveVisibleQuestion(current.visiblePane, pending.questions);
-    throw new StructuredQuestionDriveError(
-      'Escape was sent, but the question is still visible; it remains pending so it can be retried safely',
-      {
-        phase: 'cancel-confirm',
-        promptReady: current.promptReady,
-        activeQuestionIndex: remaining.index,
-        candidates: remaining.candidates,
-        ambiguous: remaining.reason === 'ambiguous',
-      },
-    );
+    throw new StructuredQuestionDriveError('Escape was sent, but the question pane did not visibly advance', {
+      phase: 'cancel-confirm',
+      promptReady: current.promptReady,
+      activeQuestionIndex: remaining.index,
+      candidates: remaining.candidates,
+      ambiguous: remaining.reason === 'ambiguous',
+    });
   }
 
   async snapshot(config: SessionConfig, final = false): Promise<string> {

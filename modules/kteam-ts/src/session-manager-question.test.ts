@@ -110,13 +110,20 @@ describe('SessionManager structured-question control', () => {
     expect(getView().state.status).toBe('running');
   });
 
-  test('a refused/unconfirmed drive records diagnostics and leaves the question recoverable', async () => {
+  test('a refused/unconfirmed drive fails loudly, releases the form, and preserves raw question text', async () => {
     const { manager, emitted, transitions, getView } = fixture();
+    let cleanupOptions: { requireBound?: boolean } | undefined;
     manager.tmux = {
       answerQuestion: async () => {
         throw new StructuredQuestionDriveError('pane did not advance', {
           phase: 'confirm',
           reason: 'question_missing',
+        });
+      },
+      cancelQuestion: async (_config: unknown, _state: unknown, options?: { requireBound?: boolean }) => {
+        cleanupOptions = options;
+        throw new StructuredQuestionDriveError('Escape was not confirmed', {
+          phase: 'cancel-confirm',
         });
       },
       state: async () => ({
@@ -131,10 +138,22 @@ describe('SessionManager structured-question control', () => {
 
     await expect(
       (manager as unknown as QuestionManager).answer('s', 'tool-current', ['Enable feature']),
-    ).rejects.toThrow('pane did not advance');
-    expect(transitions).toEqual([]);
-    expect(getView().state.status).toBe('awaiting_question');
-    expect(getView().state.pendingQuestion?.toolUseId).toBe('tool-current');
+    ).rejects.toThrow(/pane did not advance[\s\S]*structured form was released[\s\S]*Which rollout should we use\?/);
+    expect(transitions).toHaveLength(1);
+    expect(transitions[0]).toMatchObject({
+      type: 'interaction.question_cancelled',
+      patch: { status: 'awaiting_user', pendingQuestion: undefined, openTools: [] },
+      data: {
+        toolUseId: 'tool-current',
+        confirmedBy: 'state-release',
+        questionText: 'Which rollout should we use?',
+        pendingQuestion: null,
+      },
+    });
+    expect(getView().state.status).toBe('awaiting_user');
+    expect(getView().state.pendingQuestion).toBeUndefined();
+    expect(getView().state.reason).toContain('reply in prose to: Which rollout should we use?');
+    expect(cleanupOptions).toEqual({ requireBound: true });
     expect(emitted).toHaveLength(1);
     expect(emitted[0]).toMatchObject({
       type: 'interaction.question_failed',
@@ -142,6 +161,7 @@ describe('SessionManager structured-question control', () => {
         action: 'answer',
         toolUseId: 'tool-current',
         matcher: { phase: 'confirm', reason: 'question_missing' },
+        questionText: 'Which rollout should we use?',
         snapshot: 'last-snapshot.txt',
       },
     });
@@ -170,6 +190,53 @@ describe('SessionManager structured-question control', () => {
     });
     expect(result.state.status).toBe('awaiting_user');
     expect(getView().state.pendingQuestion).toBeUndefined();
+  });
+
+  test('an unconfirmed abandon still releases pendingQuestion and returns the composer', async () => {
+    const { manager, emitted, transitions, getView } = fixture();
+    manager.tmux = {
+      cancelQuestion: async () => {
+        throw new StructuredQuestionDriveError('pane matcher could not bind', {
+          phase: 'cancel-preflight',
+          reason: 'menu_not_visible',
+        });
+      },
+      state: async () => ({
+        alive: true,
+        dead: false,
+        promptReady: false,
+        pane: 'unbound question pane',
+        visiblePane: 'unbound question pane',
+      }),
+      snapshot: async () => 'unbound question pane',
+    };
+
+    const result = await (manager as unknown as QuestionManager).interrupt('s', 'tool-current');
+
+    expect(result.state.status).toBe('awaiting_user');
+    expect(result.state.pendingQuestion).toBeUndefined();
+    expect(getView().state.openTools).toEqual([]);
+    expect(getView().state.reason).toContain('Escape could not be confirmed');
+    expect(emitted).toHaveLength(2);
+    expect(emitted[1]).toMatchObject({
+      type: 'interaction.question_failed',
+      data: {
+        action: 'abandon',
+        matcher: { phase: 'cancel-preflight', reason: 'menu_not_visible' },
+        questionText: 'Which rollout should we use?',
+      },
+    });
+    expect(transitions).toHaveLength(1);
+    expect(transitions[0]).toMatchObject({
+      type: 'interaction.question_cancelled',
+      patch: { status: 'awaiting_user', pendingQuestion: undefined, openTools: [] },
+      data: {
+        toolUseId: 'tool-current',
+        confirmedBy: 'state-release',
+        questionText: 'Which rollout should we use?',
+        pendingQuestion: null,
+      },
+    });
   });
 
   test('a stale bound abandon cannot cancel a newer or already-cleared question', async () => {
@@ -309,6 +376,11 @@ describe('pending-question pane self-heal evidence', () => {
     expect(
       paneShowsStructuredQuestionMenu(
         '? Which rollout should we use?\n❯ 1. Enable feature\n  2. Enable flags\nEnter to select · Esc to cancel',
+      ),
+    ).toBe(true);
+    expect(
+      paneShowsStructuredQuestionMenu(
+        'Question 1/1\nWhich rollout?\n› 1. Enable feature  Direct.\n  2. Enable flags  Guarded.\nenter to submit answer | esc to interrupt',
       ),
     ).toBe(true);
     expect(paneShowsStructuredQuestionMenu('❯ continue')).toBe(false);
