@@ -1,6 +1,6 @@
 // THE UNIFIED SESSION SIDE PANE — one host for every session-scoped companion
-// surface: browser, files, tasks, pins, terminals, skills, lineage, analytics
-// and attention.
+// surface: browser, files, tasks, pins, terminals, skills, lineage, analytics,
+// attention and the explicitly unavailable MCP capability.
 //
 // The pattern is extracted from InAppBrowser.tsx (the first surface to get it
 // right) and is now the CANONICAL shape for session-scoped side content —
@@ -49,11 +49,13 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  Cable,
   ChartNoAxesCombined,
   CircleAlert,
   FolderGit2,
   GitFork,
   Globe2,
+  LayoutGrid,
   ListTodo,
   Pin,
   Sparkles,
@@ -96,7 +98,8 @@ export type SidePaneSurface =
   | 'skills'
   | 'lineage'
   | 'analytics'
-  | 'attention';
+  | 'attention'
+  | 'mcp';
 export type SidePanePresentation = 'pane' | 'sheet';
 
 export interface SidePaneSurfaceMeta {
@@ -105,6 +108,10 @@ export interface SidePaneSurfaceMeta {
   tabLabel: string;
   closeLabel: string;
   icon: LucideIcon;
+  /** Static capability gate. Omit for a live surface. An unavailable entry is
+   *  still shown in the registry-driven launcher, but cannot pretend to open
+   *  a data source that does not exist yet. */
+  unavailableReason?: string;
 }
 
 /** What the reader is told opened, and how the sheet dismiss is labelled. */
@@ -127,6 +134,13 @@ export const SIDE_PANE_SURFACES: Record<SidePaneSurface, SidePaneSurfaceMeta> = 
     tabLabel: 'Needs',
     closeLabel: 'Close attention',
     icon: CircleAlert,
+  },
+  mcp: {
+    label: 'MCP',
+    tabLabel: 'MCP',
+    closeLabel: 'Close MCP',
+    icon: Cable,
+    unavailableReason: 'No MCP data source is connected yet.',
   },
 };
 
@@ -436,6 +450,25 @@ function SurfaceBody({
           onRequestClose={onClose}
         />
       );
+    case 'mcp':
+      return (
+        <>
+          <SurfaceHeader
+            icon={<Cable size={17} />}
+            label="MCP"
+            titleId={titleId}
+            presentation={presentation}
+            onClose={onClose}
+            closeLabel={SIDE_PANE_SURFACES.mcp.closeLabel}
+          />
+          <div className="flex min-h-[240px] flex-1 items-center justify-center px-panel py-8 text-center">
+            <div className="max-w-xs">
+              <Cable size={28} aria-hidden="true" className="mx-auto text-muted" />
+              <p className="mb-0 mt-3 text-ui leading-base text-muted">{SIDE_PANE_SURFACES.mcp.unavailableReason}</p>
+            </div>
+          </div>
+        </>
+      );
   }
 }
 
@@ -503,34 +536,175 @@ export function SidePaneShell({
   );
 }
 
-// ---- triggers -------------------------------------------------------------------
+// ---- registry-driven bento launcher ---------------------------------------------
 
-/** A 44px header trigger for one surface, styled to sit beside PinsTrigger.
- *  Renders nothing outside a workspace so callers never need to guard. */
-export function SidePaneTrigger({
-  surface,
-  label,
-  icon,
+export type SidePaneLauncherBadges = Partial<Record<SidePaneSurface, number>>;
+export type SidePaneLauncherDisabled = Partial<Record<SidePaneSurface, string>>;
+
+export function SidePaneBento({
+  host,
+  onSelect,
+  badges,
+  disabled,
 }: {
-  surface: SidePaneSurface;
-  label: string;
-  icon: ReactNode;
+  host: SidePaneHost;
+  onSelect: (surface: SidePaneSurface) => void;
+  badges: SidePaneLauncherBadges;
+  disabled: SidePaneLauncherDisabled;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-sm sm:grid-cols-3" aria-label="Session tools">
+      {(Object.entries(SIDE_PANE_SURFACES) as Array<[SidePaneSurface, SidePaneSurfaceMeta]>).map(([surface, meta]) => {
+        const Icon = meta.icon;
+        const unavailable = meta.unavailableReason ?? disabled[surface];
+        const selected = host.surface === surface;
+        const badge = badges[surface] ?? 0;
+        return (
+          <button
+            key={surface}
+            type="button"
+            disabled={Boolean(unavailable)}
+            aria-disabled={unavailable ? true : undefined}
+            aria-pressed={selected}
+            aria-label={unavailable ? `${meta.label}, unavailable: ${unavailable}` : `Open ${meta.label}`}
+            title={unavailable ?? `Open ${meta.label}`}
+            onClick={() => onSelect(surface)}
+            className="relative flex min-h-[68px] min-w-0 flex-col items-start justify-between gap-xs rounded-control border border-border bg-surface-2 p-2 text-left text-fg hover:border-accent-border hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <span className="flex w-full items-start justify-between gap-xs">
+              <span
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-control border border-accent-border bg-surface text-accent"
+                aria-hidden="true"
+              >
+                <Icon size={17} />
+              </span>
+              {badge > 0 && (
+                <span className="inline-flex min-h-[22px] min-w-[22px] items-center justify-center rounded-full bg-accent px-1 text-2xs font-semibold text-accent-fg">
+                  {badge > 99 ? '99+' : badge}
+                </span>
+              )}
+            </span>
+            <span className="w-full min-w-0">
+              <span className="block truncate text-ui font-semibold">{meta.label}</span>
+              {unavailable && <span className="block truncate text-2xs text-muted">Unavailable</span>}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The one top-bar entry for every registered session tool. The launcher maps
+ *  SIDE_PANE_SURFACES directly: adding a registry entry cannot silently omit
+ *  it from the bento. Desktop uses a non-modal anchored panel; a 390px layout
+ *  uses the established focus-trapped sheet. Neither path focuses pane content
+ *  when a tool is selected. */
+export function SidePaneLauncher({
+  compact,
+  active = true,
+  badges = {},
+  disabled = {},
+}: {
+  compact: boolean;
+  active?: boolean;
+  badges?: SidePaneLauncherBadges;
+  disabled?: SidePaneLauncherDisabled;
 }) {
   const host = useSidePane();
+  const generatedId = useId();
+  const launcherId = `session-tools-${generatedId}`;
+  const panelId = `${launcherId}-panel`;
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const [open, setOpen] = useState(false);
+
+  const close = useCallback((restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!active) setOpen(false);
+  }, [active]);
+
+  useEffect(() => {
+    if (!open || compact) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (!popoverRef.current?.contains(target) && !triggerRef.current?.contains(target)) close();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      close(true);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [close, compact, open]);
+
   if (!host) return null;
-  const expanded = host.surface === surface;
+
+  const select = (surface: SidePaneSurface) => {
+    const meta = SIDE_PANE_SURFACES[surface];
+    if (meta.unavailableReason || disabled[surface]) return;
+    setOpen(false);
+    // Let a closing mobile launcher restore its own focus first; opening a
+    // surface never focuses its content, and records the launcher as opener so
+    // the pane's eventual close has a stable return target.
+    window.requestAnimationFrame(() => host.open(surface, triggerRef.current));
+  };
+  const bento = <SidePaneBento host={host} onSelect={select} badges={badges} disabled={disabled} />;
+
   return (
-    <button
-      type="button"
-      onClick={event => host.toggle(surface, event.currentTarget)}
-      aria-expanded={expanded}
-      aria-controls={expanded ? host.paneId : undefined}
-      aria-label={label}
-      title={label}
-      className="relative inline-flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-control border border-border p-0 text-muted hover:border-accent-border hover:text-fg"
-    >
-      {icon}
-    </button>
+    <>
+      <div className="relative shrink-0">
+        <button
+          ref={triggerRef}
+          id={launcherId}
+          type="button"
+          onClick={() => setOpen(current => !current)}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-controls={open ? panelId : undefined}
+          aria-label="Open session tools"
+          title="Session tools"
+          className="relative inline-flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-control border border-border p-0 text-muted hover:border-accent-border hover:text-fg"
+        >
+          <LayoutGrid size={17} aria-hidden="true" />
+        </button>
+        {open && !compact && (
+          <div
+            ref={popoverRef}
+            id={panelId}
+            role="dialog"
+            aria-label="Session tools"
+            className="absolute right-0 top-full z-50 mt-1 w-[min(336px,calc(100vw-16px))] rounded-panel border border-border bg-surface p-panel shadow-popover"
+          >
+            {bento}
+          </div>
+        )}
+      </div>
+      {compact && (
+        <BottomSheet
+          id={panelId}
+          open={open}
+          onClose={() => close()}
+          labelledBy={launcherId}
+          closeLabel="Close session tools"
+          panelClassName="overflow-hidden bg-surface"
+          maxHeight="min(76dvh, calc(var(--app-h, 100dvh) - var(--gap-sm)))"
+          zIndexClass="z-[80]"
+        >
+          <div className="overflow-y-auto p-panel">{bento}</div>
+        </BottomSheet>
+      )}
+    </>
   );
 }
 
@@ -590,15 +764,17 @@ export function SidePaneWorkspace({
   const presentation: SidePanePresentation = compact ? 'sheet' : 'pane';
   const tabSpecs = useMemo<readonly SidePaneTabSpec<SidePaneSurface>[]>(
     () =>
-      (Object.entries(SIDE_PANE_SURFACES) as Array<[SidePaneSurface, SidePaneSurfaceMeta]>).map(([key, meta]) => {
-        const Icon = meta.icon;
-        return {
-          key,
-          label: meta.label,
-          shortLabel: meta.tabLabel,
-          icon: <Icon size={15} aria-hidden="true" />,
-        };
-      }),
+      (Object.entries(SIDE_PANE_SURFACES) as Array<[SidePaneSurface, SidePaneSurfaceMeta]>)
+        .filter(([, meta]) => !meta.unavailableReason)
+        .map(([key, meta]) => {
+          const Icon = meta.icon;
+          return {
+            key,
+            label: meta.label,
+            shortLabel: meta.tabLabel,
+            icon: <Icon size={15} aria-hidden="true" />,
+          };
+        }),
     [],
   );
   useEffect(() => {

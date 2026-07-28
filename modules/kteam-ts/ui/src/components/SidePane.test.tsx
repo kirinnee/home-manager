@@ -17,6 +17,7 @@ import {
   RETAINED_SURFACES,
   sidePaneAnnouncement,
   SidePaneShell,
+  SidePaneBento,
   SidePaneWorkspace,
   SIDE_PANE_SURFACES,
   writeSidePaneState,
@@ -59,11 +60,13 @@ describe('announcements', () => {
       'lineage',
       'analytics',
       'attention',
+      'mcp',
     ]);
     for (const meta of Object.values(SIDE_PANE_SURFACES)) {
       expect(meta.label.length).toBeGreaterThan(0);
       expect(meta.closeLabel.length).toBeGreaterThan(0);
     }
+    expect(SIDE_PANE_SURFACES.mcp.unavailableReason).toBe('No MCP data source is connected yet.');
   });
 });
 
@@ -74,6 +77,30 @@ describe('retention policy', () => {
     for (const surface of ['files', 'tasks', 'pins', 'skills', 'lineage', 'analytics', 'attention'] as const) {
       expect(RETAINED_SURFACES.has(surface)).toBe(false);
     }
+  });
+});
+
+describe('tool bento', () => {
+  test('renders the exact registry, including an honestly unavailable MCP entry', () => {
+    const html = renderToStaticMarkup(
+      <SidePaneBento
+        host={{
+          paneId: 'pane',
+          presentation: 'pane',
+          surface: null,
+          open: () => undefined,
+          close: () => undefined,
+          toggle: () => undefined,
+        }}
+        onSelect={() => undefined}
+        badges={{ pins: 3, attention: 2 }}
+        disabled={{}}
+      />,
+    );
+    expect(html.match(/<button/g)?.length).toBe(Object.keys(SIDE_PANE_SURFACES).length);
+    for (const meta of Object.values(SIDE_PANE_SURFACES)) expect(html).toContain(meta.label);
+    expect(html).toContain('MCP, unavailable: No MCP data source is connected yet.');
+    expect(html).toContain('disabled=""');
   });
 });
 
@@ -118,7 +145,8 @@ describe('workspace', () => {
     expect(html).toContain('data-conversation="visible"');
     expect(html).toContain('role="complementary"');
     expect(html).toContain('role="tablist"');
-    expect(html.match(/role="tab"/g)?.length).toBe(9);
+    // Nine side-pane surfaces plus the Task surface's List/Kanban/DAG tabs.
+    expect(html.match(/role="tab"/g)?.length).toBe(12);
     expect(html).toContain('role="tabpanel"');
     expect(html).toContain('Opened Tasks beside the conversation');
     expect(html).not.toContain('aria-modal');

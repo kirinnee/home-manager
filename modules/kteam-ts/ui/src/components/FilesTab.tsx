@@ -1,9 +1,10 @@
-// Files tab — the read-only working-tree viewer for one session.
+// Files tab — a deliberately ordinary read-only file browser for one session.
 //
-// CHANGES FIRST. The reason to open a session's files is almost never "browse a
-// tree"; it is "what did the agent just change". So the tab opens on the git
-// status list, one tap goes to the unified diff, and the directory browser is
-// the second section rather than the front door.
+// The directory is the front door. Opening a file immediately shows its useful
+// form: Markdown as prose, recognised code with the app's existing highlighter,
+// everything else as text. Raw bytes and the git diff are icon actions on that
+// file, never modes the reader must pick before seeing it. Git status stays in
+// the listing as a compact dot plus line counts instead of a second ceremony.
 //
 // Everything here is phone-first and measured at 360px: one vertical scroller
 // per pane, 44px rows, wide content (long paths, long diff lines, wide tables)
@@ -19,9 +20,20 @@
 // already in the lazy session chunk this tab rides in.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ArrowLeft, CornerLeftUp, FileText, Folder, GitBranch, Link2Off, Loader2, Lock, RefreshCw } from 'lucide-react';
+import {
+  ArrowLeft,
+  Code2,
+  CornerLeftUp,
+  FileText,
+  Folder,
+  GitCompareArrows,
+  Link2Off,
+  Loader2,
+  Lock,
+  RefreshCw,
+  X,
+} from 'lucide-react';
 import { Markdown } from './Markdown';
-import { ViewTabs } from './ViewTabs';
 import { highlightToHtml } from '../lib/highlight';
 import { langFromPath } from '../lib/tool-extract';
 import { useInputModality } from '../hooks/useInputModality';
@@ -38,34 +50,29 @@ import {
 import {
   UNOPENABLE_NAME_REASON,
   baseName,
-  changeRowLabel,
-  countLabel,
   crumbs,
-  dirPrefix,
   formatBytes,
   isMarkdownPath,
   isOpenableName,
-  isOpenablePath,
   joinRel,
   parentRel,
   parseUnifiedDiff,
   renderableDiffLines,
   statusChip,
   type ParsedDiff,
-  type StatusChip,
 } from './files-model';
 import './files.css';
 
-/** Mirrors `MAX_HIGHLIGHT_CHARS` in `lib/highlight.ts`, which is module-private
- *  there. It is duplicated rather than exported because that file is shared
- *  work in this change; the number exists here only to EXPLAIN the plain-text
- *  fallback (`highlightToHtml` still enforces it), so a drift makes the note
- *  wrong, never the rendering. */
+/** Mirrors the shared highlighter's private cap only to explain its fallback.
+ *  Highlighting itself still owns and enforces the real limit. */
 const HIGHLIGHT_LIMIT = 60_000;
 
-type OpenView =
-  | { kind: 'diff'; path: string }
-  | { kind: 'file'; path: string; rev: 'work' | 'head'; render: 'rendered' | 'source' };
+type FileView = 'normal' | 'raw' | 'diff';
+
+interface OpenFileTab {
+  path: string;
+  view: FileView;
+}
 
 interface Props {
   sessionId: string;
@@ -177,91 +184,44 @@ function Failed({ what, error, onRetry }: { what: string; error: string; onRetry
   );
 }
 
-function StatusBadge({ chip }: { chip: StatusChip }) {
-  // The letter is decoration: every row's accessible name already says
-  // "Modified: src/app.ts", so announcing "M" again is noise.
-  return (
-    <span
-      className="kt-badge"
-      data-tone={chip.tone === 'neutral' ? undefined : chip.tone}
-      aria-hidden="true"
-      title={chip.detail ? `${chip.label} (${chip.detail})` : chip.label}
-    >
-      {chip.code}
-    </span>
-  );
+/** Spoken + tooltip copy for the condensed visual marker. Colour and the dot
+ *  are deliberately redundant: the row's accessible name carries the status
+ *  word and exact counts too. */
+export function changeDescription(change: FsChange): string {
+  const chip = statusChip(change.status);
+  const counts = [
+    change.additions === undefined || (change.additions === 0 && !['A', '?'].includes(chip.code))
+      ? null
+      : `+${change.additions}`,
+    change.deletions === undefined || (change.deletions === 0 && chip.code !== 'D') ? null : `−${change.deletions}`,
+  ].filter(Boolean);
+  return [chip.detail ? `${chip.label} (${chip.detail})` : chip.label, ...counts].join(' · ');
 }
 
-/* ---- Changes --------------------------------------------------------------
-   Paths render in two parts — a dimmed directory and a strong basename — and
-   WRAP rather than truncate. On a phone the tail of a path is the informative
-   half, and `text-overflow: ellipsis` eats exactly that. */
+export function ChangeIndicator({ change }: { change: FsChange }) {
+  const chip = statusChip(change.status);
+  const knownAdd = change.additions !== undefined;
+  const knownDel = change.deletions !== undefined;
+  const showAdd = (change.additions ?? 0) > 0 || (knownAdd && ['A', '?'].includes(chip.code));
+  const showDel = (change.deletions ?? 0) > 0 || (knownDel && chip.code === 'D');
+  const unknownAdd = !knownAdd && ['A', '?', 'C'].includes(chip.code);
+  const unknownDel = !knownDel && chip.code === 'D';
+  const label = changeDescription(change);
 
-export function ChangesList({
-  changes,
-  truncated,
-  onOpen,
-}: {
-  changes: FsChange[];
-  /** The daemon capped git's status output — say so, in the list itself. */
-  truncated?: boolean;
-  onOpen: (path: string) => void;
-}) {
   return (
-    <ul className="m-0 list-none p-0">
-      {changes.map(change => {
-        const chip = statusChip(change.status);
-        // A path the daemon's grammar refuses is shown VERBATIM and inert: the
-        // dimmed-directory/strong-basename split runs through `normalizeRel`,
-        // which would print `a\b.ts` as `a/ b.ts` — a path that is not the one
-        // git named. Dropping the row instead would be worse: the file really
-        // did change.
-        if (!isOpenablePath(change.path)) {
-          return (
-            <li key={`${change.status}:${change.path}`}>
-              <div className="kt-fs-row" data-inert="true">
-                <StatusBadge chip={chip} />
-                <span className="kt-fs-name">
-                  <span>
-                    <span className="sr-only">{chip.label}: </span>
-                    <span className="kt-fs-strong">{change.path}</span>
-                  </span>
-                  {change.from && <span className="kt-fs-dim">renamed from {change.from}</span>}
-                  <span className="kt-fs-dim">{UNOPENABLE_NAME_REASON}</span>
-                </span>
-              </div>
-            </li>
-          );
-        }
-        return (
-          <li key={`${change.status}:${change.path}`}>
-            <button
-              type="button"
-              className="kt-fs-row"
-              onClick={() => onOpen(change.path)}
-              aria-label={changeRowLabel(change.path, chip, change.from)}
-            >
-              <StatusBadge chip={chip} />
-              <span className="kt-fs-name">
-                <span>
-                  {dirPrefix(change.path) && <span className="kt-fs-dim">{dirPrefix(change.path)}</span>}
-                  <span className="kt-fs-strong">{baseName(change.path)}</span>
-                </span>
-                {change.from && <span className="kt-fs-dim">renamed from {change.from}</span>}
-              </span>
-            </button>
-          </li>
-        );
-      })}
-      {truncated && (
-        <li>
-          <div className="kt-fs-note" data-tone="warn" role="status">
-            Change list truncated by the daemon — git reported more changed files than it serves at once, so some are
-            missing from this list.
-          </div>
-        </li>
+    <span className="kt-fs-change" aria-label={label} title={label}>
+      <span className="kt-fs-change-dot" data-tone={chip.tone} aria-hidden="true" />
+      {(showAdd || unknownAdd) && (
+        <span className="kt-fs-change-count" data-kind="add" aria-hidden="true">
+          +{showAdd ? change.additions : ''}
+        </span>
       )}
-    </ul>
+      {(showDel || unknownDel) && (
+        <span className="kt-fs-change-count" data-kind="del" aria-hidden="true">
+          −{showDel ? change.deletions : ''}
+        </span>
+      )}
+    </span>
   );
 }
 
@@ -292,11 +252,13 @@ export function entryRefusal(entry: FsEntry): string | null {
 export function BrowseList({
   listing,
   dir,
+  changes,
   onEnter,
   onOpenFile,
 }: {
   listing: FsListing;
   dir: string;
+  changes?: ReadonlyMap<string, FsChange>;
   onEnter: (path: string) => void;
   onOpenFile: (path: string) => void;
 }) {
@@ -331,6 +293,7 @@ export function BrowseList({
         const path = joinRel(dir, entry.name);
         const isDir = entry.type === 'dir';
         const openable = !refusal;
+        const change = openable && !isDir ? changes?.get(path) : undefined;
         const icon = entry.escapes ? (
           <Link2Off size={15} className="kt-fs-icon" aria-hidden="true" />
         ) : refusal ? (
@@ -344,9 +307,12 @@ export function BrowseList({
           <>
             {icon}
             <span className="kt-fs-name">
-              <span className="kt-fs-strong">
-                {entry.name}
-                {isDir ? '/' : ''}
+              <span className="kt-fs-name-line">
+                <span className="kt-fs-strong">
+                  {entry.name}
+                  {isDir ? '/' : ''}
+                </span>
+                {change && <ChangeIndicator change={change} />}
               </span>
               {refusal && <span className="kt-fs-dim">{refusal}</span>}
             </span>
@@ -373,7 +339,9 @@ export function BrowseList({
               aria-label={
                 isDir
                   ? `Open folder ${entry.name}`
-                  : `Open file ${entry.name}${entry.size != null ? `, ${formatBytes(entry.size)}` : ''}`
+                  : `Open file ${entry.name}${entry.size != null ? `, ${formatBytes(entry.size)}` : ''}${
+                      change ? `, ${changeDescription(change)}` : ''
+                    }`
               }
             >
               {body}
@@ -444,13 +412,14 @@ export function fileRefusal(file: FsFile): string | null {
   return null;
 }
 
-export function FileBody({ file, path, render }: { file: FsFile; path: string; render: 'rendered' | 'source' }) {
+export function FileBody({ file, path, raw = false }: { file: FsFile; path: string; raw?: boolean }) {
   const refusal = fileRefusal(file);
   const content = file.content ?? '';
   const lang = file.lang ?? langFromPath(path);
+  const markdown = isMarkdownPath(path);
   const html = useMemo(
-    () => (refusal || render === 'rendered' ? null : highlightToHtml(content, lang)),
-    [refusal, render, content, lang],
+    () => (refusal || raw || markdown ? null : highlightToHtml(content, lang)),
+    [refusal, raw, markdown, content, lang],
   );
 
   if (refusal) {
@@ -463,7 +432,7 @@ export function FileBody({ file, path, render }: { file: FsFile; path: string; r
   if (!content) {
     return <Note role="status">This file is empty.</Note>;
   }
-  if (render === 'rendered') {
+  if (!raw && markdown) {
     return (
       <div className="kt-fs-md">
         <Markdown text={content} />
@@ -472,13 +441,13 @@ export function FileBody({ file, path, render }: { file: FsFile; path: string; r
   }
   return (
     <>
-      {html === null && lang && content.length > HIGHLIGHT_LIMIT && (
+      {!raw && html === null && lang && content.length > HIGHLIGHT_LIMIT && (
         <div className="kt-fs-note" role="status">
           Syntax highlighting is off above {HIGHLIGHT_LIMIT.toLocaleString()} characters.
         </div>
       )}
       <div className="kt-fs-code scroll-thin">
-        {html === null ? (
+        {raw || html === null ? (
           // Escaped by React — raw HTML is inserted ONLY for highlighter output,
           // which escapes its own input (same rule as Markdown.tsx).
           <pre className="kt-fs-pre">{content}</pre>
@@ -494,68 +463,124 @@ export function FileBody({ file, path, render }: { file: FsFile; path: string; r
 
 /* ---- the tab -------------------------------------------------------------- */
 
+export function OpenFileTabs({
+  tabs,
+  activePath,
+  onActivate,
+  onClose,
+}: {
+  tabs: readonly OpenFileTab[];
+  activePath: string | null;
+  onActivate: (path: string) => void;
+  onClose: (path: string) => void;
+}) {
+  return (
+    <div className="kt-fs-tabs scroll-thin" role="group" aria-label="Open files">
+      {tabs.map(tab => {
+        const active = tab.path === activePath;
+        return (
+          <span key={tab.path} className="kt-fs-tab" data-active={active || undefined}>
+            <button
+              type="button"
+              className="kt-fs-tab-open"
+              aria-pressed={active}
+              onClick={() => onActivate(tab.path)}
+              title={tab.path}
+            >
+              <FileText size={14} aria-hidden="true" />
+              <span>{baseName(tab.path)}</span>
+            </button>
+            <button
+              type="button"
+              className="kt-fs-tab-close"
+              onClick={() => onClose(tab.path)}
+              aria-label={`Close ${baseName(tab.path)}`}
+              title={`Close ${tab.path}`}
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 export function FilesTab({ sessionId, cwd }: Props) {
   const probe = useFsProbe(sessionId);
-  const [section, setSection] = useState<'changes' | 'browse'>('changes');
   const [dir, setDir] = useState('');
-  const [stack, setStack] = useState<OpenView[]>([]);
-  const open = stack.length ? stack[stack.length - 1]! : null;
+  const [tabs, setTabs] = useState<OpenFileTab[]>([]);
+  const [activePath, setActivePath] = useState<string | null>(null);
+  const [focusRequest, setFocusRequest] = useState(0);
   const { touchAffected } = useInputModality();
   const paneRef = useRef<HTMLDivElement>(null);
+  const touchAffectedRef = useRef(touchAffected);
+  touchAffectedRef.current = touchAffected;
 
   const repo = probe.changes?.repo ?? false;
   const changes = probe.changes?.changes ?? [];
   const changesTruncated = probe.changes?.truncated ?? false;
-  const changedPaths = useMemo(() => new Set(changes.map(change => change.path)), [changes]);
+  const changeMap = useMemo(() => new Map(changes.map(change => [change.path, change])), [changes]);
+  const active = activePath ? (tabs.find(tab => tab.path === activePath) ?? null) : null;
 
-  const push = useCallback((next: OpenView) => setStack(current => [...current, next]), []);
-  const back = useCallback(() => setStack(current => current.slice(0, -1)), []);
-  const replaceTop = useCallback(
-    (patch: Partial<Extract<OpenView, { kind: 'file' }>>) =>
-      setStack(current => {
-        const top = current[current.length - 1];
-        if (!top || top.kind !== 'file') return current;
-        return [...current.slice(0, -1), { ...top, ...patch }];
-      }),
-    [],
+  const openFile = useCallback((path: string) => {
+    setTabs(current =>
+      current.some(tab => tab.path === path)
+        ? current.map(tab => (tab.path === path ? { ...tab, view: 'normal' } : tab))
+        : [...current, { path, view: 'normal' }],
+    );
+    setActivePath(path);
+    // Opening from the directory replaces the control that held focus. Ask for
+    // the content once; clicking an EXISTING file tab never increments this,
+    // so tab switching leaves focus exactly where the reader put it.
+    setFocusRequest(request => request + 1);
+  }, []);
+
+  const closeFile = useCallback(
+    (path: string) => {
+      const index = tabs.findIndex(tab => tab.path === path);
+      if (index < 0) return;
+      const remaining = tabs.filter(tab => tab.path !== path);
+      setTabs(remaining);
+      setActivePath(current =>
+        current === path ? (remaining[Math.min(index, remaining.length - 1)]?.path ?? null) : current,
+      );
+    },
+    [tabs],
   );
 
-  const openDiff = useCallback((path: string) => push({ kind: 'diff', path }), [push]);
-  const openFile = useCallback(
-    (path: string, rev: 'work' | 'head' = 'work', render?: 'rendered' | 'source') =>
-      push({ kind: 'file', path, rev, render: render ?? (isMarkdownPath(path) ? 'rendered' : 'source') }),
-    [push],
+  const setActiveView = useCallback(
+    (view: FileView) => {
+      if (!activePath) return;
+      setTabs(current => current.map(tab => (tab.path === activePath ? { ...tab, view } : tab)));
+    },
+    [activePath],
   );
 
-  // Move focus to the pane when a view opens so a keyboard reader is not left
-  // at the top of the page and can scroll the diff immediately. NEVER on touch:
-  // an unrequested focus there summons the keyboard and jumps the viewport
-  // (hooks/useInputModality.ts owns that policy — viewport width plays no part).
-  const depth = stack.length;
+  // Never on touch: an unrequested focus there summons the keyboard and jumps
+  // the viewport (input capability, not viewport width, owns that policy).
+  // `focusRequest` is the ONLY dependency on purpose: raw/diff changes and file
+  // tab activation update `active` but must keep focus on the control used.
   useEffect(() => {
-    if (touchAffected || !depth) return;
+    if (touchAffectedRef.current || focusRequest === 0) return;
     paneRef.current?.focus({ preventScroll: true });
-  }, [touchAffected, depth]);
+  }, [focusRequest]);
 
   const listing = useFsResource<FsListing>(
-    !open && section === 'browse' ? `list:${sessionId}:${dir}` : null,
+    !active ? `list:${sessionId}:${dir}` : null,
     useCallback(signal => fsApi.list(sessionId, dir, signal), [sessionId, dir]),
   );
 
-  const diffPath = open?.kind === 'diff' ? open.path : null;
+  const diffPath = active?.view === 'diff' ? active.path : null;
   const diff = useFsResource<string>(
     diffPath ? `diff:${sessionId}:${diffPath}` : null,
     useCallback(signal => fsApi.diff(sessionId, diffPath ?? '', signal), [sessionId, diffPath]),
   );
 
-  const filePath = open?.kind === 'file' ? open.path : null;
-  const fileRev = open?.kind === 'file' ? open.rev : 'work';
+  const filePath = active && active.view !== 'diff' ? active.path : null;
   const file = useFsResource<FsFile>(
-    filePath ? `file:${sessionId}:${filePath}:${fileRev}` : null,
-    useCallback(
-      signal => fsApi.file(sessionId, filePath ?? '', fileRev === 'head' ? 'head' : undefined, signal),
-      [sessionId, filePath, fileRev],
-    ),
+    filePath ? `file:${sessionId}:${filePath}` : null,
+    useCallback(signal => fsApi.file(sessionId, filePath ?? '', undefined, signal), [sessionId, filePath]),
   );
 
   const parsedDiff = useMemo(() => (diff.data != null ? parseUnifiedDiff(diff.data) : null), [diff.data]);
@@ -563,126 +588,81 @@ export function FilesTab({ sessionId, cwd }: Props) {
   // emptiness test has to agree with what DiffBody actually renders.
   const diffHasBody = useMemo(() => (parsedDiff ? renderableDiffLines(parsedDiff).length > 0 : false), [parsedDiff]);
 
-  // Browse states the CURRENT folder only — the breadcrumb row directly below
-  // carries the rest of the path, and at 360px a deep directory printed in full
-  // took five wrapped lines of the header before any content. A file/diff keeps
-  // its whole path: there the path IS the identity of what you are reading.
-  const title = open ? open.path : section === 'changes' ? 'Changes' : baseName(dir) || 'Browse';
-  const subtitle = open
-    ? open.kind === 'diff'
-      ? 'Unified diff vs HEAD'
-      : open.rev === 'head'
-        ? 'Previous version (HEAD)'
-        : 'Working tree'
-    : cwd || undefined;
+  const title = active?.path ?? (dir || cwd || 'Session files');
+  const rawActive = active?.view === 'raw';
+  const diffActive = active?.view === 'diff';
 
   return (
     // `.kt-fs` owns flex:1 + min-height:0 (files.css) — the pane fills what the
     // page gives it and its scroller, not the page, takes the overflow.
     <div className="kt-fs rounded-md border border-border bg-surface">
       <div className="kt-fs-bar">
-        {open ? (
-          <button type="button" className="kt-btn kt-btn--sm" onClick={back} aria-label="Back to the file list">
-            <ArrowLeft size={14} aria-hidden="true" />
-            Back
+        {active && (
+          <button
+            type="button"
+            className="kt-fs-icon-button"
+            onClick={() => setActivePath(null)}
+            aria-label="Back to the file list"
+            title="Back to files"
+          >
+            <ArrowLeft size={16} aria-hidden="true" />
           </button>
-        ) : (
-          <ViewTabs<'changes' | 'browse'>
-            label="Files section"
-            tabs={[
-              { id: 'changes', label: 'Changes' },
-              { id: 'browse', label: 'Browse' },
-            ]}
-            current={section}
-            onChange={setSection}
-          />
         )}
-        <span className="kt-fs-title">
+        <span className="kt-fs-title" title={title}>
           <span className="kt-fs-title-path">{title}</span>
-          {subtitle && (
-            <span className="kt-fs-title-meta" title={subtitle}>
-              {subtitle}
-            </span>
-          )}
         </span>
         <span className="kt-fs-actions">
-          {repo && probe.changes?.branch && (
-            // Truncates (files.css) — a long branch name must never carry the
-            // Refresh control off the pane. The full name stays in the title and
-            // in the accessible name.
-            <span
-              className="kt-badge kt-fs-branch"
-              data-tone="accent"
-              title={`On branch ${probe.changes.branch}`}
-              aria-label={`On branch ${probe.changes.branch}`}
+          {active && (
+            <button
+              type="button"
+              className="kt-fs-icon-button"
+              data-active={rawActive || undefined}
+              aria-pressed={rawActive}
+              onClick={() => setActiveView(rawActive ? 'normal' : 'raw')}
+              aria-label={
+                rawActive ? `Show ${baseName(active.path)} normally` : `Show raw bytes for ${baseName(active.path)}`
+              }
+              title={rawActive ? 'Show normally' : 'Show raw'}
             >
-              <GitBranch size={11} aria-hidden="true" />
-              <span>{probe.changes.branch}</span>
-            </span>
+              <Code2 size={17} aria-hidden="true" />
+            </button>
+          )}
+          {active && repo && (
+            <button
+              type="button"
+              className="kt-fs-icon-button"
+              data-active={diffActive || undefined}
+              aria-pressed={diffActive}
+              onClick={() => setActiveView(diffActive ? 'normal' : 'diff')}
+              aria-label={
+                diffActive ? `Show ${baseName(active.path)} normally` : `Show git diff for ${baseName(active.path)}`
+              }
+              title={diffActive ? 'Show file' : 'Show git diff'}
+            >
+              <GitCompareArrows size={17} aria-hidden="true" />
+            </button>
           )}
           <button
             type="button"
-            className="kt-btn kt-btn--sm"
+            className="kt-fs-icon-button"
             onClick={() => {
               probe.refresh();
-              if (open?.kind === 'diff') diff.reload();
-              else if (open?.kind === 'file') file.reload();
-              else if (section === 'browse') listing.reload();
+              if (diffActive) diff.reload();
+              else if (active) file.reload();
+              else listing.reload();
             }}
             aria-label={probe.refreshing ? 'Refreshing files' : 'Refresh files'}
             title="Re-read the working tree"
           >
-            <RefreshCw size={13} className={probe.refreshing ? 'animate-spin' : undefined} aria-hidden="true" />
-            <span className="sr-only sm:not-sr-only">Refresh</span>
+            <RefreshCw size={16} className={probe.refreshing ? 'animate-spin' : undefined} aria-hidden="true" />
           </button>
         </span>
       </div>
 
-      {/* Second row: whatever switches THIS pane. Kept off the title bar so a
-          360px phone never has to fit a switcher, a path and a control on one
-          line. */}
-      {open?.kind === 'file' && <FileControls open={open} repo={repo} onChange={replaceTop} onDiff={openDiff} />}
-      {open?.kind === 'diff' && (
-        <div className="kt-fs-chip-row">
-          {parsedDiff && (
-            <span className="kt-fs-count">
-              +{parsedDiff.added} −{parsedDiff.removed}
-            </span>
-          )}
-          <button
-            type="button"
-            className="kt-btn kt-btn--sm"
-            onClick={() => openFile(open.path, 'work', 'source')}
-            aria-label={`Open ${baseName(open.path)} as a file`}
-          >
-            <FileText size={13} aria-hidden="true" />
-            Open file
-          </button>
-          {isMarkdownPath(open.path) && (
-            <>
-              <button
-                type="button"
-                className="kt-btn kt-btn--sm"
-                onClick={() => openFile(open.path, 'work', 'rendered')}
-                aria-label={`Render ${baseName(open.path)} as it is now`}
-              >
-                Rendered now
-              </button>
-              {repo && (
-                <button
-                  type="button"
-                  className="kt-btn kt-btn--sm"
-                  onClick={() => openFile(open.path, 'head', 'rendered')}
-                  aria-label={`Render the previous committed ${baseName(open.path)}`}
-                >
-                  Rendered before
-                </button>
-              )}
-            </>
-          )}
-        </div>
+      {tabs.length > 0 && (
+        <OpenFileTabs tabs={tabs} activePath={activePath} onActivate={setActivePath} onClose={closeFile} />
       )}
-      {!open && section === 'browse' && (
+      {!active && (
         <nav className="kt-fs-crumbs scroll-thin" aria-label="Folder path">
           {crumbs(dir).map((crumb, index) => (
             <span key={crumb.path || 'root'} className="contents">
@@ -707,7 +687,7 @@ export function FilesTab({ sessionId, cwd }: Props) {
       )}
 
       <div ref={paneRef} tabIndex={-1} className="kt-fs-scroll scroll-thin outline-none">
-        {open?.kind === 'diff' ? (
+        {diffActive && active ? (
           diff.loading ? (
             <Loading what="the diff" />
           ) : diff.error ? (
@@ -729,111 +709,40 @@ export function FilesTab({ sessionId, cwd }: Props) {
           ) : (
             <Note role="status">No textual changes in this file.</Note>
           )
-        ) : open?.kind === 'file' ? (
+        ) : active ? (
           file.loading ? (
-            <Loading what={baseName(open.path)} />
+            <Loading what={baseName(active.path)} />
           ) : file.error ? (
-            <Failed what={baseName(open.path)} error={file.error} onRetry={file.reload} />
+            <Failed what={baseName(active.path)} error={file.error} onRetry={file.reload} />
           ) : file.data ? (
-            <FileBody file={file.data} path={open.path} render={open.render} />
+            <FileBody file={file.data} path={active.path} raw={rawActive} />
           ) : (
             <Note role="status">Nothing to show.</Note>
           )
-        ) : section === 'changes' ? (
-          probe.state === 'probing' ? (
-            <Loading what="changes" />
-          ) : probe.state === 'error' ? (
-            <Failed what="changes" error={probe.error ?? 'unknown error'} onRetry={probe.refresh} />
-          ) : !repo ? (
-            <Note role="status">
-              This session’s folder is not a git repository, so there is no change list. Use Browse to read its files.
-            </Note>
-          ) : changes.length ? (
-            <>
-              <div className="kt-fs-section-label">
-                {/* A capped list must not print its length as if it were the
-                    total — "12 changed files" would be a claim the daemon
-                    never made. */}
-                {changesTruncated ? 'First ' : ''}
-                {countLabel(changes.length, 'changed file')} vs HEAD
-              </div>
-              <ChangesList changes={changes} truncated={changesTruncated} onOpen={openDiff} />
-            </>
-          ) : changesTruncated ? (
-            // Capped before a single row survived: the empty list is an
-            // artefact of the cap, so it must never read as "nothing changed".
-            <Note tone="warn" role="status">
-              git reported more changed files than the daemon serves at once, and none of them survived the cap — this
-              list is incomplete, not empty.
-            </Note>
-          ) : (
-            <Note role="status">No uncommitted changes — the working tree matches HEAD.</Note>
-          )
-        ) : listing.loading ? (
-          <Loading what={dir || 'the session root'} />
-        ) : listing.error ? (
-          <Failed what={dir || 'the session root'} error={listing.error} onRetry={listing.reload} />
-        ) : listing.data ? (
-          <BrowseList
-            listing={listing.data}
-            dir={dir}
-            onEnter={setDir}
-            onOpenFile={path => (changedPaths.has(path) ? openDiff(path) : openFile(path))}
-          />
         ) : (
-          <Note role="status">Nothing to show.</Note>
+          <>
+            {probe.state === 'error' && (
+              <Note tone="warn" role="status">
+                Files still browse normally, but git change markers are unavailable: {probe.error ?? 'unknown error'}.
+              </Note>
+            )}
+            {changesTruncated && (
+              <Note tone="warn" role="status">
+                Some change dots may be missing because the daemon capped this repository’s status response.
+              </Note>
+            )}
+            {listing.loading ? (
+              <Loading what={dir || 'the session root'} />
+            ) : listing.error ? (
+              <Failed what={dir || 'the session root'} error={listing.error} onRetry={listing.reload} />
+            ) : listing.data ? (
+              <BrowseList listing={listing.data} dir={dir} changes={changeMap} onEnter={setDir} onOpenFile={openFile} />
+            ) : (
+              <Note role="status">Nothing to show.</Note>
+            )}
+          </>
         )}
       </div>
-    </div>
-  );
-}
-
-function FileControls({
-  open,
-  repo,
-  onChange,
-  onDiff,
-}: {
-  open: Extract<OpenView, { kind: 'file' }>;
-  repo: boolean;
-  onChange: (patch: Partial<Extract<OpenView, { kind: 'file' }>>) => void;
-  onDiff: (path: string) => void;
-}) {
-  const markdown = isMarkdownPath(open.path);
-  return (
-    <div className="kt-fs-chip-row">
-      {markdown && (
-        <ViewTabs<'rendered' | 'source'>
-          label="Markdown view"
-          tabs={[
-            { id: 'rendered', label: 'Rendered' },
-            { id: 'source', label: 'Source' },
-          ]}
-          current={open.render}
-          onChange={render => onChange({ render })}
-        />
-      )}
-      {repo && (
-        <ViewTabs<'work' | 'head'>
-          label="File version"
-          tabs={[
-            { id: 'work', label: 'Current' },
-            { id: 'head', label: 'Previous' },
-          ]}
-          current={open.rev}
-          onChange={rev => onChange({ rev })}
-        />
-      )}
-      {repo && (
-        <button
-          type="button"
-          className="kt-btn kt-btn--sm"
-          onClick={() => onDiff(open.path)}
-          aria-label={`Show the diff for ${baseName(open.path)}`}
-        >
-          Diff
-        </button>
-      )}
     </div>
   );
 }
