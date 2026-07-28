@@ -71,6 +71,12 @@ describe('dictationFailureCopy — a plain title per code', () => {
     expect(dictationFailureCopy('empty-segment').title).toBe("One phrase wasn't readable");
   });
 
+  test('a provider failure says the raw transcript was kept, not that dictation was lost', () => {
+    const copy = dictationFailureCopy('enhancement-not-configured');
+    expect(copy.title).toBe('Raw dictation kept');
+    expect(copy.hint).toContain('unmodified transcript was already added');
+  });
+
   test('an unknown code still gets a title, never a blank', () => {
     expect(dictationFailureCopy(undefined).title.length).toBeGreaterThan(0);
     expect(dictationFailureCopy('something-new').title.length).toBeGreaterThan(0);
@@ -158,9 +164,9 @@ describe('DictationSheet rendering', () => {
     expect(html).not.toContain('aria-label="Provisional dictated text"');
   });
 
-  test('finishing keeps the final local decode and captured words in the one-line status', () => {
+  test('finishing names the bounded local settle and keeps captured words in the one-line status', () => {
     const html = render({ stage: 'transcribing', liveText: 'nearly done' });
-    expect(html.toLowerCase()).toContain('final on-device decode and enhancement');
+    expect(html.toLowerCase()).toContain('settling the newest bounded on-device window and enhancement');
     expect(html).toContain('Last heard: nearly done');
     // Still a read-only preview, still no manual Insert button.
     expect(html).toContain('nearly done');

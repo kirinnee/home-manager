@@ -12,7 +12,7 @@
 // runs pause-independently: words appear WHILE the reader keeps speaking, with
 // no wait for a silence boundary. That preview is disposable. There is no
 // textarea, no committed-vs-provisional split, no review step and no Insert
-// button — on Stop the hook runs one clean final decode, enhances once, and
+// button — on Stop the hook settles the newest bounded decode, enhances once, and
 // drops the result straight into the composer draft. The panel only shows what
 // is being heard and offers Stop / Cancel / Hide.
 //   - FAILURE: the real reason, out loud — mic blocked, model not prepared,
@@ -60,6 +60,12 @@ export function formatElapsed(ms: number): string {
  *  rather than the message (not). The message itself is shown underneath — this
  *  is only the headline and the one actionable hint. */
 export function dictationFailureCopy(code: string | undefined): { title: string; hint?: string } {
+  if (code?.startsWith('enhancement-')) {
+    return {
+      title: 'Raw dictation kept',
+      hint: 'Correction failed, but the unmodified transcript was already added to your draft.',
+    };
+  }
   switch (code) {
     case 'permission-denied':
       return {
@@ -104,8 +110,8 @@ export interface DictationSheetProps {
   elapsedMs: number;
   /** A read-only branch off the recorder's exact stream/audio graph. */
   inputMonitor: CaptureMonitor | null;
-  /** The rolling on-device preview. READ-ONLY: the panel never edits it and it
-   *  is not what gets inserted — the final decode is. */
+  /** The rolling on-device preview. READ-ONLY: the panel never edits it; the
+   *  tail-inclusive bounded settle is what gets inserted. */
   liveText: string;
   pendingSegments: number;
   errorCode?: string;
@@ -145,7 +151,7 @@ function stripStatus(
       if (pendingSegments > 0) return 'Listening locally…';
       return 'Words appear as you speak — you never have to pause. Audio stays on this device.';
     case 'transcribing':
-      return `Final on-device decode and enhancement… ${
+      return `Settling the newest bounded on-device window and enhancement… ${
         preview ? `Last heard: ${preview}` : 'The result will be added to your draft.'
       }`;
     case 'empty':
@@ -173,6 +179,7 @@ export function DictationSheet({
   onRetry,
 }: DictationSheetProps) {
   const baseId = useId();
+  const enhancementFailure = errorCode?.startsWith('enhancement-') ?? false;
   const titleId = `${baseId}-title`;
   const safetyId = `${baseId}-safety`;
 
@@ -256,7 +263,7 @@ export function DictationSheet({
             <Square size={15} aria-hidden="true" />
           </Button>
         )}
-        {(stage === 'empty' || stage === 'error') && (
+        {(stage === 'empty' || (stage === 'error' && !enhancementFailure)) && (
           <Button
             type="button"
             variant="primary"
@@ -274,8 +281,8 @@ export function DictationSheet({
           variant="ghost"
           size="sm"
           className="min-h-[44px] min-w-[44px] shrink-0 justify-center p-0"
-          aria-label={stage === 'empty' ? 'Close dictation' : 'Cancel dictation'}
-          title={stage === 'empty' ? 'Close dictation' : 'Cancel dictation'}
+          aria-label={stage === 'empty' || enhancementFailure ? 'Close dictation' : 'Cancel dictation'}
+          title={stage === 'empty' || enhancementFailure ? 'Close dictation' : 'Cancel dictation'}
           onClick={onCancel}
         >
           <X size={15} aria-hidden="true" />
@@ -302,7 +309,9 @@ export function DictationSheet({
             : stage === 'empty'
               ? 'No speech was captured'
               : stage === 'error'
-                ? `Dictation failed: ${errorMessage ?? failure.title}`
+                ? enhancementFailure
+                  ? `Enhancement failed; raw dictation was added: ${errorMessage ?? failure.title}`
+                  : `Dictation failed: ${errorMessage ?? failure.title}`
                 : 'Starting'}
       </span>
       <span id={safetyId} className="sr-only">

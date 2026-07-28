@@ -1,13 +1,16 @@
 import { describe, expect, test } from 'bun:test';
 import {
   CONTEXT_FETCH_LIMIT,
+  CONTEXT_FETCH_TIMEOUT_MS,
   MAX_CONTEXT_MESSAGES,
   MIN_CONTEXT_MESSAGES,
   dictationErrorFromFailure,
   extractContextMessages,
   finishLiveAudioRun,
   hasUsableContext,
+  needsFullFinalDecode,
   observeLiveSamples,
+  withinContextFetchBudget,
   type LiveAudioRun,
 } from './useDictation';
 import type { ChatRecord } from '../types';
@@ -82,6 +85,27 @@ describe('CONTEXT_FETCH_LIMIT', () => {
   });
 });
 
+describe('enhancement context latency budget', () => {
+  test('uses a short default budget and degrades a hung fetch to no context', async () => {
+    expect(CONTEXT_FETCH_TIMEOUT_MS).toBeLessThanOrEqual(250);
+    const never = new Promise<string>(() => undefined);
+    expect(await withinContextFetchBudget(never, 1)).toBeUndefined();
+  });
+
+  test('keeps a context response that arrives inside the budget', async () => {
+    expect(await withinContextFetchBudget(Promise.resolve('context'), 10)).toBe('context');
+  });
+});
+
+describe('stop-time decode policy', () => {
+  test('never re-decodes a settled preview from zero; full batch is empty-preview rescue only', () => {
+    expect(needsFullFinalDecode('settled words', 176_000)).toBe(false);
+    expect(needsFullFinalDecode('', 176_000)).toBe(true);
+    expect(needsFullFinalDecode('   ', 176_000)).toBe(true);
+    expect(needsFullFinalDecode('', 0)).toBe(false);
+  });
+});
+
 describe('local dictation failures', () => {
   test('names an unprepared local model and a bounded-backlog stop by stable code', () => {
     expect(
@@ -97,6 +121,28 @@ describe('local dictation failures', () => {
   });
 });
 
+describe('the master resource switch', () => {
+  test('guards capture and explicitly unloads the ONNX engine when disabled', async () => {
+    const source = await Bun.file(new URL('./useDictation.ts', import.meta.url).pathname).text();
+    expect(source).toContain('options.disabled || !settings.enabled');
+    expect(source).toContain("import('../lib/stt/local-engine').then(engine => engine.unloadLocalEngine())");
+    expect(source).toMatch(/const start = useCallback\(\(\) => \{\s*if \(!supported \|\| disabled\) return;/u);
+  });
+});
+
+describe('optional remote enhancement', () => {
+  test('runs only after final transcription and returns raw words with the real provider reason on failure', async () => {
+    const source = await Bun.file(new URL('./useDictation.ts', import.meta.url).pathname).text();
+    expect(source).toContain("settings.enhancementProvider === 'groq'");
+    expect(source).toContain("import('../lib/stt/remote-enhancement')");
+    expect(source).toMatch(/const enhanced = raw \? await enhanceTranscript/u);
+    expect(source).toContain('text: raw,');
+    expect(source).toContain('enhancementError');
+    expect(source).not.toMatch(/\bonSend\??\s*:/u);
+    expect(source).not.toMatch(/\bonSubmit\??\s*:/u);
+  });
+});
+
 describe('live capture orchestration', () => {
   test('observes the worklet flush tail before freezing the live preview', async () => {
     const order: string[] = [];
@@ -108,8 +154,8 @@ describe('live capture orchestration', () => {
           order.push('preview-push');
           pushed.push(Array.from(samples));
         },
-        stop() {
-          order.push('preview-stop');
+        async finish() {
+          order.push('preview-finish');
           return {
             committed: 'hello',
             provisional: 'there',
@@ -133,6 +179,9 @@ describe('live capture orchestration', () => {
             },
           };
         },
+        stop() {
+          throw new Error('finish(), not stop(), owns the flushed final tail');
+        },
       },
     };
 
@@ -150,7 +199,7 @@ describe('live capture orchestration', () => {
 
     const finished = await finishLiveAudioRun(capture, run);
 
-    expect(order).toEqual(['preview-push', 'capture-stop', 'preview-push', 'capture-tail', 'preview-stop']);
+    expect(order).toEqual(['preview-push', 'capture-stop', 'preview-push', 'capture-tail', 'preview-finish']);
     expect(pushed).toEqual([
       [0.10000000149011612, 0.20000000298023224],
       [0.30000001192092896, 0.4000000059604645],
@@ -166,6 +215,9 @@ describe('live capture orchestration', () => {
       inputSampleRate: null,
       transcriber: {
         push() {},
+        async finish() {
+          throw new Error('unused');
+        },
         stop() {
           throw new Error('unused');
         },

@@ -21,7 +21,11 @@ import { concatFloat32 } from './audio-capture';
 
 export const LIVE_TRANSCRIPTION_INTERVAL_MS = 1_500;
 export const LIVE_TRANSCRIPTION_FIRST_LOOK_MS = 750;
-export const LIVE_TRANSCRIPTION_MAX_BUFFER_MS = 8_000;
+/** Measured on the production int8 browser model: 5 s decoded in 3.71 s on
+ * this desktop, while 8 s took 7.18 s. Keep the steady-state window on the
+ * better side of that knee; phones get a smaller bound below. */
+export const LIVE_TRANSCRIPTION_MAX_BUFFER_MS = 5_000;
+export const LIVE_TRANSCRIPTION_MOBILE_MAX_BUFFER_MS = 4_000;
 export const LIVE_TRANSCRIPTION_CONTEXT_MS = 500;
 export const LIVE_TRANSCRIPTION_EDGE_GUARD_MS = 320;
 export const LIVE_TRANSCRIPTION_PADDING_MS = 240;
@@ -30,6 +34,10 @@ export const LIVE_TRANSCRIPTION_MIN_PASS_CONFIDENCE = 0.15;
 export const LIVE_TRANSCRIPTION_MIN_WORD_CONFIDENCE = 0.15;
 export const LIVE_TRANSCRIPTION_MIN_STABLE_WORDS = 2;
 export const LIVE_TRANSCRIPTION_MIN_PEAK_RMS = 0.002;
+
+export function liveTranscriptionWindowMs(likelyMobile: boolean): number {
+  return likelyMobile ? LIVE_TRANSCRIPTION_MOBILE_MAX_BUFFER_MS : LIVE_TRANSCRIPTION_MAX_BUFFER_MS;
+}
 
 export interface TimedTranscriptWord {
   text: string;
@@ -334,9 +342,9 @@ export class LocalAgreementTranscriber {
     if (this.totalSamples - this.lastSnapshotEndSample >= this.decodeCadenceSamples()) this.requestDecode();
   }
 
-  /** Complete using the newest bounded live hypothesis. Product dictation uses
-   * `stop()` followed by a clean full-recording batch pass, but this terminal
-   * operation keeps the controller complete and independently reusable. */
+  /** Complete using one tail-inclusive decode of the newest bounded window.
+   * Product dictation calls this after capture flushes its final worklet batch,
+   * so settled live text remains authoritative without a growing re-decode. */
   finish(): Promise<LiveTranscriptSnapshot> {
     this.accepting = false;
     this.finishing = true;
@@ -348,8 +356,8 @@ export class LocalAgreementTranscriber {
     return promise;
   }
 
-  /** Logical stop for the product's final batch handoff. The active WASM call
-   * may finish physically, but no late preview can publish over the final text. */
+  /** Logical cancellation. The active WASM call may finish physically, but no
+   * late preview can publish after teardown. Product completion uses finish(). */
   stop(): LiveTranscriptSnapshot {
     if (!this.cancelled && !this.completed) {
       this.accepting = false;
@@ -579,7 +587,7 @@ export class LocalAgreementTranscriber {
    * the pass-level readability and timestamp checks, so seal that endangered
    * contiguous prefix exactly once. Words whose onsets remain in the buffer
    * stay provisional and are still free to back-edit in the next epoch. The
-   * product's clean full-recording pass remains authoritative at Stop. */
+   * terminal bounded pass seals whatever remains provisional at Stop. */
   private finalizeEvictedProvisional(trimThroughSample: number): void {
     let count = 0;
     while (count < this.provisionalWords.length && this.provisionalWords[count]!.startSample < trimThroughSample) {

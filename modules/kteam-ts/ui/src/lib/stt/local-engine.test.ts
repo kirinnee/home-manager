@@ -144,9 +144,9 @@ function serveTiny(overrides?: Map<string, number>) {
   };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   installCaches();
-  unloadLocalEngine();
+  await unloadLocalEngine();
   resetOrtRuntimeConfiguration();
   fromUrls.mockClear();
   ortEnv.env.wasm = {};
@@ -638,6 +638,23 @@ describe('clearLocalModel', () => {
     // because the entries are gone.
     cache.entries.clear();
     await expect(transcribeLocal(new Float32Array([0.1]))).rejects.toMatchObject({ code: 'not-prepared' });
+  });
+
+  test('releases the ONNX sessions so disabling gives resident model memory back', async () => {
+    const encoderRelease = mock(async () => {});
+    const joinerRelease = mock(async () => {});
+    fromUrls.mockImplementationOnce(async () => ({
+      transcribe: async () => ({ utterance_text: 'loaded' }),
+      encoderSession: { release: encoderRelease },
+      joinerSession: { release: joinerRelease },
+    }));
+    for (const asset of localEngineAssets()) cache.entries.set(asset.url, new Uint8Array(4));
+    await transcribeLocal(new Float32Array([0.1]));
+
+    await unloadLocalEngine();
+
+    expect(encoderRelease).toHaveBeenCalledTimes(1);
+    expect(joinerRelease).toHaveBeenCalledTimes(1);
   });
 
   test('is false rather than a throw where there is no CacheStorage', async () => {

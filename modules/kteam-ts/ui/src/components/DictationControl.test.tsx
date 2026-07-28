@@ -159,10 +159,15 @@ describe('useDictationBundle wiring — the integration contract', () => {
     expect(src).toMatch(/useDictation\(\{[\s\S]*selectionRef,[\s\S]*\}\)/u);
   });
 
-  test('adapts the single final onDraft result to onDraftChange, then closes the flow', async () => {
+  test('adapts the single final onDraft result and keeps a non-fatal enhancement reason visible', async () => {
     const src = await source();
     // onDraft is the ONE output: forward it, then auto-close. No review step.
-    expect(src).toMatch(/onDraft:\s*result\s*=>\s*\{[\s\S]*onDraftChange\(result\)[\s\S]*closePanel\(\)[\s\S]*\}/u);
+    expect(src).toMatch(
+      /onDraft:\s*result\s*=>\s*\{[\s\S]*onDraftChange\(result\)[\s\S]*result\.enhancementError[\s\S]*closePanel\(\)[\s\S]*\}/u,
+    );
+    expect(src).toContain('setPostInsertError(result.enhancementError)');
+    expect(src).toContain('const visibleError = postInsertError ?? dictation.error');
+    expect(src).toContain('errorMessage={visibleError?.message}');
   });
 
   test('there is no manual transcript editing, review, or Insert logic left', async () => {
@@ -184,5 +189,13 @@ describe('useDictationBundle wiring — the integration contract', () => {
     expect(src).toMatch(/\{\s*\.\.\.dictation,\s*start:\s*openAndRecord\s*\}/u);
     // openAndRecord makes the panel visible before delegating to capture.
     expect(src).toMatch(/openAndRecord[\s\S]*setOpen\(true\)/u);
+  });
+
+  test('the persisted master switch blocks the hook, mic, panel, and shortcut entry point', async () => {
+    const src = await source();
+    expect(src).toContain('effectiveDisabled = Boolean(disabled || !sttSettings.enabled)');
+    expect(src).toContain('disabled: effectiveDisabled');
+    expect(src).toContain('if (effectiveDisabled) return');
+    expect(src).toContain('enabledAndSupported = sttSettings.enabled && dictation.supported');
   });
 });
