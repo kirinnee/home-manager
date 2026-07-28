@@ -461,14 +461,56 @@ export function pendingQuestionPaneAdvance(
   return undefined;
 }
 
-/** Native Claude question-menu chrome. This is intentionally diagnostic only:
+type OpenStructuredQuestion = NonNullable<SessionState['pendingQuestion']>;
+
+/** Preserve the harness's raw question wording when a structured form has to
+ * be released. Once `pendingQuestion` is cleared the form disappears, so this
+ * text must travel in both the durable lifecycle event and the HTTP error if
+ * the human is going to answer the same question in prose. */
+function pendingQuestionText(pending: OpenStructuredQuestion): string {
+  return pending.questions.map(question => question.question).join('\n\n');
+}
+
+/** The state edge that makes the ordinary composer available again. It never
+ * consults the pane matcher: that matcher may be the component that just
+ * failed. Pane evidence only decides whether the harness has already started
+ * working or is waiting for prose. */
+function releasedQuestionState(
+  view: SessionView,
+  pending: OpenStructuredQuestion,
+  pane: Pick<PaneState, 'promptReady' | 'visiblePane'> | undefined,
+  reason?: string,
+): Partial<SessionState> {
+  const active = pane !== undefined && paneShowsActiveWork(pane.visiblePane);
+  return {
+    status: active ? 'running' : 'awaiting_user',
+    health: active ? 'healthy' : 'idle',
+    promptReady: pane?.promptReady ?? !active,
+    pendingQuestion: undefined,
+    openTools: (view.state.openTools ?? []).filter(tool => tool !== pending.toolUseId),
+    reason,
+    lastActivityAt: now(),
+  };
+}
+
+/** Keep the original drive error loud while telling the human exactly how to
+ * continue after the form was released. */
+function releasedQuestionError(error: unknown, pending: OpenStructuredQuestion): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  return new Error(
+    `${message}\n\nThe structured form was released. Reply in prose to:\n${pendingQuestionText(pending)}`,
+    { cause: error },
+  );
+}
+
+/** Native structured-question chrome for both harnesses. This is intentionally diagnostic only:
  * without a persisted tool id/questions payload the daemon cannot safely
  * reconstruct or drive the menu, but it can make reverse divergence visible. */
 export function paneShowsStructuredQuestionMenu(pane: string): boolean {
   return (
     /^\s*[❯›>»]\s*\d+[.)]\s+\S/mu.test(pane) &&
-    /(?:enter|return)\s+to\s+select/iu.test(pane) &&
-    /esc(?:ape)?\s+to\s+cancel/iu.test(pane)
+    /(?:enter|return)\s+to\s+(?:select|submit(?:\s+answer)?)/iu.test(pane) &&
+    /esc(?:ape)?\s+to\s+(?:cancel|interrupt)/iu.test(pane)
   );
 }
 
@@ -2815,8 +2857,10 @@ export class SessionManager implements KTeamService {
       try {
         outcome = await this.tmux.answerQuestion(view.config, view.state, labels, other, responses);
       } catch (error) {
+        const pending = view.state.pendingQuestion;
         const pane = await this.tmux.state(view.config.tmuxSession).catch(() => undefined);
         await this.tmux.snapshot(view.config).catch(() => undefined);
+        const questionText = pendingQuestionText(pending);
         await this.emit(
           id,
           'interaction.question_failed',
@@ -2828,6 +2872,8 @@ export class SessionManager implements KTeamService {
             requestedLabels: labels,
             responseCount: responses?.length,
             hasOther: !!other,
+            questionText,
+            questions: pending.questions.map(question => question.question),
             snapshot: 'last-snapshot.txt',
             ...(pane
               ? {
@@ -2848,7 +2894,40 @@ export class SessionManager implements KTeamService {
           },
           'client',
         ).catch(() => undefined);
-        throw error;
+
+        // Do not leave the human behind the same matcher that just refused the
+        // answer. Best-effort one Escape closes the native overlay only when the
+        // controller positively re-binds THIS question; an answer failure is
+        // not permission to Escape a selector that appeared afterwards.
+        // Regardless of that cleanup, the daemon state edge below clears the
+        // form and exposes the ordinary composer. No answer is synthesized.
+        let release: Awaited<ReturnType<TmuxController['cancelQuestion']>> | undefined;
+        let releaseError: unknown;
+        try {
+          release = await this.tmux.cancelQuestion(view.config, view.state, { requireBound: true });
+        } catch (cancelError) {
+          releaseError = cancelError;
+        }
+        const releasedPane = release?.pane ?? (await this.tmux.state(view.config.tmuxSession).catch(() => pane));
+        const proseReason = `structured answer failed; reply in prose to: ${questionText.replaceAll('\n', ' / ')}`;
+        await this.transition(
+          id,
+          releasedQuestionState(view, pending, releasedPane, proseReason),
+          'interaction.question_cancelled',
+          {
+            toolUseId,
+            reason: 'answer failed; structured form released for prose reply',
+            confirmedBy: release?.confirmedBy ?? 'state-release',
+            ...(releaseError
+              ? { releaseError: releaseError instanceof Error ? releaseError.message : String(releaseError) }
+              : {}),
+            questionText,
+            questions: pending.questions.map(question => question.question),
+            pendingQuestion: null,
+          },
+          { source: currentActor() ?? 'client' },
+        );
+        throw releasedQuestionError(error, pending);
       }
       // This is the FIRST success record. The previous implementation emitted
       // interaction.answer before any key was checked, creating false answer
@@ -2928,6 +3007,7 @@ export class SessionManager implements KTeamService {
           } catch (error) {
             const pane = await this.tmux.state(view.config.tmuxSession).catch(() => undefined);
             await this.tmux.snapshot(view.config).catch(() => undefined);
+            const questionText = pendingQuestionText(pending);
             await this.emit(
               id,
               'interaction.question_failed',
@@ -2936,6 +3016,8 @@ export class SessionManager implements KTeamService {
                 toolUseId: pending.toolUseId,
                 error: error instanceof Error ? error.message : String(error),
                 ...(error instanceof StructuredQuestionDriveError ? { matcher: error.diagnostics } : {}),
+                questionText,
+                questions: pending.questions.map(question => question.question),
                 snapshot: 'last-snapshot.txt',
                 ...(pane
                   ? {
@@ -2950,7 +3032,29 @@ export class SessionManager implements KTeamService {
               },
               'client',
             ).catch(() => undefined);
-            throw error;
+            // The key drive may be unconfirmed, but abandoning the daemon's
+            // semantic question state is unconditional. Returning a normal
+            // view makes this a real escape hatch; the reason/event keeps an
+            // actual send/confirmation failure visible instead of retrying it.
+            const releaseReason = `question abandoned; Escape could not be confirmed (${error instanceof Error ? error.message : String(error)}). Reply in prose to: ${questionText.replaceAll('\n', ' / ')}`;
+            await this.transition(
+              id,
+              releasedQuestionState(view, pending, pane, releaseReason),
+              'interaction.question_cancelled',
+              {
+                toolUseId: pending.toolUseId,
+                reason: 'abandoned by client; Escape was not confirmed',
+                confirmedBy: 'state-release',
+                error: error instanceof Error ? error.message : String(error),
+                ...(error instanceof StructuredQuestionDriveError ? { matcher: error.diagnostics } : {}),
+                questionText,
+                questions: pending.questions.map(question => question.question),
+                snapshot: 'last-snapshot.txt',
+                pendingQuestion: null,
+              },
+              { source: currentActor() ?? 'client' },
+            );
+            return await this.get(id);
           }
         }
         await this.emit(id, 'control.interrupt.requested', {}, 'client');
