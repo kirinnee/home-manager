@@ -25,12 +25,17 @@ import { isPushPath, pushWardenDenial } from './push-api';
 import { isTaskPath, taskWardenDenial } from './tasks-contract';
 import type { AnalyticsQueryService } from './analytics-types';
 import { AnalyticsQueryError } from './analytics-query';
+import type { TerminalApi } from './terminal-api';
+import { isTerminalPath, matchTerminalRoute, terminalWardenDenial } from './terminal-api';
+import type { TerminalStreamBridge, TerminalStreamChunk } from './terminal-stream';
+import { isTerminalError } from './terminal-types';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
 // single-file shell remains the fallback so the daemon never 404s its own UI.
 const UI_DIST = new URL('../ui-dist', import.meta.url).pathname;
 
-interface SocketData {
+interface EventSocketData {
+  kind: 'events';
   /** Sessions this socket subscribes to. Empty = the whole fleet.
    *  `?sessionId=` may repeat or carry a comma-separated list, so one socket
    *  can follow N specific teammates without taking the fleet firehose. */
@@ -43,6 +48,23 @@ interface SocketData {
   replaying: boolean;
   queued: string[];
 }
+
+interface TerminalSocketData {
+  kind: 'terminal';
+  sessionId: string;
+  terminalId: string;
+  /** Resolved from the authenticated request before the upgrade. */
+  actor: KTeamEvent['source'];
+  bridge?: TerminalStreamBridge;
+  /** Frames can arrive while the async tmux viewer attachment is opening. */
+  pending: TerminalStreamChunk[];
+  pendingBytes: number;
+  closed: boolean;
+}
+
+type SocketData = EventSocketData | TerminalSocketData;
+
+const MAX_PENDING_TERMINAL_INPUT_BYTES = 1024 * 1024;
 
 /** Parse `?sessionId=a&sessionId=b` and `?sessionId=a,b` into a de-duplicated list. */
 function subscribedSessions(url: URL): string[] {
@@ -73,6 +95,8 @@ export interface ApiServerOptions {
   tasks?: TaskApi;
   /** Daemon-owned per-session pins. Omitted in tests that don't exercise pins. */
   pins?: PinApi;
+  /** Admin-only independent shell terminals, including their WebSocket stream. */
+  terminals?: TerminalApi;
   /** Durable, daemon-owned per-session attention records. */
   attention?: AttentionApi;
   /** Admin-only Web Push enrollment and per-device management. */
@@ -122,6 +146,8 @@ async function wardenScopeDenial(
   if (taskDenial) return forbidden(taskDenial);
   const pinDenial = pinWardenDenial(method, pathname);
   if (pinDenial) return forbidden(pinDenial);
+  const terminalDenial = terminalWardenDenial(method, pathname);
+  if (terminalDenial) return forbidden(terminalDenial);
   const attentionDenial = attentionWardenDenial(method, pathname);
   if (attentionDenial) return forbidden(attentionDenial);
   const pushDenial = pushWardenDenial(method, pathname);
@@ -315,6 +341,7 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
   const broadcast = (event: KTeamEvent): void => {
     const encoded = JSON.stringify(event);
     for (const socket of sockets) {
+      if (socket.data.kind !== 'events') continue;
       if (socket.data.sessionIds.length > 0 && !socket.data.sessionIds.includes(event.sessionId)) continue;
       if (socket.data.replaying) socket.data.queued.push(encoded);
       else socket.send(encoded);
@@ -346,8 +373,13 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
         if (!options.stt) return json(unknownRoute(request.method, url.pathname), 404);
         return await options.stt.handlePublicModel(request, url);
       }
-      const isWebSocket =
-        url.pathname === '/v1/events' && request.headers.get('upgrade')?.toLowerCase() === 'websocket';
+      const wantsWebSocket = request.headers.get('upgrade')?.toLowerCase() === 'websocket';
+      const isEventWebSocket = url.pathname === '/v1/events' && wantsWebSocket;
+      // Match the RAW pathname. In particular, never normalize an encoded
+      // traversal-shaped session id into a route that TerminalApi rejected.
+      const terminalRoute = options.terminals ? matchTerminalRoute(url.pathname) : null;
+      const isTerminalWebSocket = terminalRoute?.kind === 'stream' && wantsWebSocket;
+      const isWebSocket = isEventWebSocket || isTerminalWebSocket;
       const bearer = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
       // Loopback requesters may already read the token file, so serving them
       // the token grants nothing new. NON-loopback requesters (KTEAM_HOST set,
@@ -426,14 +458,37 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
       });
       const dispatch = async (): Promise<Response | undefined> => {
         try {
-          if (isWebSocket) {
+          if (isEventWebSocket) {
             const upgraded = serverInstance.upgrade(request, {
               data: {
+                kind: 'events',
                 sessionIds: subscribedSessions(url),
                 cursors: new Map<string, number>(),
                 after: Number(url.searchParams.get('after') ?? 0),
                 replaying: true,
                 queued: [],
+              },
+            });
+            return upgraded ? undefined : json({ error: 'websocket upgrade failed' }, 400);
+          }
+          if (isTerminalWebSocket && terminalRoute?.kind === 'stream' && options.terminals) {
+            // Prove both admin authorization and terminal existence BEFORE the
+            // protocol switch. The resolved actor is server-derived and is the
+            // same unforgeable identity used by the HTTP mount below.
+            const canonical = await options.terminals.authorizeStream(
+              terminalRoute.sessionId,
+              terminalRoute.terminalId,
+              actor,
+            );
+            const upgraded = serverInstance.upgrade(request, {
+              data: {
+                kind: 'terminal',
+                sessionId: canonical.sessionId,
+                terminalId: canonical.terminalId,
+                actor,
+                pending: [],
+                pendingBytes: 0,
+                closed: false,
               },
             });
             return upgraded ? undefined : json({ error: 'websocket upgrade failed' }, 400);
@@ -611,6 +666,20 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               ),
             );
             if (taskResponse) return json(taskResponse.body, taskResponse.status);
+            return json(unknownRoute(request.method, url.pathname), 404);
+          }
+
+          // MUST precede the generic session match: `terminals` is an API
+          // collection, not a session action. TerminalApi performs its own
+          // admin-only actor check using this resolved server-side actor.
+          if (options.terminals && isTerminalPath(url.pathname)) {
+            const terminalResponse = await options.terminals.handle({
+              method: request.method,
+              url,
+              body: request.method === 'POST' || request.method === 'PATCH' ? await body<unknown>(request) : undefined,
+              actor,
+            });
+            if (terminalResponse) return json(terminalResponse.body, terminalResponse.status);
             return json(unknownRoute(request.method, url.pathname), 404);
           }
 
@@ -913,6 +982,9 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           const unknown = unknownRoute(request.method, url.pathname);
           return isFsPath(url.pathname) ? fsJson(unknown, 404) : json(unknown, 404);
         } catch (error) {
+          if (isTerminalError(error)) {
+            return json({ error: error.message, code: error.code }, error.status);
+          }
           if (error instanceof FsError) {
             const status =
               error.code === 'not_found'
@@ -953,15 +1025,43 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
     },
     websocket: {
       open(socket) {
+        const socketData = socket.data;
+        if (socketData.kind === 'terminal') {
+          const terminals = options.terminals;
+          if (!terminals) {
+            socket.close(1011, 'terminal service unavailable');
+            return;
+          }
+          void terminals
+            .openStream(socketData.sessionId, socketData.terminalId, socketData.actor, {
+              send: chunk => socket.send(chunk),
+              close: (code, reason) => socket.close(code, reason),
+              getBufferedAmount: () => socket.getBufferedAmount(),
+            })
+            .then(bridge => {
+              if (socketData.closed) {
+                bridge.close();
+                return;
+              }
+              socketData.bridge = bridge;
+              const pending = socketData.pending.splice(0);
+              socketData.pendingBytes = 0;
+              for (const chunk of pending) bridge.fromClient(chunk);
+            })
+            .catch(() => {
+              if (!socketData.closed) socket.close(1011, 'terminal stream unavailable');
+            });
+          return;
+        }
         sockets.add(socket);
         void (async () => {
-          const { sessionIds, cursors } = socket.data;
+          const { sessionIds, cursors } = socketData;
           // Backfill each subscribed session INDEPENDENTLY, from its own
           // sequence. One session's long history no longer delays another's
           // first frame, and there is no shared cursor to renumber.
           const targets: Array<string | undefined> = sessionIds.length > 0 ? sessionIds : [undefined];
           for (const sessionId of targets) {
-            let cursor = socket.data.after;
+            let cursor = socketData.after;
             while (true) {
               const events = await options.service.replay(sessionId, cursor, 1_000);
               for (const event of events) {
@@ -973,8 +1073,8 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               if (events.length < 1_000 || sessionId === undefined) break;
             }
           }
-          socket.data.replaying = false;
-          for (const encoded of socket.data.queued) {
+          socketData.replaying = false;
+          for (const encoded of socketData.queued) {
             const queued = JSON.parse(encoded) as { sequence?: number; sessionId?: string };
             // Dedupe against THAT session's cursor: sequences are per-session
             // now, so comparing against a single number would drop live frames
@@ -991,13 +1091,33 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             const sequence = queued.sequence ?? 0;
             if (sequence === 0 || sequence > delivered) socket.send(encoded);
           }
-          socket.data.queued.length = 0;
+          socketData.queued.length = 0;
         })().catch(error => socket.send(JSON.stringify({ type: 'error', error: String(error) })));
       },
       close(socket) {
         sockets.delete(socket);
+        if (socket.data.kind === 'terminal') {
+          socket.data.closed = true;
+          socket.data.pending.length = 0;
+          socket.data.pendingBytes = 0;
+          socket.data.bridge?.close();
+        }
       },
-      message() {},
+      message(socket, message) {
+        if (socket.data.kind !== 'terminal' || socket.data.closed) return;
+        if (socket.data.bridge) {
+          socket.data.bridge.fromClient(message);
+          return;
+        }
+        const size = typeof message === 'string' ? Buffer.byteLength(message) : message.byteLength;
+        if (socket.data.pendingBytes + size > MAX_PENDING_TERMINAL_INPUT_BYTES) {
+          socket.data.closed = true;
+          socket.close(1009, 'terminal input queue exceeded');
+          return;
+        }
+        socket.data.pendingBytes += size;
+        socket.data.pending.push(typeof message === 'string' ? message : Uint8Array.from(message));
+      },
     },
   });
 
