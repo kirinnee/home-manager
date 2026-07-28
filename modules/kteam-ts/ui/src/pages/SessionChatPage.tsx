@@ -570,13 +570,14 @@ export function SessionChatPage({
   useEffect(() => {
     rememberTranscriptBoundaries(sessionId, observedClearBoundaries);
   }, [observedClearBoundaries, sessionId]);
-  const clearBoundaries = useMemo(
-    () => mergeTranscriptBoundaries(storedClearBoundaries.boundaries, observedClearBoundaries),
-    [observedClearBoundaries, storedClearBoundaries.boundaries],
-  );
+  // HOTFIX 2026-07-28: boundary detection was hiding agent rows, leaving a
+  // transcript of only the human's own messages. Observation and storage above
+  // are left intact so no evidence is lost, but NOTHING is filtered out of the
+  // view until the false-positive source is identified. Passing an empty
+  // boundary list keeps the real return shape rather than faking it.
   const transcriptView = useMemo(
-    () => applyTranscriptBoundaries(blocks, clearBoundaries, storedClearBoundaries.revealedBoundaryId),
-    [blocks, clearBoundaries, storedClearBoundaries.revealedBoundaryId],
+    () => applyTranscriptBoundaries(blocks, [], storedClearBoundaries.revealedBoundaryId),
+    [blocks, storedClearBoundaries.revealedBoundaryId],
   );
   // Only this array is filtered. Ledger-chip retirement, pins, questions, and
   // every other state consumer below continue to read the complete `blocks`.
