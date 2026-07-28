@@ -18,15 +18,32 @@ import {
   TOUCH_SELECTION_HANDLE_CLEARANCE,
   paneUsableTableWidth,
   pinBlockedBySelection,
+  transcriptPrependAnchorId,
   touchQuotePlacement,
   type SelectionLike,
 } from './Transcript';
+import type { TranscriptBlock } from '../lib/transcript';
 
 // Two sentinel "nodes". `contains` decides which is "inside" the viewport; the
 // guard never inspects a node itself, only asks the predicate.
 const INSIDE = { tag: 'inside' } as unknown as Node;
 const OUTSIDE = { tag: 'outside' } as unknown as Node;
 const inViewport = (n: Node | null) => n === INSIDE;
+
+describe('prepend anchoring with ledger boundaries', () => {
+  test('anchors on the first real history row even while a ledger boundary stays above it', () => {
+    const ledger = { id: 'ledger-old', kind: 'ledger' } as TranscriptBlock;
+    const firstPage = { id: 'history-200', kind: 'user' } as TranscriptBlock;
+    const olderPage = { id: 'history-100', kind: 'assistant' } as TranscriptBlock;
+    expect(transcriptPrependAnchorId([ledger, firstPage])).toBe('history-200');
+    expect(transcriptPrependAnchorId([ledger, olderPage, firstPage])).toBe('history-100');
+  });
+
+  test('falls back safely for an empty or ledger-only transcript', () => {
+    expect(transcriptPrependAnchorId([])).toBeNull();
+    expect(transcriptPrependAnchorId([{ id: 'ledger-only', kind: 'ledger' } as TranscriptBlock])).toBe('ledger-only');
+  });
+});
 
 /** A live drag-selection spanning two nodes. */
 const sel = (anchorNode: Node | null, focusNode: Node | null): SelectionLike => ({

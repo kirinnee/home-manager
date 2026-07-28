@@ -213,8 +213,9 @@ describe('pin affordance — production pointer handlers', () => {
 });
 
 describe('pinnability + preview', () => {
-  test('every block is pinnable except a turn boundary', () => {
+  test('turn boundaries and expiring ledger rows are not pinnable', () => {
     expect(isPinnable({ kind: 'turn' } as TranscriptBlock)).toBe(false);
+    expect(isPinnable({ kind: 'ledger' } as TranscriptBlock)).toBe(false);
     expect(isPinnable({ kind: 'assistant' } as TranscriptBlock)).toBe(true);
     expect(isPinnable({ kind: 'user' } as TranscriptBlock)).toBe(true);
   });
@@ -225,6 +226,14 @@ describe('pinnability + preview', () => {
     ).toBe('Bash, k2');
     expect(pinPreviewOf({ kind: 'system', info: { label: 'turn prompt' } } as TranscriptBlock)).toBe('turn prompt');
     expect(pinPreviewOf({ kind: 'notice', label: 'reconnected' } as TranscriptBlock)).toBe('reconnected');
+    expect(
+      pinPreviewOf({
+        kind: 'ledger',
+        record: {
+          message: `[peer message from teammate jessica (session mspeer-1) — not from the human lead]\nNo reply is required.\n\npeer body`,
+        },
+      } as TranscriptBlock),
+    ).toBe('peer body');
   });
 });
 

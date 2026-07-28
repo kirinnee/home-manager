@@ -7,6 +7,7 @@ import {
   buildSendIndex,
   buildTranscript,
   isInformativeTurnBoundary,
+  placeLedgerBlocks,
   stripAttachmentReferenceBlock,
   type TranscriptBlock,
 } from './transcript';
@@ -167,6 +168,57 @@ peer text`);
     expect(markup).not.toContain('kt-bubble-row');
     expect(markup).toContain('data-system-row="turn prompt"');
     expect(markup).toContain('Jessica');
+  });
+});
+
+describe('durable ledger row placement', () => {
+  function ledger(sendId: string, acceptedAt: string, message = 'unconfirmed body'): SendRecord {
+    return { sendId, acceptedAt, message, attachmentIds: [], fate: 'unaccounted' };
+  }
+
+  test('interleaves by acceptedAt without disturbing transcript order', () => {
+    const blocks = buildTranscript([
+      user('before', '2026-07-25T12:00:00.000Z'),
+      assistant('after', '2026-07-25T12:02:00.000Z'),
+    ]);
+    const placed = placeLedgerBlocks(blocks, [ledger('middle', '2026-07-25T12:01:00.000Z')], Date.parse(BASE));
+    expect(placed.map(block => block.kind)).toEqual(['user', 'ledger', 'assistant']);
+    const row = placed[1];
+    expect(row?.kind === 'ledger' ? row.placement : undefined).toBe('chronological');
+  });
+
+  test('uses honest loaded-page boundaries instead of teleporting an old row to the tail', () => {
+    const blocks = buildTranscript([
+      user('loaded first', '2026-07-25T12:00:00.000Z'),
+      assistant('loaded last', '2026-07-25T12:02:00.000Z'),
+    ]);
+    const placed = placeLedgerBlocks(
+      blocks,
+      [ledger('newer', '2026-07-25T13:00:00.000Z'), ledger('older', '2026-07-25T11:00:00.000Z')],
+      Date.parse(BASE),
+    );
+    expect(placed.map(block => block.kind)).toEqual(['ledger', 'user', 'assistant', 'ledger']);
+    expect(placed[0]?.kind === 'ledger' ? placed[0].record.sendId : undefined).toBe('older');
+    expect(placed[0]?.kind === 'ledger' ? placed[0].placement : undefined).toBe('before-loaded');
+    expect(placed.at(-1)?.kind === 'ledger' ? placed.at(-1)!.placement : undefined).toBe('after-loaded');
+  });
+
+  test('an unusable clock is shown at the top boundary and labelled unknown', () => {
+    const blocks = buildTranscript([user('loaded')]);
+    const placed = placeLedgerBlocks(blocks, [ledger('unknown', 'not-a-date')], Date.parse(BASE));
+    expect(placed[0]?.kind).toBe('ledger');
+    expect(placed[0]?.kind === 'ledger' ? placed[0].placement : undefined).toBe('unknown-time');
+  });
+
+  test('placement never treats identical text as proof or consumes the visible row', () => {
+    const blocks = buildTranscript([user('same words', '2026-07-25T12:10:00.000Z')]);
+    const placed = placeLedgerBlocks(
+      blocks,
+      [ledger('unconfirmed-identical', '2026-07-25T12:00:00.000Z', 'same words')],
+      Date.parse(BASE),
+    );
+    expect(placed.map(block => block.kind)).toEqual(['ledger', 'user']);
+    expect(placed[0]?.kind === 'ledger' ? placed[0].record.fate : undefined).toBe('unaccounted');
   });
 });
 
