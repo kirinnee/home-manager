@@ -31,6 +31,8 @@ class Runtime implements ManagedBrowserRuntime {
   viewport: BrowserViewport = { width: 1280, height: 800 };
   inputs: BrowserInputEvent[] = [];
   listener?: (frame: BrowserScreencastFrame) => void;
+  initialScreencastFrames: BrowserScreencastFrame[] = [];
+  onStartScreencast?: () => Promise<void>;
   private pages = [{ id: 'page-1', url: 'about:blank', title: '' }];
   private activePageId = 'page-1';
 
@@ -105,6 +107,8 @@ class Runtime implements ManagedBrowserRuntime {
   }
   async startScreencast(listener: (frame: BrowserScreencastFrame) => void) {
     this.listener = listener;
+    for (const frame of this.initialScreencastFrames) listener(frame);
+    await this.onStartScreencast?.();
   }
   async stopScreencast() {
     this.listener = undefined;
@@ -195,6 +199,57 @@ describe('browser JPEG stream bridge', () => {
     await Bun.sleep(0);
     expect((await service.status(SID)).viewers).toBe(0);
     expect(runtime.inputs.at(-1)).toMatchObject({ kind: 'key', type: 'keyUp', key: 'a', code: 'KeyA' });
+    await service.close();
+  });
+
+  test('relays only the latest frame emitted synchronously while attaching the viewer', async () => {
+    const { runtime, service } = await harness();
+    const downstream = new Downstream();
+    runtime.initialScreencastFrames = [
+      {
+        dataBase64: Buffer.from('older-frame').toString('base64'),
+        width: 1280,
+        height: 800,
+        pageId: 'page-older',
+      },
+      {
+        dataBase64: Buffer.from('latest-frame').toString('base64'),
+        width: 1280,
+        height: 800,
+        pageId: 'page-latest',
+      },
+    ];
+
+    await BrowserStreamBridge.connect(service, SID, downstream);
+
+    expect(downstream.sent).toHaveLength(1);
+    expect(decodeFrameEnvelope(downstream.sent[0]!)).toEqual({
+      version: 1,
+      pageId: 'page-latest',
+      jpeg: 'latest-frame',
+    });
+    await service.close();
+  });
+
+  test('terminal suppresses a frame emitted synchronously while attaching the viewer', async () => {
+    const { runtime, service } = await harness();
+    const downstream = new Downstream();
+    runtime.initialScreencastFrames = [
+      {
+        dataBase64: Buffer.from('stale-frame').toString('base64'),
+        width: 1280,
+        height: 800,
+        pageId: 'page-stale',
+      },
+    ];
+    runtime.onStartScreencast = async () => {
+      await service.stop(SID, 'agent');
+    };
+
+    await BrowserStreamBridge.connect(service, SID, downstream);
+
+    expect(downstream.sent).toEqual([]);
+    expect(downstream.closed).toEqual([{ code: 1000, reason: 'remote browser stopped' }]);
     await service.close();
   });
 
