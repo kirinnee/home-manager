@@ -22,7 +22,18 @@
 //      keys on `toolUseId` (see questionform-mountsite.patch.md); as a safe
 //      degrade when unwired, the component also resets on a `toolUseId` change.
 
-import { useEffect, useId, useLayoutEffect, useRef, useState, type Ref } from 'react';
+import {
+  Component,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ErrorInfo,
+  type ReactNode,
+  type Ref,
+} from 'react';
 import { Button } from './Primitives';
 import type { ChatRecord } from '../types';
 import { api, ApiError } from '../lib/api';
@@ -32,8 +43,253 @@ import { useInputModality } from '../hooks/useInputModality';
 export interface PFQuestion {
   question: string;
   header?: string;
-  options?: { label: string; description?: string }[];
+  options?: { label: string; description?: string; preview?: string }[];
   multiSelect?: boolean;
+}
+
+export interface ParsedQuestionRecord {
+  questions: PFQuestion[];
+  toolUseId?: string;
+  malformed?: string;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** Extract the stale-question binding without trusting any other payload field. */
+export function questionToolUseId(question: ChatRecord): string | undefined {
+  try {
+    const value = recordValue(question.data)?.toolUseId;
+    return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Text that remains safe to render when the structured payload itself is not.
+ * Prefer the human-facing question strings, but retain a JSON fallback for a
+ * partially loaded/legacy record whose prompt lives under an unexpected key.
+ */
+export function rawQuestionText(question: ChatRecord): string {
+  try {
+    const data = recordValue(question.data);
+    if (!data) return 'Question text unavailable.';
+    const rawQuestions = data.questions;
+    if (Array.isArray(rawQuestions)) {
+      const lines = rawQuestions.flatMap((value, index) => {
+        if (typeof value === 'string' && value.trim()) return [`Question ${index + 1}: ${value}`];
+        const raw = recordValue(value);
+        if (!raw || typeof raw.question !== 'string' || !raw.question.trim()) return [];
+        const header = typeof raw.header === 'string' && raw.header.trim() ? `${raw.header}: ` : '';
+        return [`${header}${raw.question}`];
+      });
+      if (lines.length > 0) return lines.join('\n\n');
+    }
+    if (typeof data.question === 'string' && data.question.trim()) return data.question;
+    const serialized = JSON.stringify(question.data, null, 2);
+    return serialized && serialized !== '{}' ? serialized : 'Question text unavailable.';
+  } catch {
+    return 'Question text unavailable.';
+  }
+}
+
+/**
+ * Validate at the component edge. Unknown fields remain forward-compatible,
+ * while a bad value in a field React would render/map degrades the whole form
+ * to the raw-text recovery surface instead of throwing through the chat page.
+ */
+export function parseQuestionRecord(question: ChatRecord): ParsedQuestionRecord {
+  const data = recordValue(question.data);
+  if (!data) return { questions: [], malformed: 'The question payload is missing.' };
+
+  const toolUseId = questionToolUseId(question);
+  if (!Array.isArray(data.questions)) {
+    return { questions: [], toolUseId, malformed: 'The question list is missing or malformed.' };
+  }
+  if (data.questions.length === 0) {
+    return { questions: [], toolUseId, malformed: 'The question list is empty.' };
+  }
+  if (!toolUseId) {
+    return { questions: [], malformed: 'The question has no usable tool id.' };
+  }
+
+  const questions: PFQuestion[] = [];
+  for (const [questionIndex, value] of data.questions.entries()) {
+    const raw = recordValue(value);
+    if (!raw || typeof raw.question !== 'string' || raw.question.trim().length === 0) {
+      return { questions: [], toolUseId, malformed: `Question ${questionIndex + 1} has no readable text.` };
+    }
+    if (raw.header !== undefined && typeof raw.header !== 'string') {
+      return { questions: [], toolUseId, malformed: `Question ${questionIndex + 1} has a malformed header.` };
+    }
+    if (raw.multiSelect !== undefined && typeof raw.multiSelect !== 'boolean') {
+      return { questions: [], toolUseId, malformed: `Question ${questionIndex + 1} has a malformed selection mode.` };
+    }
+    if (raw.options !== undefined && !Array.isArray(raw.options)) {
+      return { questions: [], toolUseId, malformed: `Question ${questionIndex + 1} has malformed options.` };
+    }
+    if (!Array.isArray(raw.options) || raw.options.length === 0) {
+      return { questions: [], toolUseId, malformed: `Question ${questionIndex + 1} has no usable options.` };
+    }
+
+    const options: NonNullable<PFQuestion['options']> = [];
+    for (const [optionIndex, optionValue] of ((raw.options as unknown[] | undefined) ?? []).entries()) {
+      const option = recordValue(optionValue);
+      if (!option || typeof option.label !== 'string' || option.label.trim().length === 0) {
+        return {
+          questions: [],
+          toolUseId,
+          malformed: `Question ${questionIndex + 1}, option ${optionIndex + 1} has no readable label.`,
+        };
+      }
+      if (option.description !== undefined && typeof option.description !== 'string') {
+        return {
+          questions: [],
+          toolUseId,
+          malformed: `Question ${questionIndex + 1}, option ${optionIndex + 1} has a malformed description.`,
+        };
+      }
+      if (option.preview !== undefined && typeof option.preview !== 'string') {
+        return {
+          questions: [],
+          toolUseId,
+          malformed: `Question ${questionIndex + 1}, option ${optionIndex + 1} has a malformed preview.`,
+        };
+      }
+      options.push({
+        label: option.label,
+        ...(typeof option.description === 'string' ? { description: option.description } : {}),
+        ...(typeof option.preview === 'string' ? { preview: option.preview } : {}),
+      });
+    }
+    questions.push({
+      question: raw.question,
+      ...(typeof raw.header === 'string' ? { header: raw.header } : {}),
+      ...(options.length > 0 || raw.options !== undefined ? { options } : {}),
+      ...(typeof raw.multiSelect === 'boolean' ? { multiSelect: raw.multiSelect } : {}),
+    });
+  }
+  return { questions, toolUseId };
+}
+
+/** Suppression is bound to one ask. A real tool id is authoritative; malformed
+ *  records still get a deterministic fallback so Escape cannot trap the user. */
+export function questionDismissalKey(question: ChatRecord): string {
+  const toolUseId = questionToolUseId(question);
+  if (toolUseId) return `tool:${toolUseId}`;
+  return `malformed:${question.timestamp ?? ''}:${rawQuestionText(question)}`;
+}
+
+export function isQuestionSuppressed(currentKey: string | undefined, dismissedKey: string | null): boolean {
+  return currentKey !== undefined && dismissedKey === currentKey;
+}
+
+/** A transiently absent store record is not evidence of a new ask. Retain the
+ *  hatch until a concrete, different question arrives (or the session changes). */
+export function shouldClearQuestionSuppression(currentKey: string | undefined, dismissedKey: string | null): boolean {
+  return currentKey !== undefined && dismissedKey !== null && dismissedKey !== currentKey;
+}
+
+/** Dedupe ids are uniqueness tokens, not secrets. A non-secure origin may not
+ *  expose randomUUID, so the form must never throw merely by rendering there. */
+export function mintQuestionRequestId(
+  randomUuid: (() => string) | null = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? () => crypto.randomUUID()
+    : null,
+  now: () => number = Date.now,
+  random: () => number = Math.random,
+): string {
+  try {
+    const value = randomUuid?.();
+    if (value) return value;
+  } catch {
+    // Fall through to the local uniqueness token.
+  }
+  return `question-${now().toString(36)}-${random().toString(36).slice(2)}`;
+}
+
+export interface QuestionErrorBoundaryProps {
+  active: boolean;
+  rawText: string;
+  resetKey: string;
+  onDismiss(): void;
+  children: ReactNode;
+}
+
+interface QuestionErrorBoundaryState {
+  failed: boolean;
+}
+
+/**
+ * The Escape listener lives OUTSIDE the form subtree it protects. If an option
+ * throws midway through render, React replaces only that subtree while this
+ * boundary stays mounted, keeps listening, and renders the original prompt.
+ */
+export class QuestionErrorBoundary extends Component<QuestionErrorBoundaryProps, QuestionErrorBoundaryState> {
+  state: QuestionErrorBoundaryState = { failed: false };
+
+  static getDerivedStateFromError(): QuestionErrorBoundaryState {
+    return { failed: true };
+  }
+
+  componentDidMount(): void {
+    if (typeof window !== 'undefined') window.addEventListener('keydown', this.handleKeyDown, true);
+  }
+
+  componentDidUpdate(previous: QuestionErrorBoundaryProps): void {
+    if (previous.resetKey !== this.props.resetKey && this.state.failed) this.setState({ failed: false });
+  }
+
+  componentWillUnmount(): void {
+    if (typeof window !== 'undefined') window.removeEventListener('keydown', this.handleKeyDown, true);
+  }
+
+  componentDidCatch(error: unknown, info: ErrorInfo): void {
+    console.warn('kteam: structured question failed to render', error, info?.componentStack);
+  }
+
+  handleKeyDown = (event: KeyboardEvent): void => {
+    if (!this.props.active || (event.key !== 'Escape' && event.key !== 'Esc')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.props.onDismiss();
+  };
+
+  render(): ReactNode {
+    if (!this.state.failed) return this.props.children;
+    return <QuestionRecoverySurface rawText={this.props.rawText} onDismiss={this.props.onDismiss} />;
+  }
+}
+
+export function QuestionRecoverySurface({
+  rawText,
+  reason = 'Something went wrong while rendering this question.',
+  onDismiss,
+}: {
+  rawText: string;
+  reason?: string;
+  onDismiss(): void;
+}) {
+  return (
+    <div className="my-2 rounded-md border border-err-border bg-err-bg p-3 text-[13px]" role="alert">
+      <div className="font-semibold text-err">{reason}</div>
+      <div className="mt-1 text-muted">Press Esc to decline it and return to normal chat.</div>
+      <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-surface p-2 font-sans text-fg">
+        {rawText}
+      </pre>
+      <button
+        type="button"
+        className="mt-2 min-h-[44px] min-w-[44px] rounded border border-border bg-surface px-3 py-2 text-fg"
+        onClick={onDismiss}
+      >
+        Decline question
+      </button>
+    </div>
+  );
 }
 
 /** All answer-in-progress state. Arrays are parallel to `questions`. */
@@ -178,10 +434,10 @@ export async function interruptPendingQuestion(opts: {
   toolUseId: string;
   mint: () => string;
   interrupt: (requestId: string, toolUseId: string) => Promise<unknown>;
-}): Promise<void> {
+}): Promise<unknown> {
   const { requestIdRef, toolUseId, mint, interrupt } = opts;
   requestIdRef.current = resolveRequestId(requestIdRef.current, toolUseId, mint);
-  await interrupt(requestIdRef.current.id, toolUseId);
+  return await interrupt(requestIdRef.current.id, toolUseId);
 }
 
 /**
@@ -222,10 +478,16 @@ export async function submitAnswers(opts: {
 
 // ---- presentational pieces --------------------------------------------------
 
-interface Props {
+export interface QuestionFormProps {
   sessionId: string;
   question: ChatRecord;
   onSubmit(): void;
+  /** Synchronously suppress this exact ask in the parent, before networking. */
+  onDismissed?(dismissalKey: string): void;
+  /** A background decline failed after the local surface had already closed. */
+  onDismissFailed?(message: string): void;
+  /** Retained chat panes stay mounted; only the visible pane owns global Esc. */
+  active?: boolean;
   /** Phone chrome: paged, one question per screen (multi-question sets only).
    *  Defaults false so the component is correct and shippable before the mount
    *  site threads it through (like `Composer`). */
@@ -459,10 +721,157 @@ function QuestionBlock({
 
 // ---- the component ----------------------------------------------------------
 
-export function QuestionForm({ sessionId, question, onSubmit, compact = false }: Props) {
-  const data = question.data as { questions?: PFQuestion[]; toolUseId?: string } | undefined;
-  const questions = data?.questions ?? [];
-  const toolUseId = data?.toolUseId;
+export function QuestionForm({
+  sessionId,
+  question,
+  onSubmit,
+  onDismissed,
+  onDismissFailed,
+  active = true,
+  compact = false,
+}: QuestionFormProps) {
+  const rawText = rawQuestionText(question);
+  const resetKey = questionDismissalKey(question);
+  const toolUseId = questionToolUseId(question);
+  const [locallyDismissed, setLocallyDismissed] = useState(false);
+  const [dismissError, setDismissError] = useState<string | null>(null);
+  const dismissGuard = useRef(false);
+  const dismissRequestIdRef = useRef<{ id: string; key: string | undefined } | null>(null);
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    setLocallyDismissed(false);
+    setDismissError(null);
+    dismissGuard.current = false;
+    dismissRequestIdRef.current = null;
+  }, [resetKey]);
+
+  const dismiss = useCallback(() => {
+    if (dismissGuard.current) return;
+    dismissGuard.current = true;
+
+    // The human gets control back in THIS tick. Server reconciliation follows,
+    // but a refusal cannot remount this exact ask because the parent suppresses
+    // `resetKey` until a genuinely new question arrives (or the page reloads).
+    setLocallyDismissed(true);
+    setDismissError(null);
+    onDismissed?.(resetKey);
+
+    if (!toolUseId) {
+      // An omitted binding means "generic interrupt" at the API. That could
+      // Escape unrelated work if this malformed/stale record is not the
+      // daemon's current question, so recovery stays local and says so loudly.
+      const message = 'No daemon interrupt was sent because this question has no tool id';
+      dismissGuard.current = false;
+      if (mounted.current) setDismissError(message);
+      onDismissFailed?.(message);
+      return;
+    }
+
+    void interruptPendingQuestion({
+      requestIdRef: dismissRequestIdRef,
+      toolUseId,
+      mint: mintQuestionRequestId,
+      interrupt: (requestId, boundToolUseId) => api.interrupt(sessionId, requestId, boundToolUseId),
+    })
+      .then(() => onSubmit())
+      .catch(error => {
+        const message = error instanceof ApiError ? error.message : String(error);
+        dismissGuard.current = false;
+        if (mounted.current) setDismissError(message);
+        onDismissFailed?.(message);
+      });
+  }, [onDismissed, onDismissFailed, onSubmit, resetKey, sessionId, toolUseId]);
+
+  if (locallyDismissed) {
+    return (
+      <div className="my-2 rounded-md border border-border bg-surface p-3 text-[12px] text-muted" role="status">
+        <div>Question declined locally. Returning control to normal chat…</div>
+        {dismissError && (
+          <div className="mt-2 text-err" role="alert">
+            The daemon did not confirm the decline: {dismissError}. Reloading will show the still-pending question
+            again.
+          </div>
+        )}
+        {dismissError && (
+          <button
+            type="button"
+            className="mt-2 min-h-[44px] min-w-[44px] rounded border border-border px-3 py-2 text-fg"
+            onClick={dismiss}
+          >
+            Retry decline
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <QuestionErrorBoundary active={active} rawText={rawText} resetKey={resetKey} onDismiss={dismiss}>
+      <ValidatedQuestionForm
+        sessionId={sessionId}
+        question={question}
+        onSubmit={onSubmit}
+        onDismiss={dismiss}
+        compact={compact}
+      />
+    </QuestionErrorBoundary>
+  );
+}
+
+function ValidatedQuestionForm({
+  sessionId,
+  question,
+  onSubmit,
+  onDismiss,
+  compact,
+}: {
+  sessionId: string;
+  question: ChatRecord;
+  onSubmit(): void;
+  onDismiss(): void;
+  compact: boolean;
+}) {
+  const parsed = parseQuestionRecord(question);
+  if (parsed.malformed) {
+    return (
+      <QuestionRecoverySurface rawText={rawQuestionText(question)} reason={parsed.malformed} onDismiss={onDismiss} />
+    );
+  }
+  return (
+    <QuestionFormBody
+      sessionId={sessionId}
+      questions={parsed.questions}
+      toolUseId={parsed.toolUseId}
+      onSubmit={onSubmit}
+      onDismiss={onDismiss}
+      compact={compact}
+    />
+  );
+}
+
+function QuestionFormBody({
+  sessionId,
+  questions,
+  toolUseId,
+  onSubmit,
+  onDismiss,
+  compact,
+}: {
+  sessionId: string;
+  questions: PFQuestion[];
+  toolUseId?: string;
+  onSubmit(): void;
+  onDismiss(): void;
+  compact: boolean;
+}) {
   const isMultiSet = questions.length > 1;
   const paged = compact && isMultiSet;
 
@@ -471,11 +880,9 @@ export function QuestionForm({ sessionId, question, onSubmit, compact = false }:
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [abandonConfirm, setAbandonConfirm] = useState(false);
-  const [abandoning, setAbandoning] = useState(false);
   const { touchAffected } = useInputModality();
   const submitGuard = useRef(false);
   const requestIdRef = useRef<{ id: string; key: string | undefined } | null>(null);
-  const abandonRequestIdRef = useRef<{ id: string; key: string | undefined } | null>(null);
 
   // Degrade safely when the mount site has not (yet) keyed on `toolUseId`: a
   // NEW question set arriving while mounted resets the in-progress answers
@@ -486,12 +893,11 @@ export function QuestionForm({ sessionId, question, onSubmit, compact = false }:
     setPage(0);
     setError(null);
     setAbandonConfirm(false);
-    setAbandoning(false);
     submitGuard.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [toolUseId]);
 
-  requestIdRef.current = resolveRequestId(requestIdRef.current, toolUseId, () => crypto.randomUUID());
+  requestIdRef.current = resolveRequestId(requestIdRef.current, toolUseId, mintQuestionRequestId);
   const requestId = requestIdRef.current.id;
 
   const safePage = clampPage(page, questions.length);
@@ -563,35 +969,6 @@ export function QuestionForm({ sessionId, question, onSubmit, compact = false }:
     });
   }
 
-  async function abandonQuestion() {
-    if (abandoning) return;
-    if (!toolUseId) {
-      setError('This question has no tool id. Refresh the session before abandoning it.');
-      return;
-    }
-    setAbandoning(true);
-    setError(null);
-    try {
-      // The daemon treats interrupt specially while a pendingQuestion exists:
-      // Escape is verified, the question is lifecycle-journalled as cancelled,
-      // and only then is normal chat control restored.
-      await interruptPendingQuestion({
-        requestIdRef: abandonRequestIdRef,
-        toolUseId,
-        mint: () => crypto.randomUUID(),
-        interrupt: (requestId, boundToolUseId) => api.interrupt(sessionId, requestId, boundToolUseId),
-      });
-      onSubmit();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
-      setAbandonConfirm(false);
-    } finally {
-      setAbandoning(false);
-    }
-  }
-
-  if (questions.length === 0) return null;
-
   const errorRow = error && (
     <div className="mt-2 rounded border border-err-border bg-err-bg px-2 py-1.5 text-[12px] text-err" role="alert">
       <div>{error}</div>
@@ -606,26 +983,18 @@ export function QuestionForm({ sessionId, question, onSubmit, compact = false }:
       {abandonConfirm ? (
         <div>
           <div>
-            Abandon this question and interrupt its tool call? Normal chat control returns only after the pane confirms
-            it.
+            Decline this question and return to normal chat? The form closes immediately while the daemon reconciles in
+            the background.
           </div>
           <div className="mt-2 flex flex-wrap gap-2">
-            <Button
-              className="min-h-[44px] min-w-[44px]"
-              variant="danger"
-              size="sm"
-              type="button"
-              disabled={abandoning}
-              onClick={() => void abandonQuestion()}
-            >
-              {abandoning ? 'Abandoning…' : 'Confirm abandon'}
+            <Button className="min-h-[44px] min-w-[44px]" variant="danger" size="sm" type="button" onClick={onDismiss}>
+              Confirm decline
             </Button>
             <Button
               className="min-h-[44px] min-w-[44px]"
               variant="outline"
               size="sm"
               type="button"
-              disabled={abandoning}
               onClick={() => setAbandonConfirm(false)}
             >
               Keep question

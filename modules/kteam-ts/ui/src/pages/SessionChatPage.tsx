@@ -23,7 +23,12 @@ import { useFleet, useSession, useSessionEvents, useStore, useUiControls } from 
 import type { ChatRecord, KTeamEvent, SendRecord, SessionView } from '../types';
 import { Composer } from '../components/Composer';
 import { ComposerRuntime } from '../components/ComposerRuntime';
-import { QuestionForm } from '../components/QuestionForm';
+import {
+  QuestionForm,
+  isQuestionSuppressed,
+  questionDismissalKey,
+  shouldClearQuestionSuppression,
+} from '../components/QuestionForm';
 import { TerminalView } from '../components/TerminalView';
 import { ViewTabs } from '../components/ViewTabs';
 import { SessionHeader } from '../components/SessionHeader';
@@ -155,6 +160,23 @@ export function hasOpenQuestion(view: SessionView | undefined): boolean {
   return view.state.status === 'awaiting_question' || !!view.state.pendingQuestion;
 }
 
+/** The status can lead the question payload during reconnect/reconciliation.
+ *  Mount a malformed-but-escapable record in that gap instead of hiding both
+ *  the form and Composer. Its turn-bound key is stable across store refreshes. */
+export function questionSurfaceRecord(
+  view: SessionView | undefined,
+  pendingQuestion: ChatRecord | null | undefined,
+): ChatRecord | undefined {
+  if (pendingQuestion) return pendingQuestion;
+  if (!view || !hasOpenQuestion(view)) return undefined;
+  return {
+    source: view.config?.harness ?? 'claude',
+    timestamp: `status-only:${view.state.id}:${view.state.turn}`,
+    type: 'interaction.question',
+    data: { question: 'Question details have not loaded yet.' },
+  };
+}
+
 export function SessionChatPage({
   sessionId,
   active,
@@ -210,6 +232,10 @@ export function SessionChatPage({
   const [draft, setDraft] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [actionNotice, setActionNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  // Escape suppresses ONE exact ask locally before its background interrupt can
+  // succeed or fail. Store refreshes are authoritative, but must not remount the
+  // same trap; a new toolUseId is never covered by this key.
+  const [dismissedQuestionKey, setDismissedQuestionKey] = useState<string | null>(null);
   // FILES MOVED TO THE SIDE PANE. It was a third center tab here; it is now a
   // session-scoped surface in the unified side pane (SidePane.tsx), opened from
   // the header beside Pins, so reading the working tree no longer replaces the
@@ -569,6 +595,21 @@ export function SessionChatPage({
         : latestPendingQuestion(records),
     [view, records],
   );
+  const questionSurface = useMemo(() => questionSurfaceRecord(view, pendingQ), [pendingQ, view]);
+  const pendingQuestionKey = questionSurface ? questionDismissalKey(questionSurface) : undefined;
+  const questionSuppressed = isQuestionSuppressed(pendingQuestionKey, dismissedQuestionKey);
+
+  // A page reload deliberately forgets this component-local state: if the
+  // daemon never accepted the decline, its real pending question comes back and
+  // can be dismissed again. Within one page lifetime, only a DIFFERENT ask
+  // clears suppression; refreshes of the same server state cannot snap it back.
+  useEffect(() => {
+    if (shouldClearQuestionSuppression(pendingQuestionKey, dismissedQuestionKey)) {
+      setDismissedQuestionKey(null);
+    }
+  }, [dismissedQuestionKey, pendingQuestionKey]);
+
+  useEffect(() => setDismissedQuestionKey(null), [sessionId]);
 
   // Account quota for this session's wrapper. The feed is fleet-wide and
   // joined by binary, so the badge is populated on the first paint rather than
@@ -608,7 +649,7 @@ export function SessionChatPage({
   // the form surfaces the instant EITHER field is authoritative. It is keyed
   // strictly on `view.state` (never the records fallback) and returns false for
   // any terminal session, so a stale/answered question is never resurrected.
-  const showQuestion = HAS_TOKEN && hasOpenQuestion(view);
+  const showQuestion = HAS_TOKEN && hasOpenQuestion(view) && !questionSuppressed;
 
   // ---- eager attachment uploads -------------------------------------------
   const attachmentObjectUrls = useRef<Set<string>>(new Set());
@@ -926,7 +967,7 @@ export function SessionChatPage({
       // the form and the interrupt-and-send escape hatch, and heal the view so
       // the form surfaces. `interruptFirst` is the deliberate supersede path and
       // is allowed through — that one replaces the question loudly.
-      if (!opts.interruptFirst && hasOpenQuestion(view)) {
+      if (!opts.interruptFirst && hasOpenQuestion(view) && !questionSuppressed) {
         setActionNotice({
           kind: 'err',
           text: 'This session is waiting for an answer to a structured question. Answer it in the form below, or use interrupt-and-send to replace it.',
@@ -986,7 +1027,7 @@ export function SessionChatPage({
         setSending(false);
       }
     },
-    [busy, clearAttachments, pinToBottom, sessionId, store, view],
+    [busy, clearAttachments, pinToBottom, questionSuppressed, sessionId, store, view],
   );
 
   function send() {
@@ -1276,16 +1317,30 @@ export function SessionChatPage({
                 />
               </div>
             )}
-            {showQuestion && pendingQ && (
+            {showQuestion && questionSurface && (
               <div className="mt-2">
                 <QuestionForm
                   // Remount on a NEW question set: `picks`/`others` are `useState`
                   // initializers, so without this a set arriving while the form is
                   // still mounted would carry the previous set's answers.
-                  key={(pendingQ.data as { toolUseId?: string } | undefined)?.toolUseId}
+                  key={pendingQuestionKey}
                   sessionId={sessionId}
-                  question={pendingQ}
+                  question={questionSurface}
                   onSubmit={() => void store.fetchSession(sessionId).catch(() => undefined)}
+                  onDismissed={key => {
+                    setDismissedQuestionKey(key);
+                    setActionNotice({
+                      kind: 'ok',
+                      text: 'Question declined locally. Normal chat is restored while the daemon confirms the decline.',
+                    });
+                  }}
+                  onDismissFailed={message =>
+                    setActionNotice({
+                      kind: 'err',
+                      text: `The question is hidden locally, but the daemon did not confirm the decline: ${message}. Reload to show and dismiss it again.`,
+                    })
+                  }
+                  active={active !== false}
                   // Phone: one question per screen. Paging is a LAYOUT decision, so
                   // it keys off `compact` (the same signal `Composer` gets), never
                   // off input modality — a narrow desktop window is not a phone.
