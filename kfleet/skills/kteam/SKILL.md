@@ -9,6 +9,102 @@ Use `kteam` instead of harness-native subagents. Keep the current conversation a
 
 `kteam` is a client of the long-running `kteamd` daemon. Check `kteam daemon status`; start or install it when unavailable. The daemon owns tmux, transcript watching, state, health, attachments, and event streaming.
 
+## Tasks — keep the board true
+
+The task board is the human's window into the fleet. It only works if it is TRUE — every rule here exists because the board was wrong in a real, repeated way. Writes are scoped to your own session (`KTEAM_SESSION_ID`; an agent may only write its own tasks). `kteam task list --all` is the fleet-wide read.
+
+### Create one task per human ask
+
+Record the task BEFORE you start the work:
+
+```bash
+kteam task create --kind <bug|feature|infra|chore> --title "<Title Case, 5 words max>" \
+  --ask "<the human's words, verbatim>" --ask-source "<message link>" \
+  [--workflow quick|design-first|research-first|investigate] [--depends-on '#F12']
+```
+
+- `--ask` and `--ask-source` are REQUIRED. Preserve the human's exact words and where they said them.
+- The title cap is **five words**, enforced — but the error is generic usage text, not the real reason. If create "mysteriously" fails, count your title words first.
+- Scope and detail go in `--description` / `--description-file`, never the title.
+
+### Related ask? Update the existing task — never duplicate
+
+Same task iff the new ask changes what that task's existing deliverable must do, or says that deliverable is wrong. New deliverable — even in the same area — is a NEW task with `--depends-on`.
+
+```bash
+kteam task clarify '#F12' "<the new ask, verbatim>" --source "<message link>"      # log it inside
+kteam task reopen  '#F12' --reason "<why it is back>" --ask "<verbatim>" --source "<link>"
+```
+
+- `reopen` moves shipped work (`built`/`live`) back to in progress and records the new ask atomically. Reopening human-verified `done` is human-only — raise attention instead.
+- For a related ask on a task still in `todo`/`blocked`, `clarify` it and move it with `kteam task status '#F12' in_progress --reason "<why>"`.
+- Genuinely ambiguous whether it's the same task? Ask the human "fold into #F12 or new task?" — never guess silently.
+
+### Keep status current AS EVENTS HAPPEN — not at wrap-up
+
+Each status is tied to an event. When the event happens, move the task in the same breath:
+
+```bash
+kteam task status '#F12' in_progress --reason "picked up, starting the parser fix"
+kteam task status '#F12' built       --reason "PR #123 merged"            # the change LANDED
+kteam task status '#F12' live        --reason "deployed in release abc"   # the change is DEPLOYED
+kteam task status '#F12' blocked     --reason "needs the human's API key"
+```
+
+- **`built` ≠ `live` — the single biggest source of board drift.** `built` = the change landed (merged, verified). `live` = it is actually deployed where users touch it. Two different moments; record each when it happens.
+- Every status/phase/reopen move REQUIRES `--reason`; `blocked` and `dropped` require one even at create.
+- `kteam signal done` auto-moves your task `build → built` only. It never deploys and never skips phases — everything else you move yourself.
+- Human gates: advancing out of `research`/`design`, and `live → done`, need the human. Leave the task at the gate; don't fight the state machine.
+- On the board, research/design/build all show as one `in_progress` lane; the exact phase stays in the record for audit.
+
+### Assignment is optional — unassigned is normal, not neglected
+
+- A `todo` task with no assignee is a healthy queue entry, not a problem to fix.
+- NEVER assign yourself to look busy — a real drift source the human hand-corrected.
+- Assign when work genuinely starts: `kteam task assign '#F12' <teammate|--none>`. If you stop working it, unassign or hand off explicitly — a dead assignee shows as `⚠ assignee-dead` and someone has to chase it.
+
+### Priority
+
+- Priority is the lead's rank: `kteam task order '#F12' <n>` (lower sorts first; `--none` unranks).
+- Agents don't set it uninvited. PROPOSE one, with the reason, when you learn something that changes urgency:
+  `kteam task note '#F12' "propose rank 1: this blocks #F13 and #F14"`.
+
+### Dependencies: need-to vs wait-for — INCOMING (#F126/#F127), not live yet
+
+Today there is ONE edge kind: `kteam task depend '#F12' '#F10'`, treated as a hard blocker. Use it only for genuine blockers; put advisory ordering in a note.
+
+The split below is DESIGNED but NOT SHIPPED. Do not use these verbs until `kteam task` help lists them:
+
+- `kteam task need '#F12' '#F10'` — HARD blocker: the task genuinely cannot start until the dependency is done (`depend` becomes an alias of this).
+- `kteam task wait '#F12' '#F10'` — SOFT advisory ordering, usually "these touch the same files, keep them serial". A suggestion; the scheduler may override it with a reason.
+- The board then derives four states: **ready** (pick up now) · **queued** (only wait-for unmet — startable by choice) · **blocked** (unmet need-to) · **in progress**. Most unassigned todo tasks are simply queued or ready — not neglected.
+- Also incoming: `--wait-for '#F10'` on create, `kteam task priority '#F12' <urgent|high|normal|low|--none>`, and `kteam task list --ready`.
+
+### Link your work the moment evidence exists
+
+```bash
+kteam task link '#F12' --pr https://github.com/org/repo/pull/123
+kteam task link '#F12' --branch fix/parser-crash
+kteam task link '#F12' --commit 0e17dc9
+kteam task link '#F12' --doc ~/.kteam/<id>/brief-parser.md
+```
+
+### Be honest — `completed` is a claim
+
+- Never move a task forward on an agent's say-so (including your own teammates'): read their `summary.md`, inspect the diff, run the checks — then move it, citing the evidence in `--reason`.
+- `done` means THE HUMAN verified the shipped thing. Only the human moves `live → done`. Never claim it.
+- Never render an unknown as a confident status. Don't know whether it deployed? It stays `built`, and you say so.
+
+### Common mistakes (all real, all hand-corrected by the human)
+
+| Mistake                                             | The rule it broke                                                                                   |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Work merged, task still `in_progress`               | move to `built` the moment it lands                                                                 |
+| Agent died, its task showed `in_progress` for hours | unassign or hand off when you stop; leads sweep `⚠ assignee-dead`                                   |
+| Code deployed, task stayed `built`                  | `live` is its own event — record the deploy                                                         |
+| Tasks finished but sitting in `todo`                | status moves with the event, not at wrap-up                                                         |
+| Human parked a task, board showed it as active work | a parked task stays where the human left it — never reactivate or self-assign it without their word |
+
 ## Choose the team first
 
 1. Run `kteam recommend "<task>"` and inspect the installed auto-mode wrappers.
