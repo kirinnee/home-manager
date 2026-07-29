@@ -13,6 +13,10 @@
 // Kept separate from FilesTab.tsx so it is testable without a DOM: the tab is
 // props-in/markup-out around these functions.
 
+// The FsEntry import is type-only on purpose: files-api imports functions from
+// this module, so a value import here would be a runtime cycle.
+import type { FsEntry } from './files-api';
+
 /** Status tones map onto the existing `.kt-badge[data-tone]` treatments, so the
  *  chips inherit every theme's palette instead of introducing colours. */
 export type StatusTone = 'ok' | 'warn' | 'err' | 'accent' | 'neutral';
@@ -101,6 +105,39 @@ export function isOpenablePath(rel: string | null | undefined): boolean {
   const value = rel ?? '';
   if (value === '') return false;
   return value.split('/').every(isOpenableName);
+}
+
+/** Why an entry cannot be opened, in the words the daemon's gates use. Null
+ *  means "openable".
+ *
+ *  A REFUSAL REFUSES DIRECTORIES TOO. `.git/` and `node_modules/` are on the
+ *  denylist as directories, and a gitignored directory's children are refused
+ *  the moment they are read — offering to descend into one is offering a dead
+ *  end. Symlinks are listing-only in every case: the daemon serves regular
+ *  files (`lstat`, attachments standard), so an in-root symlink is refused for
+ *  the same reason as an escaping one — it just gets the milder sentence. */
+export function entryRefusal(entry: FsEntry): string | null {
+  if (entry.denied) return 'not served — denylisted (secrets policy)';
+  // Before any policy gate: a name the viewer cannot even ADDRESS. `opendir`
+  // returns POSIX names the daemon's route grammar refuses (backslash, control
+  // bytes), and joining one would request a different path than the row shows.
+  // Ranked under the denylist only so a secret keeps its own, louder reason.
+  if (!isOpenableName(entry.name)) return UNOPENABLE_NAME_REASON;
+  if (entry.escapes) return 'symlink leaves this session’s folder — not served';
+  if (entry.type === 'symlink') return 'symlink — listed only, not served';
+  if (entry.ignored) return 'gitignored — content is not served';
+  return null;
+}
+
+/** The one sort policy for a listed directory: folders first, then a numeric
+ *  locale compare. The daemon sorts dirs-first already; sorting again costs
+ *  nothing and means a future (or older) daemon cannot make a pane look random.
+ *  Shared by the flat browse list and the tree so the two can never disagree. */
+export function sortFsEntries(entries: readonly FsEntry[] | undefined | null): FsEntry[] {
+  const rank = (entry: FsEntry) => (entry.type === 'dir' ? 0 : 1);
+  return [...(entries ?? [])].sort(
+    (a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name, undefined, { numeric: true }),
+  );
 }
 
 export function parentRel(rel: string): string {

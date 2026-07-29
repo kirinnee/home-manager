@@ -12,10 +12,12 @@ import {
   changeDescription,
   entryRefusal,
   fileRefusal,
+  filesTreeOpenByDefault,
   readFilesTabState,
   resetFilesTabStates,
   scrollFileLineIntoView,
 } from './FilesTab';
+import { FileTree, FileTreeRows } from './FileTree';
 import { loadFsChanges, resetFsProbes } from './files-api';
 import type { FsChanges, FsEntry, FsFile } from './files-api';
 import { parseUnifiedDiff } from './files-model';
@@ -96,9 +98,10 @@ class HookHarness {
 
   constructor(private readonly assignRefs: (tree: unknown) => void) {}
 
-  useState<T>(initial: T): [T, React.Dispatch<React.SetStateAction<T>>] {
+  useState<T>(initial: T | (() => T)): [T, React.Dispatch<React.SetStateAction<T>>] {
     const index = this.index++;
-    if (!(index in this.slots)) this.slots[index] = initial;
+    // React semantics: a function argument is a LAZY INITIALIZER, not the value.
+    if (!(index in this.slots)) this.slots[index] = typeof initial === 'function' ? (initial as () => T)() : initial;
     const setState: React.Dispatch<React.SetStateAction<T>> = value => {
       const current = this.slots[index] as T;
       this.slots[index] = typeof value === 'function' ? (value as (previous: T) => T)(current) : value;
@@ -870,6 +873,174 @@ describe('the tab shell', () => {
       expect(fileRequests).not.toContainEqual({ sessionId: sessionB, path: 'a.ts' });
     } finally {
       switching.unmount();
+    }
+  });
+
+  test('the chrome is ONE bar: the crumbs are its path segment, no second rail', () => {
+    resetFsProbes();
+    const html = renderToStaticMarkup(<FilesTab sessionId="ms2files-91111111" cwd="/repo" />);
+    expect(html.match(/kt-fs-bar\b/g)).toHaveLength(1);
+    expect(html.match(/kt-fs-crumbs/g)).toHaveLength(1);
+    // Markup order proves containment: bar opens, crumbs render, the actions
+    // cluster (still in the bar) follows, and only then the body starts.
+    const bar = html.indexOf('kt-fs-bar');
+    const crumbsAt = html.indexOf('aria-label="Folder path"');
+    const actions = html.indexOf('kt-fs-actions');
+    const body = html.indexOf('kt-fs-body');
+    expect(bar).toBeGreaterThanOrEqual(0);
+    expect(crumbsAt).toBeGreaterThan(bar);
+    expect(actions).toBeGreaterThan(crumbsAt);
+    expect(body).toBeGreaterThan(actions);
+  });
+
+  test('collapsed by default on mobile, open elsewhere, and an explicit choice wins', () => {
+    expect(filesTreeOpenByDefault(undefined, 'full')).toBe(true);
+    expect(filesTreeOpenByDefault(undefined, 'rail')).toBe(true);
+    expect(filesTreeOpenByDefault(undefined, 'drawer')).toBe(false);
+    expect(filesTreeOpenByDefault(true, 'drawer')).toBe(true);
+    expect(filesTreeOpenByDefault(false, 'full')).toBe(false);
+  });
+
+  test('the bar offers the tree toggle while browsing and the tree pane renders', () => {
+    resetFsProbes();
+    const html = renderToStaticMarkup(<FilesTab sessionId="ms2files-92222222" cwd="/repo" />);
+    // Desktop default (no viewport in this suite → 'full'): open.
+    expect(html).toContain('aria-label="Hide the folder tree"');
+    expect(html).toContain('aria-label="Folder tree"');
+    expect(html).toContain('kt-fs-tree');
+  });
+
+  test('toggling the tree from the bar unmounts it and persists the choice', async () => {
+    const sessionId = 'ms2files-93333333';
+    await seedProbe(sessionId, { repo: true, changes: [] });
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+    globalThis.fetch = (async input => {
+      const url = new URL(String(input), 'https://kteam.test');
+      if (url.pathname.endsWith('/fs')) return json({ entries: [{ name: 'src', type: 'dir' }] });
+      throw new Error(`unexpected fetch ${url.pathname}`);
+    }) as typeof fetch;
+
+    const harness = new HookHarness(() => undefined);
+    const render = () => FilesTab({ sessionId, cwd: '/repo' });
+    const click = (label: string) => {
+      const button = visit(
+        harness.output,
+        element => element.type === 'button' && element.props?.['aria-label'] === label,
+      );
+      expect(button).toBeDefined();
+      (button!.props!.onClick as () => void)();
+    };
+    try {
+      harness.render(render);
+      await flush();
+      expect(visit(harness.output, element => element.type === FileTree)).toBeDefined();
+
+      click('Hide the folder tree');
+      await flush();
+      expect(visit(harness.output, element => element.type === FileTree)).toBeUndefined();
+      expect(readFilesTabState(sessionId).tree).toBe(false);
+
+      click('Show the folder tree');
+      await flush();
+      expect(visit(harness.output, element => element.type === FileTree)).toBeDefined();
+      expect(readFilesTabState(sessionId).tree).toBe(true);
+
+      // Opening a file swaps the toggle for Back and HIDES the mounted tree —
+      // expansion must survive the read-then-back round trip.
+      const browse = visit(harness.output, candidate => candidate.type === BrowseList);
+      expect(browse).toBeDefined();
+      (browse!.props!.onOpenFile as (path: string) => void)('src/a.ts');
+      await flush();
+      const tree = visit(harness.output, element => element.type === FileTree);
+      expect(tree?.props).toMatchObject({ hidden: true });
+      expect(
+        visit(
+          harness.output,
+          element => element.type === 'button' && element.props?.['aria-label'] === 'Hide the folder tree',
+        ),
+      ).toBeUndefined();
+      expect(
+        visit(
+          harness.output,
+          element => element.type === 'button' && element.props?.['aria-label'] === 'Back to the file list',
+        ),
+      ).toBeDefined();
+    } finally {
+      harness.unmount();
+    }
+  });
+
+  test('the tree loads only visible directories and recovers from a failed listing', async () => {
+    const sessionId = 'ms2files-94444444';
+    const listRequests: string[] = [];
+    let failSrc = true;
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+    globalThis.fetch = (async input => {
+      const url = new URL(String(input), 'https://kteam.test');
+      if (!url.pathname.endsWith('/fs')) throw new Error(`unexpected fetch ${url.pathname}`);
+      const path = url.searchParams.get('path') ?? '';
+      listRequests.push(path);
+      if (path === '') {
+        return json({
+          entries: [
+            { name: 'src', type: 'dir' },
+            { name: 'node_modules', type: 'dir', denied: true },
+            { name: 'README.md', type: 'file', size: 10 },
+          ],
+        });
+      }
+      if (path === 'src' && failSrc) return json({ error: 'boom' }, 500);
+      return json({ entries: [{ name: 'app.ts', type: 'file' }] });
+    }) as typeof fetch;
+
+    const entered: string[] = [];
+    const opened: string[] = [];
+    const harness = new HookHarness(() => undefined);
+    const render = () =>
+      FileTree({
+        sessionId,
+        dir: '',
+        onEnter: path => entered.push(path),
+        onOpenFile: path => opened.push(path),
+      });
+    // The harness renders only FileTree itself; its FileTreeRows child stays an
+    // element. Expand it with the shipping component function to reach the rows.
+    const renderedRows = () => {
+      const rowsElement = visit(harness.output, element => element.type === FileTreeRows);
+      expect(rowsElement).toBeDefined();
+      return FileTreeRows(rowsElement!.props as Parameters<typeof FileTreeRows>[0]);
+    };
+    const click = (label: string) => {
+      const button = visit(
+        renderedRows(),
+        element => element.type === 'button' && element.props?.['aria-label'] === label,
+      );
+      expect(button).toBeDefined();
+      (button!.props!.onClick as () => void)();
+    };
+    try {
+      harness.render(render);
+      await flush();
+      // Only the root was asked for; the denied directory offers no expansion.
+      expect(listRequests).toEqual(['']);
+      expect(visit(renderedRows(), element => element.props?.['aria-label'] === 'Expand node_modules')).toBeUndefined();
+
+      click('Expand src');
+      await flush();
+      expect(listRequests).toEqual(['', 'src']);
+      // The failure renders as an error row, not as a silent empty branch.
+      click('Retry listing src');
+      failSrc = false;
+      await flush();
+      expect(listRequests).toEqual(['', 'src', 'src']);
+      click('Open file src/app.ts');
+      click('Go to folder src');
+      expect(opened).toEqual(['src/app.ts']);
+      expect(entered).toEqual(['src']);
+    } finally {
+      harness.unmount();
     }
   });
 

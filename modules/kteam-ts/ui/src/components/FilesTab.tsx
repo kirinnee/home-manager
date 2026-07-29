@@ -28,6 +28,7 @@ import {
   Folder,
   GitCompareArrows,
   Link2Off,
+  ListTree,
   Loader2,
   Lock,
   RefreshCw,
@@ -40,33 +41,30 @@ import type { AttentionId } from '../lib/attention';
 import type { PinReferenceLookup } from '../lib/pin-links';
 import { langFromPath } from '../lib/tool-extract';
 import { useInputModality } from '../hooks/useInputModality';
+import { useLayoutMode, type LayoutMode } from '../hooks/useLayoutMode';
+import { FileTree } from './FileTree';
+import { describeFsError, fsApi, isAbort, useFsProbe, type FsChange, type FsFile, type FsListing } from './files-api';
 import {
-  describeFsError,
-  fsApi,
-  isAbort,
-  useFsProbe,
-  type FsChange,
-  type FsEntry,
-  type FsFile,
-  type FsListing,
-} from './files-api';
-import {
-  UNOPENABLE_NAME_REASON,
   baseName,
   crumbs,
+  entryRefusal,
   formatBytes,
   isMarkdownPath,
   isOpenablePath,
-  isOpenableName,
   joinRel,
   parentRel,
   parseUnifiedDiff,
   renderableDiffLines,
+  sortFsEntries,
   splitHighlightedLines,
   statusChip,
   type ParsedDiff,
 } from './files-model';
 import './files.css';
+
+// The refusal policy moved to files-model so the tree can share it without a
+// component cycle; re-exported so existing consumers keep their import.
+export { entryRefusal };
 
 /** Mirrors the shared highlighter's private cap only to explain its fallback.
  *  Highlighting itself still owns and enforces the real limit. */
@@ -106,6 +104,15 @@ export interface FilesTabSnapshot {
   dir: string;
   tabs: OpenFileTab[];
   activePath: string | null;
+  /** The reader's explicit tree choice. Absent = the layout default applies
+   *  (open on desktop, collapsed at drawer widths). */
+  tree?: boolean;
+}
+
+/** "Collapsed by default on mobile, toggleable on desktop": an explicit choice
+ *  always wins; otherwise only the drawer layout starts collapsed. */
+export function filesTreeOpenByDefault(preference: boolean | undefined, layout: LayoutMode): boolean {
+  return preference ?? layout !== 'drawer';
 }
 
 const EMPTY_FILES_TAB_SNAPSHOT: FilesTabSnapshot = { dir: '', tabs: [], activePath: null };
@@ -278,28 +285,6 @@ export function ChangeIndicator({ change }: { change: FsChange }) {
 
 /* ---- Browse --------------------------------------------------------------- */
 
-/** Why an entry cannot be opened, in the words the daemon's gates use. Null
- *  means "openable".
- *
- *  A REFUSAL REFUSES DIRECTORIES TOO. `.git/` and `node_modules/` are on the
- *  denylist as directories, and a gitignored directory's children are refused
- *  the moment they are read — offering to descend into one is offering a dead
- *  end. Symlinks are listing-only in every case: the daemon serves regular
- *  files (`lstat`, attachments standard), so an in-root symlink is refused for
- *  the same reason as an escaping one — it just gets the milder sentence. */
-export function entryRefusal(entry: FsEntry): string | null {
-  if (entry.denied) return 'not served — denylisted (secrets policy)';
-  // Before any policy gate: a name the viewer cannot even ADDRESS. `opendir`
-  // returns POSIX names the daemon's route grammar refuses (backslash, control
-  // bytes), and joining one would request a different path than the row shows.
-  // Ranked under the denylist only so a secret keeps its own, louder reason.
-  if (!isOpenableName(entry.name)) return UNOPENABLE_NAME_REASON;
-  if (entry.escapes) return 'symlink leaves this session’s folder — not served';
-  if (entry.type === 'symlink') return 'symlink — listed only, not served';
-  if (entry.ignored) return 'gitignored — content is not served';
-  return null;
-}
-
 export function BrowseList({
   listing,
   dir,
@@ -313,14 +298,7 @@ export function BrowseList({
   onEnter: (path: string) => void;
   onOpenFile: (path: string) => void;
 }) {
-  // The daemon sorts dirs-first; sorting again costs nothing and means a future
-  // (or older) daemon cannot make the list look random.
-  const entries = useMemo(() => {
-    const rank = (entry: FsEntry) => (entry.type === 'dir' ? 0 : 1);
-    return [...(listing.entries ?? [])].sort(
-      (a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name, undefined, { numeric: true }),
-    );
-  }, [listing]);
+  const entries = useMemo(() => sortFsEntries(listing.entries), [listing]);
 
   return (
     <ul className="m-0 list-none p-0">
@@ -713,11 +691,14 @@ export function FilesTab({
   onPinOpen,
 }: Props) {
   const probe = useFsProbe(sessionId);
+  const layout = useLayoutMode();
   const restored = readFilesTabState(sessionId);
   const [stateSessionId, setStateSessionId] = useState(sessionId);
   const [dir, setDir] = useState(restored.dir);
   const [tabs, setTabs] = useState<OpenFileTab[]>(restored.tabs);
   const [activePath, setActivePath] = useState<string | null>(restored.activePath);
+  const [treePref, setTreePref] = useState<boolean | undefined>(restored.tree);
+  const [treeRefresh, setTreeRefresh] = useState(0);
   const [focusRequest, setFocusRequest] = useState(0);
   const { touchAffected } = useInputModality();
   const paneRef = useRef<HTMLDivElement>(null);
@@ -733,6 +714,8 @@ export function FilesTab({
     setDir(next.dir);
     setTabs(next.tabs);
     setActivePath(next.activePath);
+    setTreePref(next.tree);
+    setTreeRefresh(0);
     setFocusRequest(0);
     handledReference.current = null;
     setStateSessionId(sessionId);
@@ -797,8 +780,8 @@ export function FilesTab({
 
   useEffect(() => {
     if (!stateMatchesSession) return;
-    writeFilesTabState(sessionId, { dir, tabs, activePath });
-  }, [activePath, dir, sessionId, stateMatchesSession, tabs]);
+    writeFilesTabState(sessionId, { dir, tabs, activePath, ...(treePref === undefined ? {} : { tree: treePref }) });
+  }, [activePath, dir, sessionId, stateMatchesSession, tabs, treePref]);
 
   useEffect(() => {
     if (!stateMatchesSession || !requestedReference || handledReference.current === requestedReference.sequence) return;
@@ -856,18 +839,20 @@ export function FilesTab({
     );
   }
 
-  const title = active
-    ? formatCodeReference({ path: active.path, ...active.selection })
-    : dir || cwd || 'Session files';
+  const title = active ? formatCodeReference({ path: active.path, ...active.selection }) : '';
   const rawActive = active?.view === 'raw';
   const diffActive = active?.view === 'diff' && active.selection === undefined;
+  const treeOpen = filesTreeOpenByDefault(treePref, layout);
 
   return (
     // `.kt-fs` owns flex:1 + min-height:0 (files.css) — the pane fills what the
     // page gives it and its scroller, not the page, takes the overflow.
     <div className="kt-fs rounded-md border border-border bg-surface">
+      {/* ONE bar for path and actions. Browsing: tree toggle + breadcrumbs +
+          refresh. Viewing: back + the file's path + its view actions. The old
+          standalone breadcrumb rail is gone — the crumbs ARE the bar's path. */}
       <div className="kt-fs-bar">
-        {active && (
+        {active ? (
           <button
             type="button"
             className="kt-fs-icon-button"
@@ -877,10 +862,46 @@ export function FilesTab({
           >
             <ArrowLeft size={16} aria-hidden="true" />
           </button>
+        ) : (
+          <button
+            type="button"
+            className="kt-fs-icon-button"
+            data-active={treeOpen || undefined}
+            aria-pressed={treeOpen}
+            onClick={() => setTreePref(!treeOpen)}
+            aria-label={treeOpen ? 'Hide the folder tree' : 'Show the folder tree'}
+            title={treeOpen ? 'Hide tree' : 'Show tree'}
+          >
+            <ListTree size={16} aria-hidden="true" />
+          </button>
         )}
-        <span className="kt-fs-title" title={title}>
-          <span className="kt-fs-title-path">{title}</span>
-        </span>
+        {active ? (
+          <span className="kt-fs-title" title={title}>
+            <span className="kt-fs-title-path">{title}</span>
+          </span>
+        ) : (
+          <nav className="kt-fs-crumbs scroll-thin" aria-label="Folder path">
+            {crumbs(dir).map((crumb, index) => (
+              <span key={crumb.path || 'root'} className="contents">
+                {index > 0 && (
+                  <span className="kt-fs-crumb-sep" aria-hidden="true">
+                    /
+                  </span>
+                )}
+                <button
+                  type="button"
+                  className="kt-fs-crumb"
+                  aria-current={crumb.path === dir ? 'page' : undefined}
+                  onClick={() => setDir(crumb.path)}
+                  title={index === 0 ? cwd : crumb.path}
+                  aria-label={index === 0 ? `Go to the session root${cwd ? ` (${cwd})` : ''}` : `Go to ${crumb.path}`}
+                >
+                  {crumb.label}
+                </button>
+              </span>
+            ))}
+          </nav>
+        )}
         <span className="kt-fs-actions">
           {active?.selection && (
             <button
@@ -926,7 +947,10 @@ export function FilesTab({
               probe.refresh();
               if (diffActive) diff.reload();
               else if (active) file.reload();
-              else listing.reload();
+              else {
+                listing.reload();
+                setTreeRefresh(nonce => nonce + 1);
+              }
             }}
             aria-label={probe.refreshing ? 'Refreshing files' : 'Refresh files'}
             title="Re-read the working tree"
@@ -939,98 +963,96 @@ export function FilesTab({
       {tabs.length > 0 && (
         <OpenFileTabs tabs={tabs} activePath={activePath} onActivate={setActivePath} onClose={closeFile} />
       )}
-      {!active && (
-        <nav className="kt-fs-crumbs scroll-thin" aria-label="Folder path">
-          {crumbs(dir).map((crumb, index) => (
-            <span key={crumb.path || 'root'} className="contents">
-              {index > 0 && (
-                <span className="kt-fs-crumb-sep" aria-hidden="true">
-                  /
-                </span>
-              )}
-              <button
-                type="button"
-                className="kt-fs-crumb"
-                aria-current={crumb.path === dir ? 'page' : undefined}
-                onClick={() => setDir(crumb.path)}
-                title={index === 0 ? cwd : crumb.path}
-                aria-label={index === 0 ? `Go to the session root${cwd ? ` (${cwd})` : ''}` : `Go to ${crumb.path}`}
-              >
-                {crumb.label}
-              </button>
-            </span>
-          ))}
-        </nav>
-      )}
 
-      <div ref={paneRef} tabIndex={-1} className="kt-fs-scroll scroll-thin outline-none">
-        {diffActive && active ? (
-          diff.loading ? (
-            <Loading what="the diff" />
-          ) : diff.error ? (
-            <Failed what="the diff" error={diff.error} onRetry={diff.reload} />
-          ) : parsedDiff && parsedDiff.binary ? (
-            <Note tone="warn" role="status">
-              git reports this pair as binary — there is no textual diff to show.
-            </Note>
-          ) : parsedDiff && diffHasBody ? (
-            <>
-              <DiffBody parsed={parsedDiff} />
-              {parsedDiff.truncated && (
-                <div className="kt-fs-note" role="status">
-                  Showing the first {parsedDiff.lines.length.toLocaleString()} of {parsedDiff.total.toLocaleString()}{' '}
-                  diff lines.
-                </div>
-              )}
-            </>
-          ) : (
-            <Note role="status">No textual changes in this file.</Note>
-          )
-        ) : active ? (
-          file.loading ? (
-            <Loading what={baseName(active.path)} />
-          ) : file.error ? (
-            <Failed what={baseName(active.path)} error={file.error} onRetry={file.reload} />
-          ) : file.data ? (
-            <FileBody
-              file={file.data}
-              path={active.path}
-              raw={rawActive}
-              selection={active.selection}
-              targetLineRef={targetLineRef}
-              sessionId={sessionId}
-              cwd={cwd}
-              onTaskOpen={onTaskOpen}
-              onCodeReferenceOpen={onCodeReferenceOpen}
-              onAttentionOpen={onAttentionOpen}
-              onPinOpen={onPinOpen}
-            />
-          ) : (
-            <Note role="status">Nothing to show.</Note>
-          )
-        ) : (
-          <>
-            {probe.state === 'error' && (
+      <div className="kt-fs-body">
+        {treeOpen && (
+          // Mounted (hidden) while a file is open, so expansion and the loaded
+          // listings survive a read-then-back round trip.
+          <FileTree
+            key={sessionId}
+            sessionId={sessionId}
+            dir={dir}
+            refreshNonce={treeRefresh}
+            hidden={!!active}
+            onEnter={setDir}
+            onOpenFile={openFile}
+          />
+        )}
+        <div ref={paneRef} tabIndex={-1} className="kt-fs-scroll scroll-thin outline-none">
+          {diffActive && active ? (
+            diff.loading ? (
+              <Loading what="the diff" />
+            ) : diff.error ? (
+              <Failed what="the diff" error={diff.error} onRetry={diff.reload} />
+            ) : parsedDiff && parsedDiff.binary ? (
               <Note tone="warn" role="status">
-                Files still browse normally, but git change markers are unavailable: {probe.error ?? 'unknown error'}.
+                git reports this pair as binary — there is no textual diff to show.
               </Note>
-            )}
-            {changesTruncated && (
-              <Note tone="warn" role="status">
-                Some change dots may be missing because the daemon capped this repository’s status response.
-              </Note>
-            )}
-            {listing.loading ? (
-              <Loading what={dir || 'the session root'} />
-            ) : listing.error ? (
-              <Failed what={dir || 'the session root'} error={listing.error} onRetry={listing.reload} />
-            ) : listing.data ? (
-              <BrowseList listing={listing.data} dir={dir} changes={changeMap} onEnter={setDir} onOpenFile={openFile} />
+            ) : parsedDiff && diffHasBody ? (
+              <>
+                <DiffBody parsed={parsedDiff} />
+                {parsedDiff.truncated && (
+                  <div className="kt-fs-note" role="status">
+                    Showing the first {parsedDiff.lines.length.toLocaleString()} of {parsedDiff.total.toLocaleString()}{' '}
+                    diff lines.
+                  </div>
+                )}
+              </>
+            ) : (
+              <Note role="status">No textual changes in this file.</Note>
+            )
+          ) : active ? (
+            file.loading ? (
+              <Loading what={baseName(active.path)} />
+            ) : file.error ? (
+              <Failed what={baseName(active.path)} error={file.error} onRetry={file.reload} />
+            ) : file.data ? (
+              <FileBody
+                file={file.data}
+                path={active.path}
+                raw={rawActive}
+                selection={active.selection}
+                targetLineRef={targetLineRef}
+                sessionId={sessionId}
+                cwd={cwd}
+                onTaskOpen={onTaskOpen}
+                onCodeReferenceOpen={onCodeReferenceOpen}
+                onAttentionOpen={onAttentionOpen}
+                onPinOpen={onPinOpen}
+              />
             ) : (
               <Note role="status">Nothing to show.</Note>
-            )}
-          </>
-        )}
+            )
+          ) : (
+            <>
+              {probe.state === 'error' && (
+                <Note tone="warn" role="status">
+                  Files still browse normally, but git change markers are unavailable: {probe.error ?? 'unknown error'}.
+                </Note>
+              )}
+              {changesTruncated && (
+                <Note tone="warn" role="status">
+                  Some change dots may be missing because the daemon capped this repository’s status response.
+                </Note>
+              )}
+              {listing.loading ? (
+                <Loading what={dir || 'the session root'} />
+              ) : listing.error ? (
+                <Failed what={dir || 'the session root'} error={listing.error} onRetry={listing.reload} />
+              ) : listing.data ? (
+                <BrowseList
+                  listing={listing.data}
+                  dir={dir}
+                  changes={changeMap}
+                  onEnter={setDir}
+                  onOpenFile={openFile}
+                />
+              ) : (
+                <Note role="status">Nothing to show.</Note>
+              )}
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
