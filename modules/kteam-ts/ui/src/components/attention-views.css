@@ -1,0 +1,215 @@
+/* Attention-surface tone plumbing (&F157). The attention board used to be a
+   stack of uniform bordered cards: every item wore the same four borders, the
+   same wash, and two more nested boxes inside it for context and how-to-resolve.
+   Nothing on screen told you what KIND of ask you were looking at until you had
+   read the whole thing, and at 390px the boxes ate most of the width.
+
+   This file replaces that chrome with two orthogonal colour families, so the
+   markup can drop boxes instead of adding them:
+
+     `data-kind` on the row  — WHAT THE HUMAN DOES (the four attention kinds).
+                               Resolves `--attn-tone{,-bg,-border}`, carried by
+                               the row's left rail and its headline chip.
+     `data-part` on a block  — WHICH PART OF THE ITEM this is (why / background /
+                               what clears it). Resolves `--attn-part-ink`, worn
+                               by that part's gutter icon and label only.
+
+   Both families resolve to the contrast-checked theme tokens the rest of the app
+   already uses (`--warn/--accent/--ok/--pend` + their `-bg`/`-border`), so all
+   ten themes — High Contrast and Neo included — inherit the treatment with no
+   theme-specific rules here. Nothing in this file hardcodes a colour.
+
+   An item WITHOUT an ask keeps the neutral default on purpose: absence of a
+   recorded ask must read as unknown, never as a confident "permission". */
+
+.kt-attn {
+  --attn-tone: var(--muted);
+  --attn-tone-bg: var(--surface-2);
+  --attn-tone-border: var(--border-soft);
+}
+
+.kt-attn[data-kind='permission'] {
+  --attn-tone: var(--warn);
+  --attn-tone-bg: var(--warn-bg);
+  --attn-tone-border: var(--warn-border);
+}
+
+.kt-attn[data-kind='multiple-choice'] {
+  --attn-tone: var(--accent);
+  --attn-tone-bg: var(--accent-soft);
+  /* NOT --accent-border: it measures 1.2-2.9:1 on surface in 6 of 10 themes and
+     is decorative tint only (design contract §8.2). Mix a real edge instead. */
+  --attn-tone-border: color-mix(in srgb, var(--accent) 38%, var(--surface));
+}
+
+.kt-attn[data-kind='answer-review'] {
+  --attn-tone: var(--ok);
+  --attn-tone-bg: var(--ok-bg);
+  --attn-tone-border: var(--ok-border);
+}
+
+.kt-attn[data-kind='open-question'] {
+  --attn-tone: var(--pend);
+  --attn-tone-bg: var(--pend-bg);
+  --attn-tone-border: var(--pend-border);
+}
+
+/* The kind rail — the row's left edge carries its kind. Inset shadow, not a
+   border, so row geometry (and every 44px target inside it) never shifts and
+   the list's dividers stay flush. Echoes `.kt-task-rail` in task-views.css. */
+.kt-attn-rail {
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--attn-tone) 55%, transparent);
+}
+
+/* The oldest unanswered item is the one the list exists to surface, so it gets
+   the full-strength rail. Weight, not an extra badge or an extra box. */
+.kt-attn-rail[data-oldest='true'] {
+  box-shadow: inset 3px 0 0 var(--attn-tone);
+}
+
+.kt-attn-ink {
+  color: var(--attn-tone);
+}
+
+/* The headline chip: tone ink + tone wash + an ink-grade edge. This is the ONE
+   bordered element left on a row — it is a badge, not a container. */
+.kt-attn-chip {
+  border: 1px solid var(--attn-tone-border);
+  border-radius: var(--radius-badge);
+  background: var(--attn-tone-bg);
+  color: var(--attn-tone);
+}
+
+/* ---- parts of one item -------------------------------------------------- */
+
+.kt-attn-part {
+  --attn-part-ink: var(--faint);
+}
+
+/* Why this needs you now — the urgency line. */
+.kt-attn-part[data-part='why'] {
+  --attn-part-ink: var(--warn);
+}
+
+/* Background for a reader who has not followed the session (jargon expanded). */
+.kt-attn-part[data-part='context'] {
+  --attn-part-ink: var(--muted);
+}
+
+/* What actually clears the item — the thing to DO. */
+.kt-attn-part[data-part='action'] {
+  --attn-part-ink: var(--accent);
+}
+
+.kt-attn-part-ink {
+  color: var(--attn-part-ink);
+}
+
+/* A part is separated by a hairline in its own ink, never by a nested card.
+   One rule replaces the `rounded border bg-surface-2` boxes this surface used
+   to nest two deep. */
+.kt-attn-part-rail {
+  border-left: 1px solid color-mix(in srgb, var(--attn-part-ink) 34%, transparent);
+}
+
+/* ---- prose safety at 390px ---------------------------------------------- */
+
+/* Markdown inside a flex row must be allowed to shrink, or a long unbroken
+   token pushes the whole pane sideways. Wide blocks scroll INSIDE themselves;
+   the page never scrolls horizontally. */
+.kt-attn-prose {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.kt-attn-prose pre,
+.kt-attn-prose table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* ---- multiple-choice options -------------------------------------------- */
+
+/* An option is CONTENT the human reads, not a control label. `.kt-btn` shouts
+   it in uppercase under Studio/Mission and truncates the description, which on
+   a 390px screen hides the exact words that tell two options apart. This is a
+   quiet tap row instead: sentence case, wrapping, tone-tinted on hover. */
+.kt-attn-option {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  align-items: flex-start;
+  gap: var(--gap-xs);
+  border: 1px solid var(--attn-tone-border);
+  border-radius: var(--radius-control);
+  background: transparent;
+  padding: 8px var(--pad-cell-x);
+  text-align: left;
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-base);
+  text-transform: none;
+}
+
+.kt-attn-option:hover:not(:disabled) {
+  border-color: var(--attn-tone);
+  background: var(--attn-tone-bg);
+}
+
+.kt-attn-option__body {
+  min-width: 0;
+  flex: 1;
+}
+
+.kt-attn-option__label {
+  display: block;
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.kt-attn-option__hint {
+  display: block;
+  color: var(--faint);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+/* ---- disclosure --------------------------------------------------------- */
+
+/* Collapsed sections are a controlled button + region, not <details>, because
+   the surface remembers expansion per item for as long as the pane is open and
+   a native <details> would silently reset that on every list re-render. */
+.kt-attn-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  gap: var(--gap-xs);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  padding: 0 var(--pad-cell-x) 0 0;
+  text-align: left;
+  color: var(--attn-part-ink);
+}
+
+.kt-attn-toggle:hover {
+  background: var(--surface-2);
+}
+
+.kt-attn-chevron {
+  flex: none;
+  transition: transform 120ms ease;
+}
+
+.kt-attn-toggle[aria-expanded='true'] .kt-attn-chevron {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kt-attn-chevron {
+    transition: none;
+  }
+}
