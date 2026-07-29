@@ -161,6 +161,15 @@ describe('analytics API transport', () => {
     const captured = await captureRequest(response(), () => api.analytics('{id=session/odd ?}'));
     expect(String(captured.input)).toBe('/v1/analytics?q=%7Bid%3Dsession%2Fodd%20%3F%7D');
   });
+
+  test('carries the server-owned session boundary separately from the editable query', async () => {
+    const query = 'sum by (model) {id=someone-else}';
+    const captured = await captureRequest(response(), () => api.analytics(query, 'session/odd ?'));
+    const url = new URL(String(captured.input), 'http://daemon');
+    expect(url.pathname).toBe('/v1/analytics');
+    expect(url.searchParams.get('q')).toBe(query);
+    expect(url.searchParams.get('session')).toBe('session/odd ?');
+  });
 });
 
 describe('session administration API transport', () => {
