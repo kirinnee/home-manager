@@ -10,8 +10,11 @@ import { StoreProvider } from './lib/store';
 import { AgentMentionProvider } from './lib/agent-mention-context';
 import { TaskReferenceProvider } from './lib/task-reference-context';
 import { PinReferenceProvider } from './lib/pin-reference-context';
+import { installPortraitLock } from './lib/orientation-lock';
 import './index.css';
 import './highlight.css';
+
+installPortraitLock();
 
 const root = document.getElementById('root');
 if (!root) throw new Error('missing #root');
