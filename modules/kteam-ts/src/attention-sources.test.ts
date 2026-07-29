@@ -893,22 +893,19 @@ describe('AttentionSources', () => {
     h.sources.close();
   });
 
-  test('permission request and explicit grant create/resolve through the durable board', async () => {
+  test('the removed interaction.permission_* contract no longer creates board items', async () => {
     const h = await harness();
+    const before = await h.service.list(SID);
     h.sessions.emit('interaction.permission_requested', {
       requestId: 'p1',
       subject: 'Allow production deploy?',
       reason: 'Release is ready.',
     });
-    const requested = await boardWhen(h.service, value => value.items.some(item => item.source === 'permission'));
-    expect(requested.items.find(item => item.source === 'permission')).toMatchObject({
-      sourceRef: 'p1',
-    });
-    h.sessions.emit('interaction.permission_granted', { requestId: 'p1' });
-    const granted = await boardWhen(h.service, value => value.resolved.some(item => item.source === 'permission'));
-    expect(granted.resolved.find(item => item.source === 'permission')).toMatchObject({
-      resolvedBy: 'human',
-    });
+    // Give the event a real chance to (incorrectly) land before asserting.
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const after = await h.service.list(SID);
+    expect(after.count).toBe(before.count);
+    expect(after.items.some(item => item.sourceRef === 'p1')).toBe(false);
     h.sources.close();
   });
 

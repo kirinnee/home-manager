@@ -42,10 +42,150 @@ export const ATTENTION_FIELD_GUIDANCE = {
 } as const;
 export const MAX_ATTENTION_SOURCE_REF_LEN = 512;
 
-/** `permission` is reserved for the source adapter, but the daemon does not
- * yet produce permission events; see the UNIMPLEMENTED marker there. */
-export const ATTENTION_SOURCES = ['task', 'question', 'permission', 'agent-raised'] as const;
+/** The old `permission` source was declared with no producer and has been
+ * removed; permission asks are now an `ask.kind` on agent-raised items, whose
+ * producer is the `kteam attention` CLI. */
+export const ATTENTION_SOURCES = ['task', 'question', 'agent-raised'] as const;
 export type AttentionSource = (typeof ATTENTION_SOURCES)[number];
+
+/** The four attention kinds, classified by WHAT THE HUMAN DOES:
+ *  - `permission`       approve or reject
+ *  - `multiple-choice`  pick one of the listed answers
+ *  - `answer-review`    say the answer is good, or ask for clarification
+ *  - `open-question`    write a full answer
+ * Every kind's answer options are structural (see AttentionResponse), so a
+ * renderer can never have to guess which control to draw. An item WITHOUT an
+ * ask is a plain request that self-clears or is marked done/dismissed; absence
+ * is legal because records predate the field and daemon-derived items (task
+ * blockers, warden verdicts) are resolved by acting, not by answering here. */
+export const ATTENTION_ASK_KINDS = ['permission', 'multiple-choice', 'answer-review', 'open-question'] as const;
+export type AttentionAskKind = (typeof ATTENTION_ASK_KINDS)[number];
+
+export const MAX_ATTENTION_ASK_OPTIONS = 12;
+export const MAX_ATTENTION_ASK_OPTION_LEN = 120;
+export const MAX_ATTENTION_ASK_OPTION_DETAIL_LEN = 240;
+
+export interface AttentionAskOption {
+  label: string;
+  description?: string;
+}
+
+export type AttentionAsk =
+  | { kind: 'permission' }
+  | { kind: 'multiple-choice'; options: AttentionAskOption[] }
+  | { kind: 'answer-review' }
+  | { kind: 'open-question' };
+
+/** The human's structured answer, one shape per kind. */
+export type AttentionResponse =
+  | { kind: 'permission'; decision: 'approve' | 'reject' }
+  | { kind: 'multiple-choice'; choice: string }
+  | { kind: 'answer-review'; verdict: 'good' }
+  | { kind: 'answer-review'; verdict: 'clarify'; clarification: string }
+  | { kind: 'open-question'; answer: string };
+
+/** How a resolved item left the board. `done` is an answered/acted-on clear;
+ * `dismissed` is an explicit "stop asking" from either side. Absent on rows
+ * written before the field existed. */
+export type AttentionDisposition = 'done' | 'dismissed';
+
+const boundedLabel = (value: unknown, max: number): string | null =>
+  typeof value === 'string' && value.trim().length > 0 && value.length <= max && !/[\r\n]/u.test(value) ? value : null;
+
+/** Strict structural parse: null means "not a valid ask". Callers decide
+ * whether that is a parse error (store) or a 400 (service/API). */
+export function parseAttentionAsk(value: unknown): AttentionAsk | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const kind = raw['kind'];
+  if (kind === 'permission' || kind === 'answer-review' || kind === 'open-question') {
+    if (raw['options'] !== undefined) return null;
+    return { kind };
+  }
+  if (kind !== 'multiple-choice') return null;
+  const rawOptions = raw['options'];
+  if (!Array.isArray(rawOptions) || rawOptions.length < 2 || rawOptions.length > MAX_ATTENTION_ASK_OPTIONS) {
+    return null;
+  }
+  const options: AttentionAskOption[] = [];
+  const seen = new Set<string>();
+  for (const entry of rawOptions) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const rawOption = entry as Record<string, unknown>;
+    const label = boundedLabel(rawOption['label'], MAX_ATTENTION_ASK_OPTION_LEN);
+    if (label === null || seen.has(label.trim())) return null;
+    seen.add(label.trim());
+    const description = rawOption['description'];
+    if (description === undefined || description === null || description === '') {
+      options.push({ label });
+      continue;
+    }
+    const parsedDescription = boundedLabel(description, MAX_ATTENTION_ASK_OPTION_DETAIL_LEN);
+    if (parsedDescription === null) return null;
+    options.push({ label, description: parsedDescription });
+  }
+  return { kind: 'multiple-choice', options };
+}
+
+export function parseAttentionResponse(value: unknown): AttentionResponse | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  switch (raw['kind']) {
+    case 'permission':
+      return raw['decision'] === 'approve' || raw['decision'] === 'reject'
+        ? { kind: 'permission', decision: raw['decision'] }
+        : null;
+    case 'multiple-choice': {
+      const choice = boundedLabel(raw['choice'], MAX_ATTENTION_ASK_OPTION_LEN);
+      return choice === null ? null : { kind: 'multiple-choice', choice };
+    }
+    case 'answer-review': {
+      if (raw['verdict'] === 'good')
+        return raw['clarification'] === undefined ? { kind: 'answer-review', verdict: 'good' } : null;
+      if (raw['verdict'] !== 'clarify') return null;
+      const clarification = raw['clarification'];
+      if (
+        typeof clarification !== 'string' ||
+        clarification.trim().length === 0 ||
+        clarification.length > MAX_ATTENTION_DETAIL_LEN
+      ) {
+        return null;
+      }
+      return { kind: 'answer-review', verdict: 'clarify', clarification };
+    }
+    case 'open-question': {
+      const answer = raw['answer'];
+      if (typeof answer !== 'string' || answer.trim().length === 0 || answer.length > MAX_ATTENTION_DETAIL_LEN) {
+        return null;
+      }
+      return { kind: 'open-question', answer };
+    }
+    default:
+      return null;
+  }
+}
+
+/** A response is only meaningful against the item's own ask: kinds must match
+ * and a multiple-choice answer must be one of the listed options. */
+export function attentionResponseMatchesAsk(ask: AttentionAsk | undefined, response: AttentionResponse): boolean {
+  if (ask === undefined || ask.kind !== response.kind) return false;
+  if (response.kind !== 'multiple-choice' || ask.kind !== 'multiple-choice') return true;
+  return ask.options.some(option => option.label.trim() === response.choice.trim());
+}
+
+/** One human-readable line for CLI/audit rendering. */
+export function describeAttentionResponse(response: AttentionResponse): string {
+  switch (response.kind) {
+    case 'permission':
+      return response.decision === 'approve' ? 'approved' : 'rejected';
+    case 'multiple-choice':
+      return `chose "${response.choice}"`;
+    case 'answer-review':
+      return response.verdict === 'good' ? 'answer accepted' : `clarification requested: ${response.clarification}`;
+    case 'open-question':
+      return `answered: ${response.answer}`;
+  }
+}
 
 /** Stable identity shared by the shipped-reopen producer and its durable
  * Attention item. */
@@ -116,6 +256,10 @@ export interface AttentionItem {
   waitingSince: string;
   /** The concrete action that resolves it. Markdown. */
   howToResolve: string;
+  /** What the human is being asked to DO, with its answer options structural.
+   * Optional: records predate the field, and daemon-derived items (blocked
+   * tasks, warden verdicts) are cleared by acting, not by answering here. */
+  ask?: AttentionAsk;
   raisedBy: AttentionBy;
   raisedBySession: string | null;
   raisedByName: string | null;
@@ -129,6 +273,10 @@ export interface ResolvedAttentionItem extends AttentionItem {
   resolvedBySession: string | null;
   resolvedByName: string | null;
   resolutionNote: string | null;
+  /** The structured answer the resolver gave, when the item carried an ask. */
+  response?: AttentionResponse;
+  /** `done` vs `dismissed`; absent on rows written before the field existed. */
+  disposition?: AttentionDisposition;
 }
 
 /** Whole-board shape returned by the API and carried by attention.updated. */

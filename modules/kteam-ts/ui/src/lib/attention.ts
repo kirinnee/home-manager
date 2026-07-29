@@ -5,9 +5,90 @@
 
 import { TOKEN } from './api';
 
+/** `permission` stays in the reader's union for records written by older
+ * daemons, even though the daemon no longer produces that source. */
 export type AttentionSource = 'task' | 'question' | 'permission' | 'agent-raised';
 export type AttentionBy = 'human' | 'agent' | 'daemon';
 export type AttentionId = `A${number}`;
+
+/** The four attention kinds, by what the human DOES (&F138). */
+export interface AttentionAskOption {
+  label: string;
+  description?: string;
+}
+
+export type AttentionAsk =
+  | { kind: 'permission' }
+  | { kind: 'multiple-choice'; options: AttentionAskOption[] }
+  | { kind: 'answer-review' }
+  | { kind: 'open-question' };
+
+export type AttentionResponse =
+  | { kind: 'permission'; decision: 'approve' | 'reject' }
+  | { kind: 'multiple-choice'; choice: string }
+  | { kind: 'answer-review'; verdict: 'good' }
+  | { kind: 'answer-review'; verdict: 'clarify'; clarification: string }
+  | { kind: 'open-question'; answer: string };
+
+export type AttentionDisposition = 'done' | 'dismissed';
+
+/** One human-readable line for audit rendering. */
+export function describeAttentionResponse(response: AttentionResponse): string {
+  switch (response.kind) {
+    case 'permission':
+      return response.decision === 'approve' ? 'Approved' : 'Rejected';
+    case 'multiple-choice':
+      return `Chose "${response.choice}"`;
+    case 'answer-review':
+      return response.verdict === 'good' ? 'Answer accepted' : `Clarification requested: ${response.clarification}`;
+    case 'open-question':
+      return `Answered: ${response.answer}`;
+  }
+}
+
+export function parseAttentionAsk(value: unknown): AttentionAsk | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const kind = raw['kind'];
+  if (kind === 'permission' || kind === 'answer-review' || kind === 'open-question') return { kind };
+  if (kind !== 'multiple-choice' || !Array.isArray(raw['options']) || raw['options'].length < 2) return null;
+  const options: AttentionAskOption[] = [];
+  for (const entry of raw['options']) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const rawOption = entry as Record<string, unknown>;
+    if (typeof rawOption['label'] !== 'string' || !rawOption['label'].trim()) return null;
+    const description = rawOption['description'];
+    if (description !== undefined && (typeof description !== 'string' || !description.trim())) return null;
+    options.push({ label: rawOption['label'], ...(description === undefined ? {} : { description }) });
+  }
+  return { kind: 'multiple-choice', options };
+}
+
+export function parseAttentionResponse(value: unknown): AttentionResponse | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  switch (raw['kind']) {
+    case 'permission':
+      return raw['decision'] === 'approve' || raw['decision'] === 'reject'
+        ? { kind: 'permission', decision: raw['decision'] }
+        : null;
+    case 'multiple-choice':
+      return typeof raw['choice'] === 'string' && raw['choice'].trim()
+        ? { kind: 'multiple-choice', choice: raw['choice'] }
+        : null;
+    case 'answer-review':
+      if (raw['verdict'] === 'good') return { kind: 'answer-review', verdict: 'good' };
+      return raw['verdict'] === 'clarify' && typeof raw['clarification'] === 'string' && raw['clarification'].trim()
+        ? { kind: 'answer-review', verdict: 'clarify', clarification: raw['clarification'] }
+        : null;
+    case 'open-question':
+      return typeof raw['answer'] === 'string' && raw['answer'].trim()
+        ? { kind: 'open-question', answer: raw['answer'] }
+        : null;
+    default:
+      return null;
+  }
+}
 
 const ATTENTION_ID = /^A[1-9][0-9]*$/u;
 
@@ -29,6 +110,9 @@ export interface AttentionItem {
   waitingSince: string;
   /** The concrete action that resolves it. Markdown. */
   howToResolve: string;
+  /** What the human is asked to do, with its answer options structural.
+   * Absent on legacy records and on self-clearing daemon items. */
+  ask?: AttentionAsk;
   raisedBy: AttentionBy;
   raisedBySession: string | null;
   raisedByName: string | null;
@@ -40,6 +124,10 @@ export interface ResolvedAttentionItem extends AttentionItem {
   resolvedBySession: string | null;
   resolvedByName: string | null;
   resolutionNote: string | null;
+  /** The structured answer given at resolution, when the item carried an ask. */
+  response?: AttentionResponse;
+  /** `done` vs `dismissed`; absent on rows written before the field existed. */
+  disposition?: AttentionDisposition;
 }
 
 export interface AttentionSnapshot {
@@ -73,9 +161,11 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
   const raw = value as Record<string, unknown>;
   const sourceRef = nullableText(raw['sourceRef']);
   const context = raw['context'] === undefined ? null : nullableText(raw['context']);
+  const ask = raw['ask'] === undefined ? undefined : parseAttentionAsk(raw['ask']);
   const raisedBySession = nullableText(raw['raisedBySession']);
   const raisedByName = nullableText(raw['raisedByName']);
   if (
+    ask === null ||
     typeof raw['id'] !== 'string' ||
     !ATTENTION_ID.test(raw['id']) ||
     !Number.isSafeInteger(Number(raw['id'].slice(1))) ||
@@ -108,6 +198,7 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
     ...(context === null ? {} : { context }),
     waitingSince: raw['waitingSince'],
     howToResolve: raw['howToResolve'],
+    ...(ask === undefined ? {} : { ask }),
     raisedBy: raw['raisedBy'] as AttentionBy,
     raisedBySession,
     raisedByName,
@@ -121,6 +212,8 @@ export function parseResolvedAttentionItem(value: unknown): ResolvedAttentionIte
   const resolvedBySession = nullableText(raw['resolvedBySession']);
   const resolvedByName = nullableText(raw['resolvedByName']);
   const resolutionNote = nullableText(raw['resolutionNote']);
+  const response = raw['response'] === undefined ? undefined : parseAttentionResponse(raw['response']);
+  const disposition = raw['disposition'];
   if (
     typeof raw['resolvedAt'] !== 'string' ||
     !Number.isFinite(Date.parse(raw['resolvedAt'])) ||
@@ -128,7 +221,9 @@ export function parseResolvedAttentionItem(value: unknown): ResolvedAttentionIte
     !BY.has(raw['resolvedBy'] as AttentionBy) ||
     resolvedBySession === undefined ||
     resolvedByName === undefined ||
-    resolutionNote === undefined
+    resolutionNote === undefined ||
+    response === null ||
+    (disposition !== undefined && disposition !== 'done' && disposition !== 'dismissed')
   ) {
     return null;
   }
@@ -140,6 +235,8 @@ export function parseResolvedAttentionItem(value: unknown): ResolvedAttentionIte
     resolvedBySession,
     resolvedByName,
     resolutionNote,
+    ...(response === undefined ? {} : { response }),
+    ...(disposition === undefined ? {} : { disposition: disposition as AttentionDisposition }),
   };
 }
 
@@ -299,6 +396,28 @@ class AttentionClientStore {
     const body = await request(pathFor(sessionId), {
       method: 'POST',
       body: JSON.stringify({ action: 'resolve', id, note }),
+    });
+    if (!this.applyServerSnapshot(sessionId, body))
+      throw new Error('the daemon returned an invalid attention snapshot');
+  }
+
+  /** Answer an item's structured ask (&F138). The daemon validates the answer
+   * against the item's own ask shape and records it on the audit row. */
+  async respond(sessionId: string, id: string, response: AttentionResponse): Promise<void> {
+    const body = await request(pathFor(sessionId), {
+      method: 'POST',
+      body: JSON.stringify({ action: 'resolve', id, response }),
+    });
+    if (!this.applyServerSnapshot(sessionId, body))
+      throw new Error('the daemon returned an invalid attention snapshot');
+  }
+
+  /** Explicit dismissal (&F139) — recorded with disposition 'dismissed' and
+   * the server-resolved actor, never as an answer. */
+  async dismiss(sessionId: string, id: string, note = 'Dismissed from the browser.'): Promise<void> {
+    const body = await request(pathFor(sessionId), {
+      method: 'POST',
+      body: JSON.stringify({ action: 'dismiss', id, note }),
     });
     if (!this.applyServerSnapshot(sessionId, body))
       throw new Error('the daemon returned an invalid attention snapshot');

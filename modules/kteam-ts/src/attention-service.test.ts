@@ -73,7 +73,7 @@ describe('provenance and scope', () => {
     const s = service();
     await expect(s.add(OTHER, explicit('cross'), AGENT)).rejects.toMatchObject({ code: 'forbidden' });
     expect((await s.add(OTHER, explicit('human'), HUMAN)).count).toBe(1);
-    expect((await s.addFromSource(OTHER, { ...explicit('daemon'), source: 'permission' })).count).toBe(2);
+    expect((await s.addFromSource(OTHER, { ...explicit('daemon'), source: 'task', sourceRef: 'F9' })).count).toBe(2);
     await expect(s.add(SID, explicit('forged daemon'), { actor: 'daemon' })).rejects.toMatchObject({
       code: 'forbidden',
     });
@@ -480,5 +480,147 @@ describe('live convergence and cheap count', () => {
     expect(await s.count(SID)).toBe(0);
     await s.add(SID, explicit('one'), AGENT);
     expect(await s.count(SID)).toBe(1);
+  });
+});
+
+describe('four attention kinds (&F138)', () => {
+  const CHOICE = { kind: 'multiple-choice' as const, options: [{ label: 'eu' }, { label: 'us' }] };
+
+  test('an ask round-trips and its shape is validated up front', async () => {
+    const s = service();
+    const board = await s.add(SID, { ...explicit('pick region'), ask: CHOICE }, AGENT);
+    expect(board.items[0]!.ask).toEqual(CHOICE);
+    await expect(
+      s.add(SID, { ...explicit('bad'), ask: { kind: 'multiple-choice', options: [{ label: 'only' }] } }, AGENT),
+    ).rejects.toMatchObject({ code: 'invalid' });
+    await expect(s.add(SID, { ...explicit('bad2'), ask: { kind: 'nonsense' } as never }, AGENT)).rejects.toMatchObject({
+      code: 'invalid',
+    });
+  });
+
+  test('a response must match the item ask; a listed choice is enforced', async () => {
+    const s = service();
+    const board = await s.add(SID, { ...explicit('pick region'), ask: CHOICE }, HUMAN);
+    const id = board.items[0]!.id;
+    await expect(s.resolve(SID, id, null, HUMAN, { kind: 'permission', decision: 'approve' })).rejects.toMatchObject({
+      code: 'invalid',
+    });
+    await expect(s.resolve(SID, id, null, HUMAN, { kind: 'multiple-choice', choice: 'mars' })).rejects.toMatchObject({
+      code: 'invalid',
+    });
+    const resolved = await s.resolve(SID, id, null, HUMAN, { kind: 'multiple-choice', choice: 'eu' });
+    expect(resolved.resolved[0]).toMatchObject({
+      response: { kind: 'multiple-choice', choice: 'eu' },
+      disposition: 'done',
+    });
+  });
+
+  test('an item without an ask refuses a structured response', async () => {
+    const s = service();
+    const board = await s.add(SID, explicit('legacy style'), HUMAN);
+    await expect(
+      s.resolve(SID, board.items[0]!.id, null, HUMAN, { kind: 'open-question', answer: 'hello' }),
+    ).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  test('permission and review answers land on the audit row', async () => {
+    const s = service();
+    const board = await s.add(SID, { ...explicit('deploy?'), ask: { kind: 'permission' } }, AGENT);
+    const done = await s.resolve(SID, board.items[0]!.id, null, HUMAN, {
+      kind: 'permission',
+      decision: 'reject',
+    });
+    expect(done.resolved[0]).toMatchObject({ response: { kind: 'permission', decision: 'reject' } });
+    const review = await s.add(SID, { ...explicit('review my answer'), ask: { kind: 'answer-review' } }, AGENT);
+    const clarified = await s.resolve(SID, review.items[0]!.id, null, HUMAN, {
+      kind: 'answer-review',
+      verdict: 'clarify',
+      clarification: 'which cluster?',
+    });
+    expect(clarified.resolved[0]).toMatchObject({
+      response: { kind: 'answer-review', verdict: 'clarify', clarification: 'which cluster?' },
+    });
+  });
+});
+
+describe('dismissal for both sides (&F139)', () => {
+  test('the human may dismiss anything; the audit row says dismissed', async () => {
+    const s = service();
+    const board = await s.addFromSource(SID, {
+      source: 'task',
+      sourceRef: 'F31',
+      subject: 'Blocked task',
+      why: 'Needs a decision',
+      howToResolve: 'Decide',
+    });
+    const dismissed = await s.dismiss(SID, board.items[0]!.id, 'no longer relevant', HUMAN);
+    expect(dismissed.items).toHaveLength(0);
+    expect(dismissed.resolved[0]).toMatchObject({
+      disposition: 'dismissed',
+      resolvedBy: 'human',
+      resolutionNote: 'no longer relevant',
+    });
+  });
+
+  test('an agent may dismiss an item it did NOT raise, with provenance recorded', async () => {
+    const s = service();
+    const board = await s.add(SID, explicit('human raised'), HUMAN);
+    const dismissed = await s.dismiss(SID, board.items[0]!.id, 'superseded', AGENT);
+    expect(dismissed.resolved[0]).toMatchObject({
+      disposition: 'dismissed',
+      resolvedBy: 'agent',
+      resolvedBySession: SID,
+      resolvedByName: 'zoe',
+    });
+  });
+
+  test('an agent still cannot dismiss across sessions, and resolve keeps the retract-only guard', async () => {
+    const s = service();
+    const board = await s.add(OTHER, explicit('elsewhere'), HUMAN);
+    await expect(s.dismiss(OTHER, board.items[0]!.id, null, AGENT)).rejects.toMatchObject({ code: 'forbidden' });
+    const own = await s.add(SID, explicit('raised by the human'), HUMAN);
+    await expect(s.resolve(SID, own.items[0]!.id, null, AGENT)).rejects.toMatchObject({ code: 'forbidden' });
+  });
+
+  test('a retried dismiss is idempotent', async () => {
+    const s = service();
+    const board = await s.add(SID, explicit('once'), HUMAN);
+    await s.dismiss(SID, board.items[0]!.id, null, HUMAN);
+    const again = await s.dismiss(SID, board.items[0]!.id, null, HUMAN);
+    expect(again.resolved).toHaveLength(1);
+  });
+});
+
+describe('new-item notification hook (&F140)', () => {
+  test('fires only when a mutation genuinely creates an item', async () => {
+    const created: string[] = [];
+    const s = service({ notifyNewItem: (sessionId, item) => created.push(`${sessionId}:${item.subject}`) });
+    await s.add(SID, explicit('first'), AGENT);
+    await s.add(SID, explicit('first'), AGENT); // dedupe — silent
+    await s.addFromSource(SID, {
+      source: 'task',
+      sourceRef: 'F31',
+      subject: 'Blocked task',
+      why: 'Needs a decision',
+      howToResolve: 'Decide',
+    });
+    await s.addFromSource(SID, {
+      source: 'task',
+      sourceRef: 'F31',
+      subject: 'Blocked task (reworded)',
+      why: 'Needs a decision',
+      howToResolve: 'Decide',
+    }); // in-place refresh — silent
+    expect(created).toEqual([`${SID}:first`, `${SID}:Blocked task`]);
+  });
+
+  test('a throwing hook never rolls the durable write back', async () => {
+    const s = service({
+      notifyNewItem: () => {
+        throw new Error('boom');
+      },
+    });
+    const board = await s.add(SID, explicit('still lands'), AGENT);
+    expect(board.count).toBe(1);
   });
 });

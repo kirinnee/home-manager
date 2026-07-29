@@ -1,6 +1,6 @@
 import { harnessDisplayName } from './core';
 import type { KTeamService, SessionView } from './service';
-import type { KTeamEvent, PendingQuestion, SessionState, SessionStatus } from './types';
+import type { InteractionMode, KTeamEvent, PendingQuestion, SessionState, SessionStatus } from './types';
 import {
   deviceWantsNotification,
   pushKindForStatus,
@@ -212,6 +212,33 @@ export class PushNotifier {
     this.groups.set(event.sessionId, { count, at });
     this.pending.set(event.sessionId, { view, payload: buildPushNotification(view, kind, count) });
     this.scheduleFlush();
+  }
+
+  /** Direct, unbatched delivery for the attention/notify path (&F140). The
+   * caller supplies finished payloads; this method only applies the per-device
+   * preference filter and the shared expiry pruning. Returns the number of
+   * successful deliveries. */
+  async deliverDirect(items: readonly { payload: PushNotificationPayload; mode: InteractionMode }[]): Promise<number> {
+    const eligible = items.filter(item => item.payload.kind !== undefined);
+    if (eligible.length === 0) return 0;
+    const devices = await this.store.subscriptions();
+    if (devices.length === 0) return 0;
+    const deliveries: PushDelivery[] = [];
+    for (const device of devices) {
+      for (const item of eligible) {
+        if (deviceWantsNotification(device.prefs, item.payload.kind!, item.mode)) {
+          deliveries.push({ device, payload: item.payload });
+        }
+      }
+    }
+    if (deliveries.length === 0) return 0;
+    const result = await this.sender.deliver(deliveries, await this.vapid.keys());
+    if (result.expiredDeviceRevisions.size > 0) await this.store.removeMany(result.expiredDeviceRevisions);
+    if (result.failed > 0) {
+      const statuses = [...new Set(result.failureStatuses)].join(', ');
+      this.log(`kteamd push: ${result.failed} direct delivery attempt(s) failed (${statuses}; no retry queued)`);
+    }
+    return result.delivered;
   }
 
   private scheduleFlush(): void {

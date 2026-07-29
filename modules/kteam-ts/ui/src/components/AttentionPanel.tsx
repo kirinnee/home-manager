@@ -28,9 +28,13 @@ import {
 import {
   attentionStore,
   attentionReference,
+  describeAttentionResponse,
+  type AttentionAsk,
   type AttentionBy,
+  type AttentionDisposition,
   type AttentionId,
   type AttentionItem,
+  type AttentionResponse,
   type AttentionSessionStatus,
   type AttentionSource,
   type ResolvedAttentionItem,
@@ -61,13 +65,28 @@ export function actorLabel(by: AttentionBy, name: string | null): string {
   return by === 'human' ? 'you' : 'the daemon';
 }
 
-/** Who cleared an item, as a visible badge — not just an audit sentence. A
- * human clear and an agent self-retraction are different facts: the human must
- * be able to scan the audit for everything cleared WITHOUT them. */
+/** Who cleared an item — and HOW — as a visible badge, not just an audit
+ * sentence. A human answer, a human dismissal and an agent dismissal are
+ * different facts: the human must be able to scan the audit for everything
+ * cleared WITHOUT them. */
 export function resolutionBadge(
   by: AttentionBy,
   name: string | null,
+  disposition?: AttentionDisposition,
 ): { label: string; cls: string; icon: typeof Check } {
+  if (disposition === 'dismissed') {
+    if (by === 'agent') {
+      return {
+        label: `dismissed by agent ${name ?? '(unnamed)'}`,
+        cls: 'border-warn/50 bg-warn/10 text-warn',
+        icon: Bot,
+      };
+    }
+    if (by === 'human') {
+      return { label: 'dismissed by you', cls: 'border-border bg-surface-2 text-muted', icon: UserRoundCheck };
+    }
+    return { label: 'dismissed by the daemon', cls: 'border-border bg-surface-2 text-muted', icon: Check };
+  }
   if (by === 'agent') {
     return {
       label: `retracted by agent ${name ?? '(unnamed)'}`,
@@ -75,7 +94,7 @@ export function resolutionBadge(
       icon: Bot,
     };
   }
-  if (by === 'human') return { label: 'dismissed by you', cls: 'border-ok/50 bg-ok/10 text-ok', icon: UserRoundCheck };
+  if (by === 'human') return { label: 'done by you', cls: 'border-ok/50 bg-ok/10 text-ok', icon: UserRoundCheck };
   return { label: 'cleared by the daemon', cls: 'border-border bg-surface-2 text-muted', icon: Check };
 }
 
@@ -234,13 +253,13 @@ export function AttentionSurface({
     return () => cancelAnimationFrame(frame);
   }, [items, onRequestedAttentionHandled, requestedAttention, resolutions, status]);
 
-  const resolve = async (item: AttentionItem): Promise<void> => {
+  const act = async (item: AttentionItem, operation: () => Promise<void>, failure: string): Promise<void> => {
     setPending(current => new Set(current).add(item.id));
     setError(null);
     try {
-      await attentionStore.resolve(sessionId, item.id);
+      await operation();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not resolve this item.');
+      setError(cause instanceof Error ? cause.message : failure);
     } finally {
       setPending(current => {
         const next = new Set(current);
@@ -249,6 +268,12 @@ export function AttentionSurface({
       });
     }
   };
+  const resolve = (item: AttentionItem): Promise<void> =>
+    act(item, () => attentionStore.resolve(sessionId, item.id), 'Could not resolve this item.');
+  const respond = (item: AttentionItem, response: AttentionResponse): Promise<void> =>
+    act(item, () => attentionStore.respond(sessionId, item.id, response), 'Could not send this answer.');
+  const dismiss = (item: AttentionItem): Promise<void> =>
+    act(item, () => attentionStore.dismiss(sessionId, item.id), 'Could not dismiss this item.');
 
   const Heading = presentation === 'pane' ? 'h2' : 'h1';
   return (
@@ -280,8 +305,8 @@ export function AttentionSurface({
           )}
         </div>
         <p className="mx-auto w-full max-w-2xl px-panel pb-row-y text-meta leading-base text-faint">
-          Durable until marked done. Status changes alone do not erase a request. An agent can only retract a request it
-          raised itself — everything else waits for you, and every clear records who did it.
+          Durable until answered, marked done, or dismissed. Status changes alone do not erase a request. Either side
+          may dismiss, and every clear records who did it and how.
         </p>
       </div>
 
@@ -334,6 +359,8 @@ export function AttentionSurface({
                   onAttentionOpen={onAttentionOpen}
                   onPinOpen={onPinOpen}
                   onResolve={() => void resolve(item)}
+                  onRespond={response => void respond(item, response)}
+                  onDismiss={() => void dismiss(item)}
                 />
               ))}
             </ol>
@@ -367,6 +394,8 @@ function AttentionRow({
   onAttentionOpen,
   onPinOpen,
   onResolve,
+  onRespond,
+  onDismiss,
 }: {
   item: AttentionItem;
   oldest: boolean;
@@ -379,6 +408,8 @@ function AttentionRow({
   onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
   onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
   onResolve: () => void;
+  onRespond: (response: AttentionResponse) => void;
+  onDismiss: () => void;
 }) {
   const source = SOURCE[item.source];
   const SourceIcon = source.icon;
@@ -458,28 +489,207 @@ function AttentionRow({
           </p>
         </div>
       </div>
-      <div className="mt-sm flex justify-end">
-        {HAS_TOKEN ? (
+      {HAS_TOKEN ? (
+        <div className="mt-sm flex flex-col gap-sm">
+          {item.ask ? (
+            <AttentionAnswerControls ask={item.ask} pending={pending} onRespond={onRespond} />
+          ) : (
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="min-h-[44px]"
+                disabled={pending}
+                onClick={onResolve}
+              >
+                {pending ? (
+                  <LoaderCircle size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                ) : (
+                  <UserRoundCheck size={14} aria-hidden="true" />
+                )}
+                Mark done
+              </Button>
+            </div>
+          )}
+          <div className="flex justify-end">
+            <button
+              type="button"
+              disabled={pending}
+              onClick={onDismiss}
+              className="inline-flex min-h-[44px] items-center gap-xs rounded-control px-cell-x text-meta text-faint hover:bg-surface-2 hover:text-fg disabled:opacity-50"
+            >
+              <X size={13} aria-hidden="true" />
+              Dismiss without answering
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-sm flex justify-end">
+          <span className="text-meta text-faint">Read-only on this connection</span>
+        </div>
+      )}
+    </li>
+  );
+}
+
+/** One control set per attention kind, keyed by what the human DOES. Buttons
+ * stack full-width so a 390px phone never scrolls sideways. */
+function AttentionAnswerControls({
+  ask,
+  pending,
+  onRespond,
+}: {
+  ask: AttentionAsk;
+  pending: boolean;
+  onRespond: (response: AttentionResponse) => void;
+}) {
+  const [text, setText] = useState('');
+  const [clarifying, setClarifying] = useState(false);
+  const spinner = pending ? (
+    <LoaderCircle size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+  ) : null;
+
+  if (ask.kind === 'permission') {
+    return (
+      <div className="flex flex-col gap-xs sm:flex-row sm:justify-end">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="min-h-[44px] border-err/50 text-err hover:border-err"
+          disabled={pending}
+          onClick={() => onRespond({ kind: 'permission', decision: 'reject' })}
+        >
+          {spinner ?? <X size={14} aria-hidden="true" />}
+          Reject
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          className="min-h-[44px]"
+          disabled={pending}
+          onClick={() => onRespond({ kind: 'permission', decision: 'approve' })}
+        >
+          {spinner ?? <Check size={14} aria-hidden="true" />}
+          Approve
+        </Button>
+      </div>
+    );
+  }
+
+  if (ask.kind === 'multiple-choice') {
+    return (
+      <div className="flex flex-col gap-xs" role="group" aria-label="Pick an answer">
+        {ask.options.map(option => (
           <Button
             type="button"
             size="sm"
             variant="outline"
-            className="min-h-[44px]"
+            key={option.label}
+            className="min-h-[44px] w-full justify-start text-left"
             disabled={pending}
-            onClick={onResolve}
+            onClick={() => onRespond({ kind: 'multiple-choice', choice: option.label })}
           >
-            {pending ? (
-              <LoaderCircle size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
-            ) : (
-              <UserRoundCheck size={14} aria-hidden="true" />
-            )}
-            Mark done
+            {spinner}
+            <span className="min-w-0">
+              <span className="block truncate font-medium">{option.label}</span>
+              {option.description && <span className="block truncate text-meta text-faint">{option.description}</span>}
+            </span>
           </Button>
+        ))}
+      </div>
+    );
+  }
+
+  if (ask.kind === 'answer-review') {
+    return (
+      <div className="flex flex-col gap-xs">
+        {clarifying ? (
+          <>
+            <textarea
+              value={text}
+              onChange={event => setText(event.target.value)}
+              rows={3}
+              placeholder="What needs clarifying?"
+              aria-label="Clarification request"
+              className="w-full rounded-control border border-border bg-surface px-cell-x py-1.5 text-cell text-fg placeholder:text-faint"
+            />
+            <div className="flex flex-col gap-xs sm:flex-row sm:justify-end">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="min-h-[44px]"
+                disabled={pending}
+                onClick={() => setClarifying(false)}
+              >
+                Back
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className="min-h-[44px]"
+                disabled={pending || !text.trim()}
+                onClick={() => onRespond({ kind: 'answer-review', verdict: 'clarify', clarification: text })}
+              >
+                {spinner}
+                Ask to clarify
+              </Button>
+            </div>
+          </>
         ) : (
-          <span className="text-meta text-faint">Read-only on this connection</span>
+          <div className="flex flex-col gap-xs sm:flex-row sm:justify-end">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="min-h-[44px]"
+              disabled={pending}
+              onClick={() => setClarifying(true)}
+            >
+              <MessageCircleQuestion size={14} aria-hidden="true" />
+              Needs clarification
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              className="min-h-[44px]"
+              disabled={pending}
+              onClick={() => onRespond({ kind: 'answer-review', verdict: 'good' })}
+            >
+              {spinner ?? <Check size={14} aria-hidden="true" />}
+              The answer is good
+            </Button>
+          </div>
         )}
       </div>
-    </li>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-xs">
+      <textarea
+        value={text}
+        onChange={event => setText(event.target.value)}
+        rows={3}
+        placeholder="Write your answer…"
+        aria-label="Your answer"
+        className="w-full rounded-control border border-border bg-surface px-cell-x py-1.5 text-cell text-fg placeholder:text-faint"
+      />
+      <div className="flex justify-end">
+        <Button
+          type="button"
+          size="sm"
+          className="min-h-[44px]"
+          disabled={pending || !text.trim()}
+          onClick={() => onRespond({ kind: 'open-question', answer: text })}
+        >
+          {spinner}
+          Send answer
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -518,7 +728,7 @@ function ResolutionAudit({
       ) : (
         <ul className="m-0 flex list-none flex-col gap-xs px-cell-x pb-row-y pt-xs">
           {items.map(item => {
-            const badge = resolutionBadge(item.resolvedBy, item.resolvedByName);
+            const badge = resolutionBadge(item.resolvedBy, item.resolvedByName, item.disposition);
             const BadgeIcon = badge.icon;
             return (
               <li
@@ -555,6 +765,9 @@ function ResolutionAudit({
                     {attentionReference(item.id)} · {new Date(item.resolvedAt).toLocaleString()}
                   </span>
                 </p>
+                {item.response && (
+                  <p className="m-0 font-medium text-muted">{describeAttentionResponse(item.response)}</p>
+                )}
                 {item.resolutionNote && (
                   <Markdown
                     text={item.resolutionNote}

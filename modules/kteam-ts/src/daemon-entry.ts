@@ -12,6 +12,7 @@ import { createSttService } from './stt-service';
 import { PinApi, PinService } from './pins';
 import { TaskService, type TaskActor } from './tasks';
 import { AttentionApi, AttentionService, AttentionSources } from './attention';
+import { AttentionNotifier } from './attention-notifier';
 import { TaskApi } from './tasks-api';
 import { AnalyticsIndex } from './analytics-index';
 import { loadDaemonSecretsEnvironment } from './daemon-secrets';
@@ -168,6 +169,10 @@ const closeBrowserStack = async (): Promise<void> => {
 };
 // Attention is a separate durable primitive; its source adapter listens to the
 // existing task/session streams but never presents notifications itself.
+// Late-bound: the push stack is constructed below, but attention mutations only
+// start flowing after bootstrap. New durable items push through this notifier
+// (&F140); question items keep their session-transition presenter.
+let attentionNotifier: AttentionNotifier | undefined;
 const attentionSessions = {
   resolve: async (ref: string) =>
     manager.get(ref).then(
@@ -179,9 +184,18 @@ const attentionSessions = {
     ),
   ackReopen: (sessionId: string, taskId: string, seq: number, actor: TaskActor, note?: string) =>
     taskService.acknowledgeReopen(sessionId, taskId, seq, actor, note),
+  notifyNewItem: (sessionId: string, item: Parameters<AttentionNotifier['notifyNewItem']>[1]) =>
+    attentionNotifier?.notifyNewItem(sessionId, item),
 };
 const attentionService = new AttentionService(paths, attentionSessions);
-const attentionApi = new AttentionApi(attentionService, manager);
+const attentionApi = new AttentionApi(attentionService, manager, {
+  notifyDirect: (sessionId, input, actor) => {
+    if (attentionNotifier === undefined) {
+      return Promise.reject(new Error('notifications are not available yet; the daemon is still starting'));
+    }
+    return attentionNotifier.notifyDirect(sessionId, input, actor);
+  },
+});
 const attentionSources = new AttentionSources(attentionService, manager, taskService);
 const stt = createSttService({ paths });
 // Fleet-wide, read-only warden attention projection over the existing per-session
@@ -198,6 +212,7 @@ const wardenAttention = new WardenAttentionProvider({
   sweepIntervalMinutes: async () => (await manager.wardenConfigView()).config.intervalMinutes,
 });
 const pushService = await PushService.create(paths, manager);
+attentionNotifier = new AttentionNotifier(manager, pushService);
 let analytics: AnalyticsIndex | undefined;
 // Keep the bind ahead of analytics cold materialization. On a missing index,
 // session/event rows are folded by SQLite after the API is already reachable;
