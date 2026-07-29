@@ -60,9 +60,12 @@ pre-commit-lib.run {
       enable = true;
       name = "Gitlint";
       description = "Lints git commit message";
-      entry = "${packages.gitlint}/bin/gitlint --staged --msg-filename .git/COMMIT_EDITMSG";
+      # `.git` is a pointer FILE in a worktree, so a hardcoded `.git/COMMIT_EDITMSG`
+      # only exists in the primary checkout. git hands the commit-msg hook the real
+      # message path as its argument; forwarding it works in every worktree.
+      entry = "${packages.gitlint}/bin/gitlint --staged --msg-filename";
       language = "system";
-      pass_filenames = false;
+      pass_filenames = true;
       stages = [ "commit-msg" ];
     };
 

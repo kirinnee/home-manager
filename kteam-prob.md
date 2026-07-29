@@ -3492,3 +3492,90 @@ The house rules did not say this — they warn about per-file ownership in the
 shared tree but never that kteam's own source is live-executed. That omission is
 the real defect here, not the agent's edit. Consider also running the CLI/daemon
 from a built artifact so the working tree is not the live runtime.
+
+## FOUR instances in one session: UI calls a route the daemon never mounts
+
+**Problem.** Backend feature code is written, committed, tested and green — and nothing
+mounts it. The UI already calls the route. Every request 404s. Tests pass on both sides
+because neither side tests the JOIN between them.
+
+**Instances found 2026-07-28, all in one session:**
+
+1. **Web terminals** — `ui/src/lib/web-terminals.ts` called
+   `/v1/sessions/:id/terminals`; `src/terminal-api.ts` implemented it; `daemon-entry.ts`
+   contained zero references. Ten backend modules, fully tested, serving 404. Fixed in
+   `548b804`.
+2. **In-app browser** — `ui/src/components/InAppBrowser` called
+   `/v1/sessions/:id/browser`; `src/browser-api.ts` + 12 sibling modules implemented it;
+   nothing mounted it. Fixed in `02a55cb`.
+3. **Attention** — built, tested, and never mounted in the page tree (earlier in the
+   session).
+4. **Model switching** — `ui/src/lib/runtime-models.ts:97` calls
+   `/v1/sessions/:id/runtime-models`. `rg 'runtime-models' src/*.ts` returns NOTHING. The
+   catalog logic already exists unmounted in `src/codex-runtime.ts` (Codex app-server
+   probe + cache) and `src/fleet-inventory.ts` (Claude wrapper runtimeModels). Only the
+   session-scoped GET route was never wired.
+
+**Why it keeps happening.** Work is split by layer — one teammate writes the service and
+its tests, another writes the client and its tests. Both sets pass. The mount is a
+one-line join that belongs to neither owner, so it is nobody's definition of done. A green
+suite actively hides it.
+
+**It is compounded by dishonest failure UI.** In case 4 the missing route surfaces to the
+human as "Daemon restart required to enable in-session model switching" — advice that
+cannot possibly work, because `isRuntimeEndpointUnavailable(catalogError)` treats a 404
+from a non-existent route as version skew. The human restarted the daemon repeatedly and
+nothing changed. Case 2 rendered "Browser is stopped — start it here" over a real error for
+the same reason. A 404 must never be presented as an idle or recoverable state.
+
+**Cheap systemic detection — this is the fix worth building.** Add a test that enumerates
+every `/v1/...` path the UI fetches (they are string literals and template literals in
+`ui/src/lib/*.ts`) and asserts each one matches a route the daemon actually mounts. It
+would have caught all four instances at authoring time, costs one test file, and needs no
+running daemon.
+
+**Process rule until that exists.** "Built and tested" is not done. A feature is done when
+a real request against the RUNNING daemon returns a real response. Both terminal and
+browser fixes were verified that way and both turned up defects unit tests had missed —
+including a capacity bug that would have refused the second browser.
+
+## Widening a shared type breaks fixtures in other teammates' deny-listed files
+
+**Problem.** In a shared working tree with many concurrent writers, widening a shared TYPE is
+never a local change: construction sites for that type live in test files owned by other
+people. The widener's own files typecheck; the project does not. Because `tsc -b` builds
+the whole project and is the required gate for EVERY teammate, one person's incomplete
+widening blocks the entire fleet from landing — including unrelated work.
+
+**Evidence — twice within one hour, 2026-07-28:**
+
+1. ottis widened `ManagedBrowserRuntime` (methods returning `BrowserPageActionSnapshot`
+   instead of `void`) for the browser page model. `FakeBrowserRuntime` in
+   `src/api-server.test.ts` still returned `void` → TS2416 at ~1497-1573. rianna (STT) hit
+   the wall, correctly refused to touch a deny-listed file, and stalled.
+2. mileena added `assigneeSessionId`/`assigneeName` to `TaskLive` for the clickable-agent
+   work. Fixtures lacking them broke `src/tasks-cli.test.ts:40`,
+   `src/tasks-contract.test.ts:55` (hers) and `src/api-server.test.ts:1874` (deny-listed to
+   her).
+
+In both cases the blocked teammate did the right thing and still lost time; only the
+type's owner could unblock it, and neither knew they had broken anyone.
+
+**Why the ownership model does not catch it.** File-level ownership assumes changes are
+file-local. A type change is not: its blast radius is every construction site, which the
+owner cannot edit and may not even know exists. The deny list — the very thing preventing
+collisions — is what makes the break unfixable by the person who discovers it.
+
+**Fix direction.**
+
+- Before landing a type widening, grep every construction site FIRST. If any sits in a
+  deny-listed file, prepare the exact hunk and route it BEFORE landing the widening, not
+  after someone's gate goes red.
+- Prefer OPTIONAL fields when the value can legitimately be absent — an optional field
+  widens nothing and breaks no fixture.
+- Consider shared test fixture builders so a type gains a field in ONE place rather than in
+  N test files owned by N people.
+
+**Workaround for a lead.** When a teammate reports a gate failure that is entirely in files
+they do not own, accept their focused tests plus a scoped typecheck rather than blocking
+them, and route the repair to the type's owner immediately.
