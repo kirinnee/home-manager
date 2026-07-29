@@ -16,7 +16,7 @@ import {
 import { AnalyticsQueryError, matcherLikePattern, parseAnalyticsQuery } from './analytics-query';
 import { PRICING_REGISTRY } from './model-cost';
 
-export const ANALYTICS_SCHEMA_VERSION = 7;
+export const ANALYTICS_SCHEMA_VERSION = 8;
 export const ANALYTICS_RAW_LIMIT = 200;
 export const ANALYTICS_GROUP_LIMIT = 500;
 
@@ -26,6 +26,29 @@ const DEFAULT_REFRESH_SOURCES = 64;
 const MAX_TRANSCRIPT_LINE_BYTES = 16 * 1024 * 1024;
 const SOURCE_RETRY_MS = 5 * 60 * 1000;
 const BACKGROUND_REFRESH_MS = 60 * 1000;
+
+/** `[1m]` selects a context-window variant; it is not part of the model the
+ * harness serves. Analytics uses one canonical id and stores the window
+ * separately so grouping never splits one model into selector spellings. */
+export function canonicalAnalyticsModelId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const canonical = value.replace(/\[1m\]/gi, '').trim();
+  return canonical.length > 0 ? canonical : null;
+}
+
+function canonicalModelSql(expression: string): string {
+  return `NULLIF(TRIM(REPLACE(REPLACE(${expression}, '[1m]', ''), '[1M]', '')), '')`;
+}
+
+function contextWindowSql(configExpression: string, stateExpression: string): string {
+  return `CASE
+    WHEN json_extract(${stateExpression}, '$.contextWindow') > 0
+      THEN CAST(json_extract(${stateExpression}, '$.contextWindow') AS INTEGER)
+    WHEN INSTR(LOWER(COALESCE(json_extract(${configExpression}, '$.model'), '')), '[1m]') > 0
+      THEN 1000000
+    ELSE NULL
+  END`;
+}
 
 /**
  * SQLite compares timestamps as text while `model-cost.ts` compares them as
@@ -164,10 +187,6 @@ function tokenNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
-function modelName(value: unknown): string | null {
-  return typeof value === 'string' && value.trim().length > 0 ? value : null;
-}
-
 function matchingEvidence<T extends string | number>(previous: T | null, next: T | null): T | null {
   return previous !== null && next !== null && previous === next ? next : null;
 }
@@ -189,6 +208,7 @@ const LABEL_COLUMNS: Record<AnalyticsLabel, string> = {
   wrapper: 'wrapper',
   binary: 'wrapper',
   model: 'model',
+  context_window: 'context_window',
   harness: 'harness',
   mode: 'mode',
   status: 'status',
@@ -203,7 +223,7 @@ const LABEL_COLUMNS: Record<AnalyticsLabel, string> = {
 };
 
 const SESSION_COLUMNS = `
-  session_id, wrapper, model, harness, mode, status, label, cwd, parent,
+  session_id, wrapper, model, context_window, harness, mode, status, label, cwd, parent,
   day, week, created_at, started_at, finished_at, turns, context_percent,
   first_output_at, had_stall, had_failure, had_migration, indexed_at
 `;
@@ -364,6 +384,7 @@ export class AnalyticsIndex {
         session_id TEXT PRIMARY KEY,
         wrapper TEXT,
         model TEXT,
+        context_window INTEGER,
         harness TEXT,
         mode TEXT,
         status TEXT,
@@ -394,6 +415,7 @@ export class AnalyticsIndex {
       );
       CREATE INDEX IF NOT EXISTS analytics_wrapper_idx ON analytics_sessions(wrapper);
       CREATE INDEX IF NOT EXISTS analytics_model_idx ON analytics_sessions(model);
+      CREATE INDEX IF NOT EXISTS analytics_context_window_idx ON analytics_sessions(context_window);
       CREATE INDEX IF NOT EXISTS analytics_harness_idx ON analytics_sessions(harness);
       CREATE INDEX IF NOT EXISTS analytics_mode_idx ON analytics_sessions(mode);
       CREATE INDEX IF NOT EXISTS analytics_status_idx ON analytics_sessions(status);
@@ -482,7 +504,10 @@ export class AnalyticsIndex {
         INSERT INTO analytics_sessions (${SESSION_COLUMNS}) VALUES (
           NEW.id,
           json_extract(NEW.config_json, '$.binary'),
-          COALESCE(json_extract(NEW.state_json, '$.observedModel'), json_extract(NEW.config_json, '$.model')),
+          ${canonicalModelSql(
+            "COALESCE(json_extract(NEW.state_json, '$.observedModel'), json_extract(NEW.config_json, '$.model'))",
+          )},
+          ${contextWindowSql('NEW.config_json', 'NEW.state_json')},
           json_extract(NEW.config_json, '$.harness'),
           json_extract(NEW.config_json, '$.mode'),
           COALESCE(NEW.status, json_extract(NEW.state_json, '$.status')),
@@ -508,6 +533,7 @@ export class AnalyticsIndex {
         ON CONFLICT(session_id) DO UPDATE SET
           wrapper = excluded.wrapper,
           model = excluded.model,
+          context_window = excluded.context_window,
           harness = excluded.harness,
           mode = excluded.mode,
           status = excluded.status,
@@ -542,7 +568,10 @@ export class AnalyticsIndex {
         INSERT INTO analytics_sessions (${SESSION_COLUMNS}) VALUES (
           NEW.id,
           json_extract(NEW.config_json, '$.binary'),
-          COALESCE(json_extract(NEW.state_json, '$.observedModel'), json_extract(NEW.config_json, '$.model')),
+          ${canonicalModelSql(
+            "COALESCE(json_extract(NEW.state_json, '$.observedModel'), json_extract(NEW.config_json, '$.model'))",
+          )},
+          ${contextWindowSql('NEW.config_json', 'NEW.state_json')},
           json_extract(NEW.config_json, '$.harness'),
           json_extract(NEW.config_json, '$.mode'),
           COALESCE(NEW.status, json_extract(NEW.state_json, '$.status')),
@@ -568,6 +597,7 @@ export class AnalyticsIndex {
         ON CONFLICT(session_id) DO UPDATE SET
           wrapper = excluded.wrapper,
           model = excluded.model,
+          context_window = excluded.context_window,
           harness = excluded.harness,
           mode = excluded.mode,
           status = excluded.status,
@@ -745,7 +775,10 @@ export class AnalyticsIndex {
         SELECT
           s.id,
           json_extract(s.config_json, '$.binary'),
-          COALESCE(json_extract(s.state_json, '$.observedModel'), json_extract(s.config_json, '$.model')),
+          ${canonicalModelSql(
+            "COALESCE(json_extract(s.state_json, '$.observedModel'), json_extract(s.config_json, '$.model'))",
+          )},
+          ${contextWindowSql('s.config_json', 's.state_json')},
           json_extract(s.config_json, '$.harness'),
           json_extract(s.config_json, '$.mode'),
           COALESCE(s.status, json_extract(s.state_json, '$.status')),
@@ -781,6 +814,7 @@ export class AnalyticsIndex {
         ON CONFLICT(session_id) DO UPDATE SET
           wrapper = excluded.wrapper,
           model = excluded.model,
+          context_window = excluded.context_window,
           harness = excluded.harness,
           mode = excluded.mode,
           status = excluded.status,
@@ -822,12 +856,13 @@ export class AnalyticsIndex {
               THEN excluded.inode ELSE analytics_expected_sources.inode END,
           seen_at = excluded.seen_at;
 
-        INSERT OR IGNORE INTO analytics_expected_sources
+        INSERT INTO analytics_expected_sources
           (session_id, source_file, harness, source_size, source_mtime_ms, seen_at)
         SELECT s.id, json_extract(s.config_json, '$.transcriptFile'),
           COALESCE(json_extract(s.config_json, '$.harness'), 'unknown'), 0, 0, CURRENT_TIMESTAMP
         FROM sessions s
-        WHERE json_extract(s.config_json, '$.transcriptFile') IS NOT NULL;
+        WHERE json_extract(s.config_json, '$.transcriptFile') IS NOT NULL
+        ON CONFLICT(session_id, source_file) DO NOTHING;
       `);
     })();
   }
@@ -1145,6 +1180,7 @@ export class AnalyticsIndex {
       id: String(row.session_id),
       wrapper: nullableText('wrapper'),
       model: nullableText('model'),
+      contextWindow: nullableNumber(row.context_window),
       harness: nullableText('harness'),
       mode: nullableText('mode'),
       status: nullableText('status'),
@@ -1253,6 +1289,82 @@ export class AnalyticsIndex {
     return promise;
   }
 
+  /** Ingest one terminal session immediately. The fleet refresher is bounded
+   * and ordered by source recency, so merely waking it cannot guarantee that
+   * the session which just ended becomes queryable. This path serializes with
+   * that refresher, force-retries every enrolled source for the exact session,
+   * and drains each source to EOF before it resolves. */
+  async ingestSession(sessionId: string): Promise<AnalyticsRefreshResult> {
+    this.assertOpen();
+    const id = sessionId.trim();
+    if (!id) throw new Error('analytics ingestion requires a session id');
+    const active = this.refreshPromise;
+    if (active) {
+      await active;
+      return await this.ingestSession(id);
+    }
+    this.refreshing = true;
+    const promise = this.performSessionIngest(id).finally(() => {
+      this.refreshing = false;
+      if (this.refreshPromise === promise) this.refreshPromise = undefined;
+    });
+    this.refreshPromise = promise;
+    return await promise;
+  }
+
+  private async performSessionIngest(sessionId: string): Promise<AnalyticsRefreshResult> {
+    this.syncExpectedSources();
+    const indexed = this.database
+      .query('SELECT 1 AS present FROM analytics_sessions WHERE session_id = ?')
+      .get(sessionId) as { present: number } | null;
+    if (!indexed) throw new Error(`analytics session ${sessionId} is not indexed`);
+
+    const candidates = this.sessionSources(sessionId);
+    let bytes = 0;
+    const failures: string[] = [];
+    for (const candidate of candidates) {
+      try {
+        bytes += await this.scanSource(candidate, Number.MAX_SAFE_INTEGER);
+      } catch (error) {
+        this.recordSourceError(candidate, error);
+        failures.push(`${candidate.source_file}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (failures.length > 0) throw new Error(`analytics ingestion failed for ${sessionId}: ${failures.join('; ')}`);
+    const incomplete = this.database
+      .query(
+        `
+        SELECT COUNT(*) AS count
+        FROM analytics_expected_sources expected
+        LEFT JOIN analytics_usage_sources usage_index
+          ON usage_index.session_id = expected.session_id AND usage_index.source_file = expected.source_file
+        WHERE expected.session_id = ? AND (
+          usage_index.session_id IS NULL OR usage_index.error IS NOT NULL
+          OR usage_index.byte_offset < expected.source_size
+          OR usage_index.source_size <> expected.source_size
+          OR usage_index.source_mtime_ms <> expected.source_mtime_ms
+        )
+      `,
+      )
+      .get(sessionId) as { count: number };
+    if (asCount(incomplete.count) > 0)
+      throw new Error(
+        `analytics ingestion for ${sessionId} did not reach EOF for ${asCount(incomplete.count)} source(s)`,
+      );
+
+    const refreshedAt = new Date().toISOString();
+    this.database
+      .query("INSERT OR REPLACE INTO analytics_meta (key, value) VALUES ('last_token_refresh_at', ?)")
+      .run(refreshedAt);
+    const status = this.indexStatus();
+    return {
+      sources: candidates.length,
+      bytes,
+      pending: status.pendingTranscriptSources,
+      errors: 0,
+    };
+  }
+
   private async performRefresh(options: { byteBudget: number; sourceLimit: number }): Promise<AnalyticsRefreshResult> {
     this.syncExpectedSources();
     const candidates = this.pendingSources(options.sourceLimit);
@@ -1300,12 +1412,13 @@ export class AnalyticsIndex {
             THEN excluded.inode ELSE analytics_expected_sources.inode END,
         seen_at = excluded.seen_at;
 
-      INSERT OR IGNORE INTO analytics_expected_sources
+      INSERT INTO analytics_expected_sources
         (session_id, source_file, harness, source_size, source_mtime_ms, seen_at)
       SELECT session.id, json_extract(session.config_json, '$.transcriptFile'),
         COALESCE(json_extract(session.config_json, '$.harness'), 'unknown'), 0, 0, CURRENT_TIMESTAMP
       FROM sessions session
-      WHERE json_extract(session.config_json, '$.transcriptFile') IS NOT NULL;
+      WHERE json_extract(session.config_json, '$.transcriptFile') IS NOT NULL
+      ON CONFLICT(session_id, source_file) DO NOTHING;
     `);
     this.invalidateIncompleteTokens();
   }
@@ -1350,6 +1463,36 @@ export class AnalyticsIndex {
       `,
       )
       .all() as ExpectedSourceRow[];
+  }
+
+  private sessionSources(sessionId: string): ExpectedSourceRow[] {
+    return this.database
+      .query(
+        `
+        SELECT
+          expected.session_id, expected.source_file, expected.harness,
+          expected.source_size, expected.source_mtime_ms, expected.device, expected.inode,
+          usage_index.byte_offset, usage_index.source_size AS indexed_size,
+          usage_index.source_mtime_ms AS indexed_mtime_ms,
+          usage_index.device AS indexed_device, usage_index.inode AS indexed_inode,
+          usage_index.anchor_hash,
+          usage_index.has_usage, usage_index.input_tokens, usage_index.output_tokens,
+          usage_index.cached_input_tokens, usage_index.cache_write_input_tokens,
+          usage_index.pricing_model, usage_index.pricing_model_ambiguous,
+          usage_index.codex_current_model,
+          usage_index.codex_base_input, usage_index.codex_base_output,
+          usage_index.codex_base_cached, usage_index.codex_base_cache_write,
+          usage_index.codex_last_input, usage_index.codex_last_output,
+          usage_index.codex_last_cached, usage_index.codex_last_cache_write,
+          usage_index.error, usage_index.retry_at
+        FROM analytics_expected_sources expected
+        LEFT JOIN analytics_usage_sources usage_index
+          ON usage_index.session_id = expected.session_id AND usage_index.source_file = expected.source_file
+        WHERE expected.session_id = ?
+        ORDER BY expected.source_mtime_ms DESC, expected.source_file
+      `,
+      )
+      .all(sessionId) as ExpectedSourceRow[];
   }
 
   private async scanSource(source: ExpectedSourceRow, byteBudget: number): Promise<number> {
@@ -1641,7 +1784,7 @@ export class AnalyticsIndex {
         cacheWriteInputTokens: cacheWrite,
         cacheWrite5mInputTokens: cacheWrite5m,
         cacheWrite1hInputTokens: cacheWrite1h,
-        pricingModel: modelName(message.model),
+        pricingModel: canonicalAnalyticsModelId(message.model),
       };
       const previous = claudeMessages.get(id);
       if (previous) {
@@ -1655,7 +1798,7 @@ export class AnalyticsIndex {
     if (harness !== 'codex') return;
     const payload = record(root.payload);
     if (root.type === 'turn_context') {
-      codex.currentModel = modelName(payload?.model);
+      codex.currentModel = canonicalAnalyticsModelId(payload?.model);
       return;
     }
     const info = record(payload?.info);
@@ -1863,7 +2006,8 @@ export class AnalyticsIndex {
         `
         UPDATE analytics_sessions SET token_known = 1, input_tokens = ?, output_tokens = ?,
           cached_input_tokens = ?, cache_write_input_tokens = ?,
-          cache_write_5m_input_tokens = ?, cache_write_1h_input_tokens = ?, pricing_model = ?
+          cache_write_5m_input_tokens = ?, cache_write_1h_input_tokens = ?,
+          model = COALESCE(?, model), pricing_model = ?
         WHERE session_id = ?
       `,
       )
@@ -1874,6 +2018,7 @@ export class AnalyticsIndex {
         totals.cache_write_input_tokens,
         cacheWrite5m,
         cacheWrite1h,
+        pricingModel,
         pricingModel,
         sessionId,
       );

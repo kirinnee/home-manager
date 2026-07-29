@@ -362,6 +362,15 @@ interface SessionManagerOptions {
   onSelfRestart?: () => boolean | Promise<boolean>;
 }
 
+export interface TerminalAnalyticsIngestResult {
+  sources: number;
+  bytes: number;
+  pending: number;
+  errors: number;
+}
+
+export type TerminalAnalyticsIngestor = (sessionId: string) => Promise<TerminalAnalyticsIngestResult>;
+
 /** Internal lifecycle gates for daemon-created sessions. The public API never
  *  supplies functions; wardens use this to persist mandatory spawn evidence
  *  after the pane launches but before turn 1 can run. */
@@ -978,6 +987,9 @@ export class SessionManager implements KTeamService {
    * newest cutoff queued while that job is draining EOF. */
   private terminalSendFinalizers = new Map<string, Promise<void>>();
   private terminalSendFinalizerCutoffs = new Map<string, string>();
+  /** Installed by daemon-entry after the analytics store opens. Kept optional
+   * so session control still starts when analytics initialization fails. */
+  private terminalAnalyticsIngestor?: TerminalAnalyticsIngestor;
   private closed = false;
   /** Fleet warden (layer-3 oversight): a periodic deterministic sweep plus,
    *  when enabled, rate-limited LLM escalation. */
@@ -1061,6 +1073,10 @@ export class SessionManager implements KTeamService {
     // spot by eyeballing a timestamp on 2026-07-23).
     manager.selfCheckTimer = setInterval(() => void manager.selfCheck().catch(() => undefined), SELF_CHECK_INTERVAL_MS);
     return manager;
+  }
+
+  setTerminalAnalyticsIngestor(ingestor: TerminalAnalyticsIngestor | undefined): void {
+    this.terminalAnalyticsIngestor = ingestor;
   }
 
   /** Detect the silent-partial-boot class: active sessions without a monitor,
@@ -1461,6 +1477,11 @@ export class SessionManager implements KTeamService {
     await Promise.allSettled(stopping);
     await this.flushEmits();
     await Promise.allSettled([...this.queues.values()]);
+    // A terminal transition schedules transcript EOF classification and exact
+    // analytics ingestion outside the session queue. Drain every re-armed
+    // generation before closing EventStore or the analytics connection.
+    while (this.terminalSendFinalizers.size > 0) await Promise.allSettled([...this.terminalSendFinalizers.values()]);
+    await this.flushEmits();
     this.store.close();
   }
 
@@ -6230,7 +6251,13 @@ export class SessionManager implements KTeamService {
         const cutoff = cutoffs.get(id);
         if (cutoff === undefined) return;
         cutoffs.delete(id);
-        await this.finalizeTerminalSends(id, cutoff);
+        try {
+          await this.finalizeTerminalSends(id, cutoff);
+        } finally {
+          // Token/model ingestion must observe the harness at EOF, and it must
+          // still run if send-ledger classification itself fails.
+          await this.ingestTerminalAnalytics(id);
+        }
       }
     };
     finalizing = drain().finally(() => {
@@ -6244,6 +6271,27 @@ export class SessionManager implements KTeamService {
     });
     finalizers.set(id, finalizing);
     void finalizing.catch(() => undefined);
+  }
+
+  private async ingestTerminalAnalytics(id: string): Promise<void> {
+    const ingest = this.terminalAnalyticsIngestor;
+    if (!ingest) return;
+    try {
+      const result = await ingest(id);
+      await this.emit(id, 'session.analytics_ingested', result, 'daemon', undefined, false, true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`kteamd: terminal analytics ingestion failed for ${id}: ${message}`);
+      await this.emit(id, 'session.analytics_ingestion_failed', { message }, 'daemon', undefined, false, true).catch(
+        eventError => {
+          console.error(
+            `kteamd: could not persist analytics ingestion failure event for ${id}: ${
+              eventError instanceof Error ? eventError.message : String(eventError)
+            }`,
+          );
+        },
+      );
+    }
   }
 
   /** Drain the existing stateful adapter to EOF before classifying the
@@ -6958,8 +7006,9 @@ export class SessionManager implements KTeamService {
     source: KTeamEvent['source'],
     turn?: number,
     allowDeleting = false,
+    allowClosed = false,
   ): Promise<KTeamEvent> {
-    if (this.closed) throw new Error('kteam daemon is shutting down');
+    if (this.closed && !allowClosed) throw new Error('kteam daemon is shutting down');
     if (this.deleting.has(id) && !allowDeleting) throw new Error('session deletion is in progress');
     // Attribute to the request actor (e.g. a warden HTTP action) when one is in
     // scope. Captured synchronously â the append runs on a deferred queue where

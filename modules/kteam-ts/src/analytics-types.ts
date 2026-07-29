@@ -11,6 +11,7 @@ export const ANALYTICS_LABELS = [
   'wrapper',
   'binary',
   'model',
+  'context_window',
   'harness',
   'mode',
   'status',
@@ -83,6 +84,8 @@ export interface AnalyticsRawSession {
   id: string;
   wrapper: string | null;
   model: string | null;
+  /** Reported/selected context window kept separate from the canonical model id. */
+  contextWindow?: number | null;
   harness: string | null;
   mode: string | null;
   status: string | null;

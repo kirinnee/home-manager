@@ -124,7 +124,8 @@ export function AnalyticsResponseView({ response }: { response: AnalyticsRespons
             <span className="mono truncate text-2xs text-accent">{row.id}</span>
             <span className="text-right font-medium text-fg">{rawEquivalentCost(row)}</span>
             <span className="text-muted">
-              {row.status ?? 'status unknown'} · {row.tokens ?? 'tokens unknown'} tokens
+              {row.model ?? 'model unknown'} · {row.status ?? 'status unknown'} · {row.tokens ?? 'tokens unknown'}{' '}
+              tokens
             </span>
             <span className="text-right text-2xs text-faint">Equivalent API cost</span>
           </div>

@@ -4,7 +4,7 @@ import type { Stats } from 'node:fs';
 import { appendFile, mkdtemp, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { AnalyticsIndex, ANALYTICS_SCHEMA_VERSION } from './analytics-index';
+import { AnalyticsIndex, ANALYTICS_SCHEMA_VERSION, canonicalAnalyticsModelId } from './analytics-index';
 import { scopeAnalyticsQuery } from './analytics-query';
 import { estimateEquivalentApiCost } from './model-cost';
 
@@ -90,6 +90,8 @@ function insertSession(
     finishedAt?: string;
     turn?: number;
     contextPercent?: number;
+    contextWindow?: number;
+    observedModel?: string;
   },
 ): void {
   const createdAt = input.createdAt ?? '2026-07-01T00:00:00.000Z';
@@ -112,6 +114,8 @@ function insertSession(
     ...(input.finishedAt ? { finishedAt: input.finishedAt } : {}),
     turn: input.turn ?? 1,
     ...(input.contextPercent === undefined ? {} : { contextPercent: input.contextPercent }),
+    ...(input.contextWindow === undefined ? {} : { contextWindow: input.contextWindow }),
+    ...(input.observedModel === undefined ? {} : { observedModel: input.observedModel }),
   };
   database
     .query(
@@ -371,7 +375,7 @@ describe('AnalyticsIndex', () => {
     expect(unchanged.sources).toBe(0);
     expect(index.indexStatus().tokenSessions).toBe(2);
 
-    const claudeRaw = index.query('{model=claude-opus-5}');
+    const claudeRaw = index.query('{id=claude}');
     expect(claudeRaw.kind).toBe('raw');
     if (claudeRaw.kind !== 'raw') throw new Error('expected raw');
     // msg-a occurs twice in the transcript but counts once: input 35+1, output 7+2.
@@ -382,10 +386,12 @@ describe('AnalyticsIndex', () => {
     expect(claudeRaw.results[0]?.cacheWrite5mInputTokens).toBe(3);
     expect(claudeRaw.results[0]?.cacheWrite1hInputTokens).toBe(2);
     expect(claudeRaw.results[0]?.pricingModel).toBe('claude-transcript-model');
+    expect(claudeRaw.results[0]?.model).toBe('claude-transcript-model');
 
-    const codexRaw = index.query('{model=gpt-5.6-sol}');
+    const codexRaw = index.query('{id=codex}');
     expect(codexRaw.kind === 'raw' && codexRaw.results[0]?.tokens).toBe(25);
     expect(codexRaw.kind === 'raw' && codexRaw.results[0]?.pricingModel).toBe('gpt-transcript-1');
+    expect(codexRaw.kind === 'raw' && codexRaw.results[0]?.model).toBe('gpt-transcript-1');
     expect(codexRaw.kind === 'raw' && codexRaw.results[0]?.cacheWrite5mInputTokens).toBeNull();
 
     // A source growth invalidates the confident value until its byte cursor catches up.
@@ -399,10 +405,10 @@ describe('AnalyticsIndex', () => {
       `,
       )
       .run(grown.size, grown.mtimeMs, grown.dev.toString(), grown.ino.toString(), codexFile);
-    const unknown = index.query('{model=gpt-5.6-sol}');
+    const unknown = index.query('{id=codex}');
     expect(unknown.kind === 'raw' && unknown.results[0]?.tokens).toBeNull();
     await index.refreshTokens({ byteBudget: 1024 * 1024, sourceLimit: 10 });
-    const updated = index.query('{model=gpt-5.6-sol}');
+    const updated = index.query('{id=codex}');
     expect(updated.kind === 'raw' && updated.results[0]?.tokens).toBe(38);
     expect(updated.kind === 'raw' && updated.results[0]?.pricingModel).toBe('gpt-transcript-1');
 
@@ -428,12 +434,81 @@ describe('AnalyticsIndex', () => {
         rewrittenStat.ino.toString(),
         codexFile,
       );
-    const unknownAfterRewrite = index.query('{model=gpt-5.6-sol}');
+    const unknownAfterRewrite = index.query('{id=codex}');
     expect(unknownAfterRewrite.kind === 'raw' && unknownAfterRewrite.results[0]?.tokens).toBeNull();
     await index.refreshTokens({ byteBudget: 1024 * 1024, sourceLimit: 10 });
-    const afterRewrite = index.query('{model=gpt-5.6-sol}');
+    const afterRewrite = index.query('{id=codex}');
     expect(afterRewrite.kind === 'raw' && afterRewrite.results[0]?.tokens).toBe(59);
     expect(afterRewrite.kind === 'raw' && afterRewrite.results[0]?.pricingModel).toBe('gpt-transcript-2');
+    source.close();
+  });
+
+  test('terminal ingestion makes Claude and Codex fixtures queryable with canonical model ids', async () => {
+    const { file, source } = await fixture();
+    const claudeFile = path.join(import.meta.dir, 'fixtures', 'analytics-claude-terminal.jsonl');
+    const codexFile = path.join(import.meta.dir, 'fixtures', 'analytics-codex-terminal.jsonl');
+    insertSession(source, {
+      id: 'claude-terminal',
+      status: 'completed',
+      model: 'fable[1m]',
+      observedModel: 'fable[1m]',
+      harness: 'claude',
+      transcriptFile: claudeFile,
+      finishedAt: '2026-07-29T08:00:03.000Z',
+    });
+    insertSession(source, {
+      id: 'codex-terminal',
+      status: 'completed',
+      wrapper: 'codex-auto-loge',
+      model: 'gpt-5.6-sol[1m]',
+      harness: 'codex',
+      transcriptFile: codexFile,
+      finishedAt: '2026-07-29T08:00:03.000Z',
+    });
+    addChatSource(source, 'claude-terminal', claudeFile, await stat(claudeFile));
+    addChatSource(source, 'codex-terminal', codexFile, await stat(codexFile));
+
+    const index = new AnalyticsIndex({ databasePath: file });
+    opened.push(index);
+    expect(canonicalAnalyticsModelId(' FABLE[1M] ')).toBe('FABLE');
+    expect((await index.ingestSession('claude-terminal')).errors).toBe(0);
+    expect((await index.ingestSession('codex-terminal')).errors).toBe(0);
+
+    const claude = index.query('{id=claude-terminal}');
+    expect(claude.kind).toBe('raw');
+    if (claude.kind !== 'raw') throw new Error('expected raw Claude analytics');
+    expect(claude.results[0]).toMatchObject({
+      model: 'fable',
+      pricingModel: 'fable',
+      contextWindow: 1_000_000,
+      inputTokens: 35,
+      outputTokens: 7,
+      tokens: 42,
+    });
+
+    const codex = index.query('{id=codex-terminal}');
+    expect(codex.kind).toBe('raw');
+    if (codex.kind !== 'raw') throw new Error('expected raw Codex analytics');
+    expect(codex.results[0]).toMatchObject({
+      model: 'gpt-5.6-sol',
+      pricingModel: 'gpt-5.6-sol',
+      contextWindow: 1_000_000,
+      inputTokens: 20,
+      outputTokens: 5,
+      cachedInputTokens: 8,
+      tokens: 25,
+    });
+
+    const grouped = index.query('count by (model, context_window)');
+    expect(grouped.kind).toBe('aggregate');
+    expect(
+      grouped.kind === 'aggregate'
+        ? grouped.results.map(result => result.labels).sort((a, b) => String(a.model).localeCompare(String(b.model)))
+        : [],
+    ).toEqual([
+      { model: 'fable', context_window: '1000000' },
+      { model: 'gpt-5.6-sol', context_window: '1000000' },
+    ]);
     source.close();
   });
 
