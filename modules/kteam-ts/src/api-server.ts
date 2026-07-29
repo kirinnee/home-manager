@@ -36,6 +36,7 @@ import { isBrowserError } from './browser-types';
 import type { RuntimeModelsApi } from './runtime-models-api';
 import { isRuntimeModelsPath, runtimeModelsWardenDenial } from './runtime-models-api';
 import { AttachmentError, type AttachmentErrorCode } from './attachments';
+import type { PwaRuntime } from './pwa';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
 // single-file shell remains the fallback so the daemon never 404s its own UI.
@@ -125,6 +126,9 @@ export interface ApiServerOptions {
    *  in tests and on platforms without the login lifecycle, where the route
    *  answers a truthful 404 rather than pretending the window is closed. */
   browserLogin?: BrowserLoginApi;
+  /** Per-daemon install identity. Optional so focused API tests keep their
+   *  existing construction sites; daemon-entry always supplies it. */
+  pwa?: PwaRuntime;
   /** Human-admin session-scoped model catalogs for Claude and Codex. */
   runtimeModels?: RuntimeModelsApi;
   /** Durable, daemon-owned per-session attention records. */
@@ -465,6 +469,8 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
       // parameter; ordinary HTTP API calls remain bearer-authenticated.
       const websocketToken = isWebSocket && loopback ? url.searchParams.get('token') : undefined;
       if (request.method === 'GET' && !url.pathname.startsWith('/v1/')) {
+        const pwaResponse = await options.pwa?.response(pathname, UI_DIST);
+        if (pwaResponse) return pwaResponse;
         const distIndex = join(UI_DIST, 'index.html');
         if (existsSync(distIndex)) {
           // Static assets (hashed filenames → cacheable). Path is confined to
@@ -491,7 +497,8 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           const html = (await Bun.file(distIndex).text())
             .replaceAll('"__KTEAM_TOKEN__"', tokenJson)
             .replaceAll("'__KTEAM_TOKEN__'", tokenJson);
-          return new Response(html, {
+          const brandedHtml = options.pwa?.html(html) ?? html;
+          return new Response(brandedHtml, {
             headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
           });
         }

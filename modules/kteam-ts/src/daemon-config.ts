@@ -3,6 +3,7 @@ import { existsSync } from 'fs';
 import type { KTeamPaths } from './paths';
 import { atomicJson, readJson } from './io';
 import { defaultLearningConfig, type LearningConfig } from './learning-types';
+import { defaultPwaConfig, parsePwaConfig, type PwaConfig } from './pwa';
 
 /** One configured warden account. String shorthand `"claude-auto-glm52a"` is
  *  accepted anywhere a WardenAccount is and normalizes to `{ wrapper }`. */
@@ -121,6 +122,8 @@ export interface DaemonConfig {
   host: string;
   port: number;
   publicUrl: string;
+  /** Installed-app identity for this daemon. Missing fields derive from the hostname. */
+  pwa?: PwaConfig;
   transcriptReconcileSeconds: number;
   healthIntervalSeconds: number;
   quotaUrl: string;
@@ -201,6 +204,7 @@ export const defaultDaemonConfig = (): DaemonConfig => ({
   host: '127.0.0.1',
   port: 7337,
   publicUrl: 'http://127.0.0.1:7337',
+  pwa: defaultPwaConfig(),
   // Native file notifications are primary; this short reconciliation interval
   // closes gaps from coalesced or dropped FSEvents/inotify notifications.
   transcriptReconcileSeconds: 2,
@@ -228,6 +232,9 @@ export async function loadDaemonConfig(paths: KTeamPaths): Promise<DaemonConfig>
   const merged: DaemonConfig = {
     ...defaultDaemonConfig(),
     ...onDisk,
+    // PWA owns its nested keys and parses them independently. Never let a
+    // malformed persisted value replace the versioned, normalized shape.
+    pwa: parsePwaConfig(onDisk.pwa),
     warden: {
       ...defaultWardenConfig(),
       ...(onDisk.warden ?? {}),

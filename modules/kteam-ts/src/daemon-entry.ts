@@ -25,6 +25,7 @@ import { createBrowserProfile } from './browser-profile';
 import { BrowserService } from './browser-service';
 import { RuntimeModelsApi } from './runtime-models-api';
 import { WardenAttentionProvider } from './warden-attention';
+import { PwaRuntime } from './pwa';
 
 const secretsStatus = loadDaemonSecretsEnvironment();
 if (secretsStatus === 'failed') {
@@ -211,6 +212,7 @@ const apiOptions = {
   terminals: terminalApi,
   browser: browserApi,
   browserLogin: browserLoginApi,
+  pwa: new PwaRuntime(config.pwa),
   runtimeModels: runtimeModelsApi,
   attention: attentionApi,
   wardenAttention,
