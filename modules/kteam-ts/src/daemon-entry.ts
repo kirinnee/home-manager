@@ -252,6 +252,7 @@ console.log(`kteamd listening on http://${config.host}:${server.port} (pid ${pro
 try {
   analytics = new AnalyticsIndex({ databasePath: paths.database });
   apiOptions.analytics = analytics;
+  manager.setTerminalAnalyticsIngestor(sessionId => analytics!.ingestSession(sessionId));
   analytics.start();
 } catch (error) {
   // Analytics is additive: an index failure must not take down session control.
@@ -274,12 +275,15 @@ const stop = async (reason: string) => {
       // already-encrypted outbound attempts within the shared grace period.
       attentionSources.close();
       await pushService.close();
+      const managerClosed = manager.close();
       await Promise.all([
-        manager.close(),
+        managerClosed,
         stt.close(),
         terminalService.close(),
         closeBrowserStack(),
-        ...(analytics ? [analytics.close()] : []),
+        // Terminal transitions own exact-session ingestion. Keep the analytics
+        // connection open until SessionManager drains those finalizers.
+        ...(analytics ? [managerClosed.then(() => analytics!.close())] : []),
       ]);
       return true;
     })(),
