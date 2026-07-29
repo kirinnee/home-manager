@@ -35,10 +35,19 @@ function textPdf(text: string): Uint8Array {
   return pdfWithContent(`BT /F1 18 Tf 20 100 Td (${escaped}) Tj ET`, '/Resources << /Font << /F1 5 0 R >> >>');
 }
 
-// One-page fixture encrypted with qpdf 12.3.2 (AES-256, user password
-// `secret`). Keeping the bytes here makes the production PasswordException
-// mapping testable without a system qpdf dependency.
-const PASSWORD_PROTECTED_PDF =
+// One-page fixtures encrypted with qpdf 12.3.2 (AES-256). Keeping the bytes
+// inline makes both empty-user-password and true-user-password behavior
+// reproducible without a system qpdf dependency.
+//
+// The owner-password-only fixture has an empty user password, owner password
+// `owner-secret`, and disallows printing, modification, and extraction in its
+// permissions dictionary. A conforming reader can still open it without asking
+// for a password; this is the common bank-statement/export case.
+const OWNER_PASSWORD_ONLY_PDF =
+  'JVBERi0xLjcKJb/3ov4KMSAwIG9iago8PCAvRXh0ZW5zaW9ucyA8PCAvQURCRSA8PCAvQmFzZVZlcnNpb24gLzEuNyAvRXh0ZW5zaW9uTGV2ZWwgOCA+PiA+PiAvUGFnZXMgMiAwIFIgL1R5cGUgL0NhdGFsb2cgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL0NvdW50IDEgL0tpZHMgWyAzIDAgUiBdIC9UeXBlIC9QYWdlcyA+PgplbmRvYmoKMyAwIG9iago8PCAvQ29udGVudHMgNCAwIFIgL01lZGlhQm94IFsgMCAwIDMwMCAxNDQgXSAvUGFyZW50IDIgMCBSIC9SZXNvdXJjZXMgPDwgL0ZvbnQgPDwgL0YxIDUgMCBSID4+ID4+IC9UeXBlIC9QYWdlID4+CmVuZG9iago0IDAgb2JqCjw8IC9GaWx0ZXIgL0ZsYXRlRGVjb2RlIC9MZW5ndGggODAgPj4Kc3RyZWFtCjsHe1jy3cshofuosZgyqKjcjpaCzqgI+j/w4p2AU/D0ZomyaET0NIsbbKJ4E1+2ILrLjeG3VRrO13aVYzrqtADLbtQRCK6u91A/8VIYMYInZW5kc3RyZWFtCmVuZG9iago1IDAgb2JqCjw8IC9CYXNlRm9udCAvSGVsdmV0aWNhIC9TdWJ0eXBlIC9UeXBlMSAvVHlwZSAvRm9udCA+PgplbmRvYmoKNiAwIG9iago8PCAvQ0YgPDwgL1N0ZENGIDw8IC9BdXRoRXZlbnQgL0RvY09wZW4gL0NGTSAvQUVTVjMgL0xlbmd0aCAzMiA+PiA+PiAvRmlsdGVyIC9TdGFuZGFyZCAvTGVuZ3RoIDI1NiAvTyA8Mzk4NjU4NjNmY2RiMDExYTRiODZjOWUyNjk2OWZhMWY5MDM4Y2ZjODQxNGQwYTMxMDc5NDBjMWZhODkwOWEyYWZlNTcyZDQ3ZGJlN2QzZGU2ZGRjNWVmZjg0ODI0MDRmPiAvT0UgPDEzZTkzNDRlNWU3ZDFjYmIxYmY4Y2RjYzRmMGMyOWMxZWI2NGZhODAwOWJhOTI5ZWJlZDJhYmQ1NmZmYmVmZDA+IC9QIC0zMzkyIC9QZXJtcyA8NDE2NGZiNzRmY2U5MmQ0ZWVkYzBjZjdmOGRiMDVmOTY+IC9SIDYgL1N0bUYgL1N0ZENGIC9TdHJGIC9TdGRDRiAvVSA8NWNhMWVmNjFlODFjM2U2MjQzMDU3NjJkZjlhMmNjNzZkNjViZjJjM2EyNTU0ODkyNGM1MzU4NWZkZDJmYTgwMzdjMzYxOWQ4YTY0MjhkM2Q5ZDU2OGM4NTMzNDkyNzllPiAvVUUgPGJiNDEwZDRjNTkxMWFjZTg5OWZlZjU0NzE1NGM3YTA5ZDA1OWM0YzNiZWY5ZjFmYjAyYzk4OTNhNzYzOThkYWU+IC9WIDUgPj4KZW5kb2JqCnhyZWYKMCA3CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAxNSAwMDAwMCBuIAowMDAwMDAwMTMwIDAwMDAwIG4gCjAwMDAwMDAxODkgMDAwMDAgbiAKMDAwMDAwMDMxNyAwMDAwMCBuIAowMDAwMDAwNDY3IDAwMDAwIG4gCjAwMDAwMDA1MzcgMDAwMDAgbiAKdHJhaWxlciA8PCAvUm9vdCAxIDAgUiAvU2l6ZSA3IC9JRCBbPDA4OTgxMWMxYzEyNTEzNzIwZjZhYTA0ZDI1ODU3M2RlPjw5MjFjNTc1MTk1MWQ4NjViZTBkNDcwZmFiZTQ0YjQxOD5dIC9FbmNyeXB0IDYgMCBSID4+CnN0YXJ0eHJlZgoxMDg3CiUlRU9GCg==';
+
+// This fixture has the genuine user password `secret`.
+const USER_PASSWORD_PDF =
   'JVBERi0xLjcKJb/3ov4KMSAwIG9iago8PCAvRXh0ZW5zaW9ucyA8PCAvQURCRSA8PCAvQmFzZVZlcnNpb24gLzEuNyAvRXh0ZW5zaW9uTGV2ZWwgOCA+PiA+PiAvUGFnZXMgMiAwIFIgL1R5cGUgL0NhdGFsb2cgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL0NvdW50IDEgL0tpZHMgWyAzIDAgUiBdIC9UeXBlIC9QYWdlcyA+PgplbmRvYmoKMyAwIG9iago8PCAvQ29udGVudHMgNCAwIFIgL01lZGlhQm94IFsgMCAwIDMwMCAxNDQgXSAvUGFyZW50IDIgMCBSIC9SZXNvdXJjZXMgPDwgL0ZvbnQgPDwgL0YxIDUgMCBSID4+ID4+IC9UeXBlIC9QYWdlID4+CmVuZG9iago0IDAgb2JqCjw8IC9MZW5ndGggODAgL0ZpbHRlciAvRmxhdGVEZWNvZGUgPj4Kc3RyZWFtCraA7rIhBw/0E5vYNUptqP+jClMnGohYd+3FA8vDPHYnaQMKuoQbKbBCV2rpx3wWO9uUUDjshbHt3p/SS2yf1CvkXPjTi1J0A+2crzcxQ7SoZW5kc3RyZWFtCmVuZG9iago1IDAgb2JqCjw8IC9CYXNlRm9udCAvSGVsdmV0aWNhIC9TdWJ0eXBlIC9UeXBlMSAvVHlwZSAvRm9udCA+PgplbmRvYmoKNiAwIG9iago8PCAvQ0YgPDwgL1N0ZENGIDw8IC9BdXRoRXZlbnQgL0RvY09wZW4gL0NGTSAvQUVTVjMgL0xlbmd0aCAzMiA+PiA+PiAvRmlsdGVyIC9TdGFuZGFyZCAvTGVuZ3RoIDI1NiAvTyA8NjhlNDMzNzZkN2U0NDJkYzY5NzNlNjdlMjQ5MDc4NmQ2M2VmZGE3YmFhOThiYjE5NDIxMTlmYWVkZGU2ODMzNmUzM2JiZjJmNzU4YTkyM2U3YjUxMDQxYzM3OTQzMmY5PiAvT0UgPGMzMTllZWU1NjRhMTQyMmZkY2QwODM4ZWUwZjI1MGM3ODc4NzFkODNjODYzYWI4YWExNWU2NjlmODA5NWI0NmI+IC9QIC00IC9QZXJtcyA8YTNlNTVkM2MxMGI0M2MyOTFiMDY1OGViYjUzNGViOTc+IC9SIDYgL1N0bUYgL1N0ZENGIC9TdHJGIC9TdGRDRiAvVSA8NjZiYjM1MGU3ZjYxM2U5MDg4ZmIzZTlkYWRmNTAwODBiNTdmYjFkYmIwOGU1OTkxMmM1N2JkYTdmN2M0MDFmNDQyOTkxZDU2NzM4NmQ1YzZiNWFlY2QzYzI4OWU5NGJkPiAvVUUgPDk3OTliYWEyOTRmYjAyYTIwNmM5Yjk5Y2JmZTk4OTYyOWUyM2JmZmRmMWNiNDZkM2YxMzJhNjVhNWU0YTEyZWM+IC9WIDUgPj4KZW5kb2JqCnhyZWYKMCA3CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAxNSAwMDAwMCBuIAowMDAwMDAwMTMwIDAwMDAwIG4gCjAwMDAwMDAxODkgMDAwMDAgbiAKMDAwMDAwMDMxNyAwMDAwMCBuIAowMDAwMDAwNDY3IDAwMDAwIG4gCjAwMDAwMDA1MzcgMDAwMDAgbiAKdHJhaWxlciA8PCAvUm9vdCAxIDAgUiAvU2l6ZSA3IC9JRCBbPDA4OTgxMWMxYzEyNTEzNzIwZjZhYTA0ZDI1ODU3M2RlPjwwODk4MTFjMWMxMjUxMzcyMGY2YWEwNGQyNTg1NzNkZT5dIC9FbmNyeXB0IDYgMCBSID4+CnN0YXJ0eHJlZgoxMDg0CiUlRU9GCg==';
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, initial) => {
@@ -135,12 +144,24 @@ describe('PDF extraction', () => {
     expect(error.message).toBe('file is not a readable PDF');
   });
 
-  test('reports a real password-protected PDF explicitly', async () => {
-    const error = await extractPdfText(new Uint8Array(Buffer.from(PASSWORD_PROTECTED_PDF, 'base64'))).catch(
-      value => value,
-    );
+  test('extracts an owner-password permissions-only PDF through the implicit empty user password', async () => {
+    const extracted = await extractPdfText(new Uint8Array(Buffer.from(OWNER_PASSWORD_ONLY_PDF, 'base64')));
+    expect(extracted).toMatchObject({
+      method: 'pdfjs',
+      text: 'KTEAM PDF FIXTURE hello',
+      characters: 23,
+      truncated: false,
+      totalPages: 1,
+      pagesRead: 1,
+    });
+  });
+
+  test('reports a true user-password PDF explicitly', async () => {
+    const error = await extractPdfText(new Uint8Array(Buffer.from(USER_PASSWORD_PDF, 'base64'))).catch(value => value);
     expect(code(error)).toBe('password_protected_document');
-    expect(error.message).toBe('PDF is password-protected; kteam could not extract text');
+    expect(error.message).toBe(
+      'This PDF needs a password to open; kteam could not read its text. Decrypt it locally and re-attach it if you want the agent to read it',
+    );
   });
 });
 

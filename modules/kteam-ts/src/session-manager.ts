@@ -7236,6 +7236,15 @@ export class SessionManager implements KTeamService {
         totalPages?: number;
         pagesRead?: number;
       };
+      textExtractionFailure?: {
+        code:
+          | 'password_protected_document'
+          | 'no_extractable_text'
+          | 'unreadable_document'
+          | 'document_extraction_timeout'
+          | 'document_too_complex';
+        message: string;
+      };
     };
     path: string;
   }): AttachmentView {
@@ -7259,6 +7268,14 @@ export class SessionManager implements KTeamService {
               ...(stored.manifest.textExtraction.pagesRead === undefined
                 ? {}
                 : { pagesRead: stored.manifest.textExtraction.pagesRead }),
+            },
+          }
+        : {}),
+      ...(stored.manifest.textExtractionFailure
+        ? {
+            textExtractionFailure: {
+              code: stored.manifest.textExtractionFailure.code,
+              message: stored.manifest.textExtractionFailure.message,
             },
           }
         : {}),

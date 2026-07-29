@@ -76,6 +76,36 @@ describe('transcript image presentation', () => {
     expect(html).not.toContain('<img');
     expect(html).not.toContain('/home/');
   });
+
+  test('a stored document warns about failed agent extraction without losing its file controls', () => {
+    const html = renderToStaticMarkup(
+      <AttachmentImageProvider>
+        <TranscriptImageGallery
+          images={[
+            {
+              kind: 'attachment',
+              sessionId: 'ms1docs-12345678',
+              attachmentId: `att_${'c'.repeat(64)}`,
+              filename: 'large-report.pdf',
+              mime: 'application/pdf',
+              size: 123_456,
+              textExtractionFailure: {
+                code: 'document_too_complex',
+                message: 'internal path /home/kirin/.kteam/secret exceeded a parser limit',
+              },
+            },
+          ]}
+        />
+      </AttachmentImageProvider>,
+    );
+    expect(html).toContain('Agent text extraction failed: the document is too complex or exceeds extraction limits.');
+    expect(html).toContain('text-warn');
+    expect(html).not.toContain('internal path');
+    expect(html).not.toContain('/home/kirin/.kteam/secret');
+    expect(html).toContain('aria-label="Open large-report.pdf"');
+    expect(html).toContain('aria-label="Download large-report.pdf"');
+    expect(html).not.toContain('Retry');
+  });
 });
 
 describe('attachment blob cache ownership', () => {

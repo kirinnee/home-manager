@@ -89,10 +89,14 @@ function pdfFailure(error: unknown): DocumentExtractionError {
   const candidate = error as { name?: unknown; message?: unknown; code?: unknown } | null;
   const name = typeof candidate?.name === 'string' ? candidate.name : '';
   const message = typeof candidate?.message === 'string' ? candidate.message : String(error ?? '');
+  // Verified with qpdf AES-256 fixtures in document-extract.test.ts: calling
+  // getDocument with no password option does try the empty user password, so a
+  // permissions-only/owner-password PDF takes the normal extraction branch.
+  // Only a PDF that truly needs a user password reaches this exception path.
   if (name === 'PasswordException' || /password|encrypted/i.test(message)) {
     return new DocumentExtractionError(
       'password_protected_document',
-      'PDF is password-protected; kteam could not extract text',
+      'This PDF needs a password to open; kteam could not read its text. Decrypt it locally and re-attach it if you want the agent to read it',
     );
   }
   return new DocumentExtractionError('unreadable_document', 'file is not a readable PDF');
@@ -304,7 +308,7 @@ function unzipEntry(bytes: Uint8Array, entry: ZipEntry, maxBytes: number): Uint8
   if ((entry.flags & 1) !== 0) {
     throw new DocumentExtractionError(
       'password_protected_document',
-      'DOCX is password-protected; kteam could not extract text',
+      'This DOCX needs a password to open; kteam could not read its text. Decrypt it locally and re-attach it if you want the agent to read it',
     );
   }
   if (entry.uncompressedSize > maxBytes) {

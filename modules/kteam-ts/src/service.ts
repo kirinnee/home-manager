@@ -171,6 +171,16 @@ export interface AttachmentView {
     totalPages?: number;
     pagesRead?: number;
   };
+  /** Present when the original is retained but daemon-side text extraction failed. */
+  textExtractionFailure?: {
+    code:
+      | 'password_protected_document'
+      | 'no_extractable_text'
+      | 'unreadable_document'
+      | 'document_extraction_timeout'
+      | 'document_too_complex';
+    message: string;
+  };
 }
 
 export interface KTeamService {

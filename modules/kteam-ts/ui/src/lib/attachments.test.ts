@@ -3,10 +3,14 @@ import {
   MAX_ATTACHMENT_BYTES,
   attachmentApiPath,
   attachmentErrorMessage,
+  attachmentFromView,
   attachmentFromToolPath,
   formatAttachmentSize,
+  isTextExtractionFailure,
   sameAttachmentIds,
+  textExtractionFailureCopy,
   validateAttachmentFile,
+  type TextExtraction,
 } from './attachments';
 
 describe('attachment validation mirrors the daemon', () => {
@@ -66,6 +70,116 @@ describe('attachment error copy', () => {
     );
     expect(attachmentErrorMessage({ status: 422, message: 'corrupt /home/kirin/.kteam attachment' })).toBe(
       'Attachment is no longer available — re-add it',
+    );
+  });
+});
+
+describe('document extraction failure metadata', () => {
+  const failure = {
+    code: 'no_extractable_text' as const,
+    message: 'document has no extractable text; it may be a scan or image-only document',
+  };
+  const view = {
+    id: `att_${'b'.repeat(64)}`,
+    filename: 'scan.pdf',
+    mime: 'application/pdf',
+    size: 123,
+    sha256: 'b'.repeat(64),
+    path: '/daemon-only/scan.pdf',
+    createdAt: '2026-07-29T00:00:00.000Z',
+  };
+  const futureFailure = {
+    code: 'future_document_read_error',
+    message: 'parser detail /home/kirin/.kteam/ms1docs-12345678/attachments/private.pdf',
+  };
+
+  test('preserves the daemon failure metadata when an uploaded attachment joins the transcript', () => {
+    const attachment = attachmentFromView('ms1docs-12345678', {
+      ...view,
+      textExtractionFailure: failure,
+    });
+    expect(attachment).toMatchObject({
+      kind: 'attachment',
+      filename: 'scan.pdf',
+      textExtractionFailure: failure,
+    });
+    expect(attachment.textExtraction).toBeUndefined();
+  });
+
+  test('preserves a valid future API failure while using generic copy that omits daemon detail', () => {
+    const attachment = attachmentFromView('ms1docs-12345678', {
+      ...view,
+      textExtractionFailure: futureFailure,
+    });
+    expect(attachment.textExtractionFailure).toEqual(futureFailure);
+    const copy = textExtractionFailureCopy(futureFailure.code);
+    expect(copy).toBe(
+      'Agent text extraction failed: kteam could not read the document text. The original remains attached and downloadable.',
+    );
+    expect(copy).not.toContain(futureFailure.message);
+    expect(copy).not.toContain('/home/kirin/.kteam/');
+  });
+
+  test('accepts bounded single-line future codes and rejects malformed or oversized ones', () => {
+    expect(isTextExtractionFailure(failure)).toBe(true);
+    expect(isTextExtractionFailure({ ...failure, code: 'future_document_read_error' })).toBe(true);
+    for (const code of [
+      'Future_document',
+      'future-document',
+      'future__document',
+      'future_document_',
+      '1future_document',
+    ]) {
+      expect(isTextExtractionFailure({ ...failure, code })).toBe(false);
+    }
+    expect(isTextExtractionFailure({ ...failure, code: 'a'.repeat(65) })).toBe(false);
+    expect(isTextExtractionFailure({ ...failure, message: ' raw detail\nnext line' })).toBe(false);
+    expect(isTextExtractionFailure({ ...failure, message: 'x'.repeat(501) })).toBe(false);
+  });
+
+  test('drops malformed API failure metadata and contradictory extraction states', () => {
+    const malformed = attachmentFromView('ms1docs-12345678', {
+      ...view,
+      textExtractionFailure: { ...failure, code: 'future-document' },
+    });
+    expect(malformed.textExtractionFailure).toBeUndefined();
+
+    const contradictory = attachmentFromView('ms1docs-12345678', {
+      ...view,
+      textExtraction: { method: 'pdfjs', characters: 70, truncated: false },
+      textExtractionFailure: failure,
+    });
+    expect(contradictory.textExtraction).toBeUndefined();
+    expect(contradictory.textExtractionFailure).toBeUndefined();
+
+    const malformedExtraction = attachmentFromView('ms1docs-12345678', {
+      ...view,
+      textExtraction: {
+        method: 'future-extractor',
+        characters: 70,
+        truncated: false,
+      } as unknown as TextExtraction,
+      textExtractionFailure: futureFailure,
+    });
+    expect(malformedExtraction.textExtraction).toBeUndefined();
+    expect(malformedExtraction.textExtractionFailure).toEqual(futureFailure);
+  });
+
+  test('uses concise, code-specific UI copy instead of the daemon message', () => {
+    expect(textExtractionFailureCopy('password_protected_document')).toBe(
+      'Agent text extraction failed: this PDF or Word document needs a password, so kteam could not read its text. The original remains attached and downloadable; decrypt it locally and re-attach it if the agent should read it.',
+    );
+    expect(textExtractionFailureCopy('no_extractable_text')).toBe(
+      'Agent text extraction failed: no readable text was found; it may be a scan.',
+    );
+    expect(textExtractionFailureCopy('unreadable_document')).toBe(
+      'Agent text extraction failed: the document is unreadable or corrupt.',
+    );
+    expect(textExtractionFailureCopy('document_extraction_timeout')).toBe(
+      'Agent text extraction failed: document reading timed out.',
+    );
+    expect(textExtractionFailureCopy('document_too_complex')).toBe(
+      'Agent text extraction failed: the document is too complex or exceeds extraction limits.',
     );
   });
 });

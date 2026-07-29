@@ -43,6 +43,8 @@ import { resultImages, type ToolResultData, type ToolUseData } from './tool-extr
 import {
   ATTACHMENT_MIME_TYPES,
   attachmentFromToolPath,
+  isTextExtraction,
+  isTextExtractionFailure,
   normalizeAttachmentMime,
   type StoredTranscriptImage,
   type TranscriptImage,
@@ -431,6 +433,10 @@ export function buildSendIndex(events: KTeamEvent[], sessionId: string, ledger: 
     if (event.type === 'attachment.created') {
       const id = typeof data['id'] === 'string' ? data['id'] : '';
       if (!/^att_[a-f0-9]{64}$/i.test(id)) continue;
+      const textExtraction = isTextExtraction(data['textExtraction']) ? data['textExtraction'] : undefined;
+      const textExtractionFailure = isTextExtractionFailure(data['textExtractionFailure'])
+        ? data['textExtractionFailure']
+        : undefined;
       attachments.set(id, {
         kind: 'attachment',
         sessionId,
@@ -438,7 +444,8 @@ export function buildSendIndex(events: KTeamEvent[], sessionId: string, ledger: 
         filename: typeof data['filename'] === 'string' && data['filename'] ? data['filename'] : id,
         ...(typeof data['mime'] === 'string' ? { mime: data['mime'] } : {}),
         ...(typeof data['size'] === 'number' ? { size: data['size'] } : {}),
-        ...(validTextExtraction(data['textExtraction']) ? { textExtraction: data['textExtraction'] } : {}),
+        ...(textExtraction && !textExtractionFailure ? { textExtraction } : {}),
+        ...(textExtractionFailure && !textExtraction ? { textExtractionFailure } : {}),
       });
       continue;
     }
@@ -545,18 +552,6 @@ function queuedFileId(text: string): string | undefined {
 
 /** Conservatively strip only the daemon's complete, trailing reference block.
  * Any malformed line leaves the prose untouched. */
-function validTextExtraction(value: unknown): value is NonNullable<StoredTranscriptImage['textExtraction']> {
-  if (!value || typeof value !== 'object') return false;
-  const extraction = value as Record<string, unknown>;
-  return (
-    (extraction['method'] === 'pdfjs' || extraction['method'] === 'docx-xml') &&
-    typeof extraction['characters'] === 'number' &&
-    typeof extraction['truncated'] === 'boolean' &&
-    (extraction['totalPages'] === undefined || typeof extraction['totalPages'] === 'number') &&
-    (extraction['pagesRead'] === undefined || typeof extraction['pagesRead'] === 'number')
-  );
-}
-
 export function stripAttachmentReferenceBlock(text: string): { text: string; attachmentIds: string[] } | null {
   const heading =
     /(?:^|\n\n)(Attached (?:file|files|image|images) \(inspect th(?:is|ese) files? directly before responding\):\n)/g;
@@ -573,23 +568,47 @@ export function stripAttachmentReferenceBlock(text: string): { text: string; att
   )
     return null;
   const attachmentIds: string[] = [];
+  let currentAttachmentId: string | undefined;
+  let currentAttachmentHasExtractionMetadata = false;
   for (let index = 1; index < lines.length; index += 1) {
     const line = lines[index]!;
     const item = /^- .+ \(([^,]+), \d+ bytes, id (att_[a-f0-9]{64})\)$/.exec(line);
     if (item) {
       if (!(ATTACHMENT_MIME_TYPES as readonly string[]).includes(normalizeAttachmentMime(item[1]))) return null;
       attachmentIds.push(item[2]!);
+      currentAttachmentId = item[2]!;
+      currentAttachmentHasExtractionMetadata = false;
       continue;
     }
-    if (!attachmentIds.length || !/^  Text extracted by kteam \(.+\)\.$/.test(line)) return null;
+    const failure =
+      /^  Text extraction failed in kteam \(([^)]+)\): (.+)\. The original file remains available at the path above; do not assume its text was read\.$/.exec(
+        line,
+      );
+    if (failure) {
+      if (
+        !currentAttachmentId ||
+        currentAttachmentHasExtractionMetadata ||
+        !isTextExtractionFailure({ code: failure[1], message: failure[2] })
+      )
+        return null;
+      currentAttachmentHasExtractionMetadata = true;
+      continue;
+    }
+    if (
+      !currentAttachmentId ||
+      currentAttachmentHasExtractionMetadata ||
+      !/^  Text extracted by kteam \(.+\)\.$/.test(line)
+    )
+      return null;
     const retained = lines[++index];
     if (!retained || !/^  Full retained extraction: \/\S+$/.test(retained)) return null;
     const begin = /^  ----- BEGIN KTEAM EXTRACTED TEXT (att_[a-f0-9]{64}) -----$/.exec(lines[++index] ?? '');
-    if (!begin || begin[1] !== attachmentIds.at(-1)) return null;
+    if (!begin || begin[1] !== currentAttachmentId) return null;
     const end = `  ----- END KTEAM EXTRACTED TEXT ${begin[1]} -----`;
     index += 1;
     while (index < lines.length && lines[index] !== end) index += 1;
     if (index === lines.length) return null;
+    currentAttachmentHasExtractionMetadata = true;
   }
   if (!attachmentIds.length) return null;
   return { text: text.slice(0, match.index).trim(), attachmentIds };

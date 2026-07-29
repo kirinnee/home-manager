@@ -6,6 +6,7 @@ import {
   DocumentExtractionError,
   extractDocxText,
   extractPdfText,
+  type DocumentExtractionErrorCode,
   type ExtractedDocumentText,
   type TextExtractionMethod,
 } from './document-extract';
@@ -39,6 +40,12 @@ export interface TextExtractionManifest {
   pagesRead?: number;
 }
 
+export interface TextExtractionFailureManifest {
+  code: DocumentExtractionErrorCode;
+  /** Bounded, single-line reason safe to surface to both the agent and UI. */
+  message: string;
+}
+
 export interface AttachmentManifest {
   version: 1;
   id: string;
@@ -48,6 +55,7 @@ export interface AttachmentManifest {
   hash: string;
   time: string;
   textExtraction?: TextExtractionManifest;
+  textExtractionFailure?: TextExtractionFailureManifest;
 }
 
 export interface StoredAttachment {
@@ -90,11 +98,6 @@ export type AttachmentErrorCode =
   | 'attachment_too_large'
   | 'unsupported_mime'
   | 'mime_mismatch'
-  | 'password_protected_document'
-  | 'no_extractable_text'
-  | 'unreadable_document'
-  | 'document_extraction_timeout'
-  | 'document_too_complex'
   | 'attachment_not_found'
   | 'corrupt_attachment';
 
@@ -232,6 +235,127 @@ function isZip(bytes: Uint8Array): boolean {
 function isOleCompoundFile(bytes: Uint8Array): boolean {
   const signature = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
   return bytes.byteLength >= signature.length && signature.every((byte, index) => bytes[index] === byte);
+}
+
+const OLE_MAX_REGULAR_SECTOR = 0xfffffffa;
+
+/**
+ * Enumerate the names of the Root storage's direct *stream* children
+ * (objectType 2) in a Compound File Binary container, bounded and safe for
+ * malformed input. A storage (1) or the root (5) that merely shares a name is
+ * not MS-OFFCRYPTO evidence, and neither is an unallocated/orphan directory
+ * slot that no live entry links to.
+ *
+ * Detection follows the real CFB structure: it reads Root Entry (directory ID
+ * 0, which must be a root storage) and traverses only its red-black child tree
+ * by left/right sibling links, so a name counts only when a genuine stream
+ * entry is reachable from Root. Traversal is bounded by a visited set (no cycles
+ * or runaway pointers) and never descends into a sub-storage's own children, so
+ * only top-level streams are seen. The directory sectors are located by
+ * following the FAT chain no further than the header DIFAT (first 109 entries)
+ * can resolve — enough to reach the entries MS-OFFCRYPTO writes first
+ * (EncryptionInfo, EncryptedPackage) even for large packages, without unbounded
+ * work.
+ */
+function oleTopLevelStreamNames(bytes: Uint8Array): Set<string> {
+  const names = new Set<string>();
+  if (bytes.byteLength < 512) return names;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const sectorShift = view.getUint16(30, true);
+  // v3 uses 512-byte sectors (shift 9); v4 uses 4096-byte sectors (shift 0xC).
+  if (sectorShift !== 9 && sectorShift !== 0x0c) return names;
+  const sectorSize = 1 << sectorShift;
+  const entriesPerFatSector = sectorSize >> 2;
+  const entriesPerDirSector = sectorSize >> 7;
+  const NOSTREAM = 0xffffffff;
+
+  const sectorOffset = (sector: number): number => (sector + 1) * sectorSize;
+  const fatNext = (sector: number): number => {
+    const fatIndex = Math.floor(sector / entriesPerFatSector);
+    // Resolve FAT sectors only through the header DIFAT (first 109 entries).
+    // Anything requiring a DIFAT chain stops the walk rather than reading on.
+    if (fatIndex >= 109) return 0xfffffffe;
+    const fatSector = view.getUint32(76 + fatIndex * 4, true);
+    if (fatSector > OLE_MAX_REGULAR_SECTOR) return 0xfffffffe;
+    const entryOffset = sectorOffset(fatSector) + (sector % entriesPerFatSector) * 4;
+    if (entryOffset < 0 || entryOffset + 4 > bytes.byteLength) return 0xfffffffe;
+    return view.getUint32(entryOffset, true);
+  };
+
+  // Collect the ordered directory sectors so entries can be addressed by ID.
+  const dirSectors: number[] = [];
+  {
+    let sector = view.getUint32(48, true);
+    const visited = new Set<number>();
+    for (let walked = 0; walked < 4096 && sector <= OLE_MAX_REGULAR_SECTOR; walked += 1) {
+      if (visited.has(sector)) break;
+      visited.add(sector);
+      const base = sectorOffset(sector);
+      if (base < 0 || base + sectorSize > bytes.byteLength) break;
+      dirSectors.push(sector);
+      sector = fatNext(sector);
+    }
+  }
+  const maxEntries = dirSectors.length * entriesPerDirSector;
+  if (maxEntries === 0) return names;
+
+  const entryOffset = (id: number): number => {
+    if (id < 0 || id >= maxEntries) return -1;
+    const sectorIndex = Math.floor(id / entriesPerDirSector);
+    return sectorOffset(dirSectors[sectorIndex]!) + (id % entriesPerDirSector) * 128;
+  };
+  const entryName = (offset: number): string => {
+    const nameLength = view.getUint16(offset + 64, true);
+    if (nameLength < 4 || nameLength > 64 || nameLength % 2 !== 0) return '';
+    let name = '';
+    for (let character = 0; character < nameLength / 2 - 1; character += 1) {
+      const code = view.getUint16(offset + character * 2, true);
+      if (code === 0) break;
+      name += String.fromCharCode(code);
+    }
+    return name;
+  };
+
+  // Root Entry is directory ID 0 and must be a root storage (objectType 5).
+  const rootOffset = entryOffset(0);
+  if (rootOffset < 0 || view.getUint8(rootOffset + 66) !== 5) return names;
+
+  // Traverse Root's red-black child tree by sibling links, counting only the
+  // stream entries actually reachable from Root. Orphan slots are never seen.
+  const stack: number[] = [view.getUint32(rootOffset + 76, true)];
+  const seen = new Set<number>();
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (id === NOSTREAM || id < 0 || id >= maxEntries || seen.has(id)) continue;
+    seen.add(id);
+    if (seen.size > 4096) break;
+    const offset = entryOffset(id);
+    if (offset < 0) continue;
+    if (view.getUint8(offset + 66) === 2) {
+      const name = entryName(offset);
+      if (name) names.add(name);
+      if (names.size > 4096) return names;
+    }
+    stack.push(view.getUint32(offset + 68, true)); // left sibling
+    stack.push(view.getUint32(offset + 72, true)); // right sibling
+  }
+  return names;
+}
+
+/**
+ * Recognize a genuine OOXML encrypted package: a CFB whose directory holds both
+ * the EncryptionInfo and EncryptedPackage streams (case-sensitive per
+ * [MS-OFFCRYPTO] §2.3.4). An arbitrary or legacy OLE file (a real .doc, .xls or
+ * .msg renamed .docx) has neither and is not treated as a password-protected
+ * DOCX.
+ */
+function isEncryptedOoxmlPackage(bytes: Uint8Array): boolean {
+  try {
+    const names = oleTopLevelStreamNames(bytes);
+    return names.has('EncryptionInfo') && names.has('EncryptedPackage');
+  } catch {
+    return false;
+  }
 }
 
 function claimsDocx(options: { filename: string; mime?: string }): boolean {
@@ -398,6 +522,59 @@ function isTextExtractionManifest(value: unknown): value is TextExtractionManife
   );
 }
 
+const DOCUMENT_EXTRACTION_ERROR_CODES = new Set<DocumentExtractionErrorCode>([
+  'password_protected_document',
+  'no_extractable_text',
+  'unreadable_document',
+  'document_extraction_timeout',
+  'document_too_complex',
+]);
+
+// Transient/limit-shaped failures: a later upload of identical bytes that
+// extracts successfully may upgrade the retained failure. Permanent failures
+// (password/no-text/unreadable) reproduce for the same bytes and stay put.
+const TRANSIENT_EXTRACTION_ERROR_CODES = new Set<DocumentExtractionErrorCode>([
+  'document_extraction_timeout',
+  'document_too_complex',
+]);
+
+const TEXT_EXTRACTION_FAILURE_FALLBACK: Readonly<Record<DocumentExtractionErrorCode, string>> = {
+  password_protected_document:
+    'This document needs a password to open; kteam could not read its text. Decrypt it locally and re-attach it if you want the agent to read it',
+  no_extractable_text: 'document has no extractable text; it may be a scan or image-only document',
+  unreadable_document: 'document could not be parsed for text extraction',
+  document_extraction_timeout: 'document text extraction exceeded the processing time limit',
+  document_too_complex: 'document exceeded a text-extraction complexity or size limit',
+};
+
+function extractionFailureManifest(error: DocumentExtractionError): TextExtractionFailureManifest {
+  const normalized = error.message
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const fallback = TEXT_EXTRACTION_FAILURE_FALLBACK[error.code];
+  // safePromptPrefix slices at 500 characters and can cut mid-space, leaving a
+  // trailing space. The manifest validator requires message === message.trim(),
+  // so trim again after truncating or the writer would emit a manifest its own
+  // reader rejects — deleting the very original this path exists to retain.
+  const message = safePromptPrefix(normalized || fallback, 500).trim() || fallback;
+  return { code: error.code, message };
+}
+
+function isTextExtractionFailureManifest(value: unknown): value is TextExtractionFailureManifest {
+  if (typeof value !== 'object' || value === null) return false;
+  const item = value as Partial<TextExtractionFailureManifest>;
+  return (
+    typeof item.code === 'string' &&
+    DOCUMENT_EXTRACTION_ERROR_CODES.has(item.code as DocumentExtractionErrorCode) &&
+    typeof item.message === 'string' &&
+    item.message.length > 0 &&
+    item.message.length <= 500 &&
+    item.message === item.message.trim() &&
+    !/[\u0000-\u001f\u007f]/.test(item.message)
+  );
+}
+
 function isManifest(value: unknown, expectedHash?: string): value is AttachmentManifest {
   if (typeof value !== 'object' || value === null) return false;
   const item = value as Partial<AttachmentManifest>;
@@ -419,7 +596,9 @@ function isManifest(value: unknown, expectedHash?: string): value is AttachmentM
     (!expectedHash || item.hash === expectedHash) &&
     typeof item.time === 'string' &&
     !Number.isNaN(Date.parse(item.time)) &&
-    (item.textExtraction === undefined || isTextExtractionManifest(item.textExtraction))
+    (item.textExtraction === undefined || isTextExtractionManifest(item.textExtraction)) &&
+    (item.textExtractionFailure === undefined || isTextExtractionFailureManifest(item.textExtractionFailure)) &&
+    !(item.textExtraction !== undefined && item.textExtractionFailure !== undefined)
   );
 }
 
@@ -472,16 +651,15 @@ export class AttachmentStore {
     const attachmentsDir = this.attachmentsDir(sessionId);
     const bytes = await readBounded(input, options.maxSizeBytes ?? this.maxSizeBytes);
     // Password-protected OOXML is wrapped in an OLE compound-file container
-    // instead of the ZIP container used by readable DOCX files. Recognise that
-    // specific DOCX claim so the user sees the real reason; legacy .doc remains
-    // unsupported and never enters the DOCX extraction path.
-    if (isOleCompoundFile(bytes) && claimsDocx(options)) {
-      throw new AttachmentError(
-        'password_protected_document',
-        'DOCX is password-protected or encrypted; kteam could not extract text',
-      );
-    }
-    const detectedMime = detectAttachmentMime(bytes, options);
+    // instead of the ZIP container used by readable DOCX files. Only treat a
+    // DOCX-claiming OLE file as encrypted when its CFB directory actually holds
+    // the MS-OFFCRYPTO EncryptionInfo/EncryptedPackage streams. An arbitrary or
+    // legacy OLE (a real .doc/.xls/.msg renamed .docx) has neither, so it never
+    // enters the DOCX path and falls through to the unsupported-type error.
+    const encryptedDocx = isOleCompoundFile(bytes) && claimsDocx(options) && isEncryptedOoxmlPackage(bytes);
+    const detectedMime: AttachmentMimeType | null = encryptedDocx
+      ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      : (detectAttachmentMime(bytes, options) ?? null);
     if (!detectedMime) {
       throw new AttachmentError(
         'unsupported_mime',
@@ -507,14 +685,23 @@ export class AttachmentStore {
     }
 
     let extraction: ExtractedDocumentText | undefined;
-    try {
-      if (detectedMime === 'application/pdf') extraction = await this.pdfExtractor(bytes);
-      else if (detectedMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-        extraction = extractDocxText(bytes);
+    let textExtractionFailure: TextExtractionFailureManifest | undefined = encryptedDocx
+      ? {
+          code: 'password_protected_document',
+          message:
+            'This DOCX needs a password to open; kteam could not read its text. Decrypt it locally and re-attach it if you want the agent to read it',
+        }
+      : undefined;
+    if (!textExtractionFailure) {
+      try {
+        if (detectedMime === 'application/pdf') extraction = await this.pdfExtractor(bytes);
+        else if (detectedMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          extraction = extractDocxText(bytes);
+        }
+      } catch (error) {
+        if (error instanceof DocumentExtractionError) textExtractionFailure = extractionFailureManifest(error);
+        else throw error;
       }
-    } catch (error) {
-      if (error instanceof DocumentExtractionError) throw new AttachmentError(error.code, error.message);
-      throw error;
     }
 
     const hash = createHash('sha256').update(bytes).digest('hex');
@@ -535,9 +722,11 @@ export class AttachmentStore {
     if (!ownsHashDir) {
       // A concurrent writer may own the directory. Wait briefly for its atomic
       // manifest publication, then treat it as the canonical duplicate.
+      let stored: StoredAttachment | undefined;
       for (let attempt = 0; attempt < 100; attempt += 1) {
         try {
-          return await this.get(sessionId, id);
+          stored = await this.get(sessionId, id);
+          break;
         } catch (error) {
           if (
             !(error instanceof AttachmentError) ||
@@ -548,7 +737,22 @@ export class AttachmentStore {
           await pause(20);
         }
       }
-      throw new AttachmentError('corrupt_attachment', `attachment directory for ${id} is incomplete`);
+      if (!stored) {
+        throw new AttachmentError('corrupt_attachment', `attachment directory for ${id} is incomplete`);
+      }
+      // Content-addressed dedupe must not make a transient failure permanent:
+      // if the stored copy retained a transient extraction failure and this
+      // upload of the identical bytes extracted successfully, upgrade it in
+      // place. Never downgrade a success and never touch a permanent failure.
+      if (
+        extraction &&
+        !stored.manifest.textExtraction &&
+        stored.manifest.textExtractionFailure &&
+        TRANSIENT_EXTRACTION_ERROR_CODES.has(stored.manifest.textExtractionFailure.code)
+      ) {
+        return await this.upgradeTransientExtractionFailure(sessionId, hashDir, stored, extraction);
+      }
+      return stored;
     }
 
     try {
@@ -579,6 +783,7 @@ export class AttachmentStore {
         hash,
         time: new Date().toISOString(),
         ...(textExtraction ? { textExtraction } : {}),
+        ...(textExtractionFailure ? { textExtractionFailure } : {}),
       };
 
       await writeFile(contentPath, bytes, { flag: 'wx', mode: 0o600 });
@@ -592,6 +797,54 @@ export class AttachmentStore {
       await rm(hashDir, { recursive: true, force: true });
       throw error;
     }
+  }
+
+  /**
+   * Replace a retained transient extraction failure with a successful
+   * extraction of the same original bytes. Original bytes, name, id, hash,
+   * mime and time are preserved; only the extraction is added and the failure
+   * removed. Publication is crash- and concurrency-safe: the extracted text
+   * lands at a content-addressed final name before the manifest is atomically
+   * replaced. Concurrent upgrades can therefore never leave one writer's
+   * manifest describing another writer's extracted bytes.
+   */
+  private async upgradeTransientExtractionFailure(
+    sessionId: string,
+    hashDir: string,
+    stored: StoredAttachment,
+    extraction: ExtractedDocumentText,
+  ): Promise<StoredAttachment> {
+    const { manifest } = stored;
+    const stem = manifest.filename.slice(0, manifest.filename.lastIndexOf('.')) || 'attachment';
+    const extractedBytes = new TextEncoder().encode(extraction.text);
+    const extractedHash = createHash('sha256').update(extractedBytes).digest('hex');
+    const extractedFilename = `${stem}.extracted-${extractedHash}.txt`;
+    const temporaryExtracted = path.join(hashDir, `.extracted-${process.pid}-${randomUUID()}.tmp`);
+    await writeFile(temporaryExtracted, extractedBytes, { flag: 'wx', mode: 0o600 });
+    await rename(temporaryExtracted, path.join(hashDir, extractedFilename));
+
+    const upgraded: AttachmentManifest = {
+      version: 1,
+      id: manifest.id,
+      filename: manifest.filename,
+      mime: manifest.mime,
+      size: manifest.size,
+      hash: manifest.hash,
+      time: manifest.time,
+      textExtraction: {
+        method: extraction.method,
+        filename: extractedFilename,
+        size: extractedBytes.byteLength,
+        characters: extraction.characters,
+        truncated: extraction.truncated,
+        ...(extraction.totalPages === undefined ? {} : { totalPages: extraction.totalPages }),
+        ...(extraction.pagesRead === undefined ? {} : { pagesRead: extraction.pagesRead }),
+      },
+    };
+    const temporaryManifest = path.join(hashDir, `.manifest-${process.pid}-${randomUUID()}.tmp`);
+    await writeFile(temporaryManifest, `${JSON.stringify(upgraded, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+    await rename(temporaryManifest, path.join(hashDir, 'manifest.json'));
+    return await this.get(sessionId, manifest.id);
   }
 
   async get(sessionId: string, attachmentId: string): Promise<StoredAttachment> {
@@ -724,6 +977,19 @@ export function formatAttachmentReferenceBlock(attachments: readonly StoredAttac
   for (const attachment of attachments) {
     const { manifest } = attachment;
     lines.push(`- ${attachment.path} (${manifest.mime}, ${manifest.size} bytes, id ${manifest.id})`);
+    const extractionFailure = manifest.textExtractionFailure;
+    if (extractionFailure) {
+      // Strip a trailing sentence terminator before re-appending our own, but
+      // never let the reason collapse to empty: a message that is entirely
+      // trailing punctuation would otherwise yield a line the UI parser cannot
+      // match, which makes it fall back to showing the raw reference block
+      // (storage path included). Keep the original message in that case.
+      const reason = extractionFailure.message.replace(/[.!?]+$/, '') || extractionFailure.message;
+      lines.push(
+        `  Text extraction failed in kteam (${extractionFailure.code}): ${reason}. The original file remains available at the path above; do not assume its text was read.`,
+      );
+      continue;
+    }
     const extraction = manifest.textExtraction;
     if (!extraction || attachment.extractedText === undefined || attachment.extractedTextPath === undefined) continue;
     const excerpt = safePromptPrefix(attachment.extractedText, perExtractionBudget);
