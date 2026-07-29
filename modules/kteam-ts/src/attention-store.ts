@@ -140,6 +140,7 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
         : null;
   const subject = requiredText(raw['subject'], MAX_ATTENTION_SUBJECT_LEN);
   const why = requiredText(raw['why'], MAX_ATTENTION_DETAIL_LEN);
+  const context = optionalText(raw['context'], MAX_ATTENTION_DETAIL_LEN);
   const waitingSince = iso(raw['waitingSince']);
   const howToResolve = requiredText(raw['howToResolve'], MAX_ATTENTION_DETAIL_LEN);
   const raisedBy = raw['raisedBy'];
@@ -152,6 +153,7 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
     sourceSeq === null ||
     subject === null ||
     why === null ||
+    context === undefined ||
     waitingSince === null ||
     howToResolve === null ||
     !isBy(raisedBy) ||
@@ -169,6 +171,7 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
     ...(sourceSeq === undefined ? {} : { sourceSeq }),
     subject,
     why,
+    ...(context === null ? {} : { context }),
     waitingSince,
     howToResolve,
     raisedBy,
@@ -304,6 +307,7 @@ export function serializeAttentionItem(item: AttentionItem): AttentionItem {
     ...(item.sourceSeq === undefined ? {} : { sourceSeq: item.sourceSeq }),
     subject: item.subject,
     why: item.why,
+    ...(item.context === null || item.context === undefined ? {} : { context: item.context }),
     waitingSince: item.waitingSince,
     howToResolve: item.howToResolve,
     raisedBy: item.raisedBy,

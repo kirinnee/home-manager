@@ -585,6 +585,8 @@ export interface FleetAttentionItem {
   provider?: string;
   subject?: string;
   why?: string;
+  /** Stranger-readable background carried by the board item, when present. */
+  context?: string;
   waitingSince?: string;
   /** Deliberately NOT rendered by this surface: the per-session Attention
    *  panel owns resolution. Mirrored so the type matches the wire. */

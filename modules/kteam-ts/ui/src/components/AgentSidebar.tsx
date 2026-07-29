@@ -66,7 +66,7 @@ import {
 import type { SessionView } from '../types';
 import { api, ApiError, HAS_TOKEN } from '../lib/api';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
-import { sessionActionSpecs, type SessionAction } from '../lib/session-actions';
+import { sessionActionSpecs, type SessionAction, type SessionActionSpec } from '../lib/session-actions';
 import { RenameSheet } from './RenameSheet';
 import { MigrateSheet } from './MigrateSheet';
 import { displayCallsign } from '../lib/callsign';
@@ -94,6 +94,13 @@ import { useInputModality } from '../hooks/useInputModality';
 import { usePullToSearch } from '../hooks/usePullToSearch';
 import { requestSearchFocus, subscribeSearchFocus } from '../lib/search-focus';
 import { useAttentionCount } from '../hooks/useAttention';
+import {
+  selectLiveDescendants,
+  selectStopTargets,
+  stopScopeLabel,
+  stopScopeReason,
+  type StopScope,
+} from '../lib/stop-actions';
 
 /** Expanded width. Wide enough for a task line and a teammate name, narrow
  *  enough that the transcript beside it still reads comfortably at 1280px. */
@@ -120,11 +127,58 @@ const MOVE_CANCEL_PX = 10;
  *  fires so it does not navigate into the session underneath the menu. */
 const CLICK_SUPPRESS_MS = 700;
 
+/** Pure gesture policy so the touch opener's scroll cancellation and its
+ * post-long-press navigation guard remain covered without a browser DOM. */
+export function cancelsRowLongPress(start: { x: number; y: number }, point: { x: number; y: number }): boolean {
+  return Math.abs(point.x - start.x) > MOVE_CANCEL_PX || Math.abs(point.y - start.y) > MOVE_CANCEL_PX;
+}
+
+export function suppressesRowClick(firedAt: number, now: number): boolean {
+  return now - firedAt < CLICK_SUPPRESS_MS;
+}
+
+/** Bulk actions follow the same embedded-token mutation gate as the existing
+ * row actions. Keeping the decision as pure menu data makes a read-only origin
+ * unable to render a tempting action that would later fail. */
+export interface BulkStopMenuAction {
+  scope: StopScope;
+  targets: SessionView[];
+  label: string;
+}
+
+export function bulkStopMenuActions(
+  sessions: readonly SessionView[],
+  selectedId: string,
+  hasToken: boolean,
+): BulkStopMenuAction[] {
+  if (!hasToken) return [];
+  const selected = sessions.find(view => view.config.id === selectedId);
+  return (['orphan', 'cascade', 'children', 'label'] as const)
+    .filter(scope => scope !== 'label' || !!selected?.config.label?.trim())
+    .map(scope => ({
+      scope,
+      targets: selectStopTargets(sessions, selectedId, scope),
+      label: scope === 'label' ? `Stop label “${selected!.config.label!.trim()}”` : stopScopeLabel(scope),
+    }));
+}
+
+type RowMenuAction = Exclude<SessionAction, 'stop'>;
+
+/** The row menu replaces the formerly opaque one-session Stop action with the
+ * explicit orphan/cascade/children choices below. */
+export function rowMenuActionSpecs(
+  view: SessionView,
+  hasToken: boolean,
+): Array<SessionActionSpec & { action: RowMenuAction }> {
+  return sessionActionSpecs(view, hasToken).filter(
+    (spec): spec is SessionActionSpec & { action: RowMenuAction } => spec.action !== 'stop',
+  );
+}
+
 export type OpenSessionMenu = (view: SessionView, x: number, y: number, trigger: HTMLElement) => void;
 
-const ACTION_ICON: Record<SessionAction, React.ReactNode> = {
+const ACTION_ICON: Record<RowMenuAction, React.ReactNode> = {
   interrupt: <Pause size={13} aria-hidden="true" />,
-  stop: <StopCircle size={13} aria-hidden="true" />,
   resume: <Play size={13} aria-hidden="true" />,
   rename: <Pencil size={13} aria-hidden="true" />,
   migrate: <ServerCog size={13} aria-hidden="true" />,
@@ -170,9 +224,12 @@ function useRowContextGesture(open: OpenSessionMenu | undefined, view: SessionVi
       const trigger = event.currentTarget;
       const px = event.clientX;
       const py = event.clientY;
+      // Clear a previous gesture before recording this one; `cancel` also
+      // clears `startAt`, so doing this after the assignments would make every
+      // long-press timer see no active press.
+      cancel();
       startAt.current = { x: px, y: py };
       triggerEl.current = trigger;
-      cancel();
       timer.current = setTimeout(() => {
         timer.current = null;
         if (startAt.current && triggerEl.current) fire(px, py, triggerEl.current);
@@ -181,14 +238,14 @@ function useRowContextGesture(open: OpenSessionMenu | undefined, view: SessionVi
     onPointerMove: (event: React.PointerEvent<HTMLElement>) => {
       const s = startAt.current;
       if (!s) return;
-      if (Math.abs(event.clientX - s.x) > MOVE_CANCEL_PX || Math.abs(event.clientY - s.y) > MOVE_CANCEL_PX) cancel();
+      if (cancelsRowLongPress(s, { x: event.clientX, y: event.clientY })) cancel();
     },
     onPointerUp: cancel,
     onPointerCancel: cancel,
     // Swallow the click that a just-fired long-press produces, so it cannot
     // navigate into the session while the menu is open over it.
     onClickCapture: (event: React.MouseEvent<HTMLElement>) => {
-      if (performance.now() - firedAt.current < CLICK_SUPPRESS_MS) {
+      if (suppressesRowClick(firedAt.current, performance.now())) {
         event.preventDefault();
         event.stopPropagation();
         firedAt.current = 0;
@@ -203,6 +260,7 @@ function useRowContextGesture(open: OpenSessionMenu | undefined, view: SessionVi
  *  and the Rename/Migrate sheets, whose own confirmations it never bypasses. */
 function SessionRowMenuLayer({
   state,
+  sessions,
   onClose,
   triggerRef,
   touch,
@@ -211,8 +269,10 @@ function SessionRowMenuLayer({
   onRename,
   onMigrate,
   onRun,
+  onBulkStop,
 }: {
   state: { view: SessionView; x: number; y: number } | null;
+  sessions: readonly SessionView[];
   onClose: () => void;
   triggerRef: { current: HTMLElement | null };
   touch: boolean;
@@ -220,20 +280,34 @@ function SessionRowMenuLayer({
   migrateView: SessionView | null;
   onRename: (view: SessionView | null) => void;
   onMigrate: (view: SessionView | null) => void;
-  onRun: (view: SessionView, action: SessionAction) => void;
+  onRun: (view: SessionView, action: RowMenuAction) => void;
+  onBulkStop: (selectedId: string, scope: StopScope) => void;
 }) {
   const items: ContextMenuItem[] = state
-    ? sessionActionSpecs(state.view, HAS_TOKEN).map(spec => ({
-        key: spec.action,
-        label: spec.label,
-        danger: spec.danger,
-        icon: ACTION_ICON[spec.action],
-        onSelect: () => {
-          if (spec.action === 'rename') onRename(state.view);
-          else if (spec.action === 'migrate') onMigrate(state.view);
-          else onRun(state.view, spec.action);
-        },
-      }))
+    ? [
+        ...rowMenuActionSpecs(state.view, HAS_TOKEN).map(spec => ({
+          key: spec.action,
+          label: spec.label,
+          danger: spec.danger,
+          icon: ACTION_ICON[spec.action],
+          onSelect: () => {
+            if (spec.action === 'rename') onRename(state.view);
+            else if (spec.action === 'migrate') onMigrate(state.view);
+            else onRun(state.view, spec.action);
+          },
+        })),
+        ...bulkStopMenuActions(sessions, state.view.config.id, HAS_TOKEN).map(({ scope, targets, label }) => {
+          return {
+            key: `bulk-${scope}`,
+            label,
+            detail: `${targets.length} ${targets.length === 1 ? 'session' : 'sessions'}`,
+            danger: true,
+            icon: <StopCircle size={13} aria-hidden="true" />,
+            disabled: targets.length === 0,
+            onSelect: () => onBulkStop(state.view.config.id, scope),
+          };
+        }),
+      ]
     : [];
 
   return (
@@ -254,6 +328,266 @@ function SessionRowMenuLayer({
       {renameView && <RenameSheet view={renameView} open onClose={() => onRename(null)} />}
       {migrateView && <MigrateSheet view={migrateView} open onClose={() => onMigrate(null)} />}
     </>
+  );
+}
+
+export interface BulkStopOutcome {
+  id: string;
+  name: string;
+  ok: boolean;
+  detail?: string;
+}
+
+export interface BulkStopRequest {
+  token: number;
+  selectedId: string;
+  scope: StopScope;
+  /** Exact non-empty label captured when the label confirmation was opened.
+   * It remains the durable reason identity even if the fleet refresh changes
+   * the selected row before execution. */
+  labelIdentity?: string;
+  /** The exact targets the person saw and confirmed. Fresh matching sessions
+   * are reported after the sweep and require their own confirmation. */
+  targets: SessionView[];
+  /** In orphan mode these are intentionally NOT targets: their parent is being
+   * stopped while they are left alive, so the confirmation leads with them. */
+  orphanedDescendants?: SessionView[];
+  running?: boolean;
+  outcomes?: BulkStopOutcome[];
+  newTargets?: SessionView[];
+  newOrphanedDescendants?: SessionView[];
+}
+
+/** Stale async completions must not replace a confirmation opened after the
+ * original dialog closed. The monotonically increasing token is owned by the
+ * sidebar and remains valid even while the old HTTP requests finish. */
+export function isCurrentBulkRun(request: BulkStopRequest | null, token: number): request is BulkStopRequest {
+  return request?.token === token;
+}
+
+/** The reason belongs to the confirmation, not the later refresh. In
+ * particular a label sweep records the exact label the person saw. */
+export function bulkStopReason(request: Pick<BulkStopRequest, 'scope' | 'selectedId' | 'labelIdentity'>): string {
+  return stopScopeReason(request.scope, request.scope === 'label' ? request.labelIdentity! : request.selectedId);
+}
+
+function stopTargetName(view: SessionView): string {
+  return displayCallsign(view.config.teammate) || view.config.name || view.config.id;
+}
+
+/** Follow the current route session's parent links without trusting the fleet
+ * to be acyclic. These are the sessions that would stop an ancestor/lead of
+ * the session presently being viewed; the active session itself is handled by
+ * the stronger existing caller warning. */
+export function activeSessionAncestorIds(
+  activeId: string | undefined,
+  sessions: readonly SessionView[],
+): ReadonlySet<string> {
+  if (!activeId) return new Set();
+  const byId = new Map(sessions.map(view => [view.config.id, view]));
+  const ancestors = new Set<string>();
+  const visited = new Set([activeId]);
+  let parentId = byId.get(activeId)?.config.parent?.trim();
+  while (parentId && !visited.has(parentId)) {
+    ancestors.add(parentId);
+    visited.add(parentId);
+    parentId = byId.get(parentId)?.config.parent?.trim();
+  }
+  return ancestors;
+}
+
+/** The second, explicit step for all bulk stops. It deliberately renders the
+ * complete target list rather than a reassuring-but-opaque count. */
+export function BulkStopConfirmation({
+  request,
+  activeId,
+  sessions,
+  onClose,
+  onConfirm,
+  onConfirmNew,
+}: {
+  request: BulkStopRequest | null;
+  activeId?: string;
+  sessions: readonly SessionView[];
+  onClose: () => void;
+  onConfirm: () => void;
+  onConfirmNew: (targets: SessionView[]) => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  // A running sweep cannot be cancelled by hiding this dialog — the requests
+  // are already in flight — so keep the report reachable until every outcome
+  // has been rendered.
+  const dismiss = useCallback(() => {
+    if (!request?.running) onClose();
+  }, [request?.running, onClose]);
+  const { onKeyDown } = useDialogFocus(request !== null, dialogRef, dismiss);
+  if (!request) return null;
+  const isResult = request.outcomes !== undefined;
+  const isOrphan = request.scope === 'orphan';
+  const callerIncluded = request.targets.some(target => target.config.id === activeId);
+  const ancestorIds = activeSessionAncestorIds(activeId, sessions);
+  const orphanedDescendants = request.orphanedDescendants ?? [];
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-end bg-scrim p-2 sm:items-center sm:justify-center"
+      role="presentation"
+    >
+      <button
+        type="button"
+        aria-label="Close stop confirmation"
+        disabled={request.running}
+        onClick={dismiss}
+        className="absolute inset-0"
+      />
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="bulk-stop-title"
+        className="kt-panel relative flex max-h-[min(82dvh,620px)] w-full max-w-md flex-col overflow-hidden px-cell-x py-3 shadow-popover focus:outline-none"
+      >
+        <h2 id="bulk-stop-title" className="text-ui font-semibold">
+          {isResult ? `${stopScopeLabel(request.scope)} results` : `${stopScopeLabel(request.scope)} — confirm`}
+        </h2>
+        {!isResult && !isOrphan && (
+          <p className="mt-1 text-cell text-muted">
+            Stop these {request.targets.length} {request.targets.length === 1 ? 'session' : 'sessions'}? This cannot be
+            undone.
+          </p>
+        )}
+        {!isResult && isOrphan && request.targets[0] && (
+          <p className="mt-1 text-cell text-muted">
+            Session to stop: <span className="font-medium text-fg">{stopTargetName(request.targets[0])}</span>{' '}
+            <span className="mono text-meta">{request.targets[0].config.id}</span>
+            {ancestorIds.has(request.targets[0].config.id) && (
+              <span className="ml-2 text-meta text-warn">Current-session ancestor</span>
+            )}
+          </p>
+        )}
+        {callerIncluded && (
+          <p className="mt-2 rounded-control border border-warn/50 bg-warn/10 p-2 text-cell text-warn">
+            Current session is included and will be stopped.
+          </p>
+        )}
+        {isResult ? (
+          <ul
+            aria-label="Stop outcomes"
+            className="my-3 min-h-0 flex-1 divide-y divide-border-soft overflow-y-auto rounded-control border border-border-soft"
+          >
+            {request.outcomes!.map(outcome => (
+              <li key={outcome.id} className="flex min-h-[44px] items-center gap-sm px-3 py-2 text-cell">
+                <span className={outcome.ok ? 'text-ok' : 'text-err'}>{outcome.ok ? 'Stopped' : 'Failed'}</span>
+                <span className="min-w-0 flex-1 truncate">{outcome.name}</span>
+                <span className="mono shrink-0 text-meta text-muted">{outcome.id}</span>
+                {outcome.detail && <span className="max-w-[45%] truncate text-meta text-muted">{outcome.detail}</span>}
+              </li>
+            ))}
+          </ul>
+        ) : isOrphan ? (
+          <section className="my-3 min-h-0 flex-1" aria-labelledby="orphaned-descendants-title">
+            <h3 id="orphaned-descendants-title" className="text-cell font-semibold text-warn">
+              Live descendants left running / parentless ({orphanedDescendants.length})
+            </h3>
+            {orphanedDescendants.length === 0 ? (
+              <p className="mt-2 text-cell text-muted">No descendants will be orphaned.</p>
+            ) : (
+              <ul className="mt-2 max-h-[42dvh] divide-y divide-border-soft overflow-y-auto rounded-control border border-warn/40">
+                {orphanedDescendants.map(descendant => (
+                  <li key={descendant.config.id} className="flex min-h-[44px] items-center gap-sm px-3 py-2 text-cell">
+                    <span className="min-w-0 flex-1 truncate">{stopTargetName(descendant)}</span>
+                    <span className="mono shrink-0 text-meta text-muted">{descendant.config.id}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        ) : (
+          <ul
+            aria-label="Sessions to stop"
+            className="my-3 min-h-0 flex-1 divide-y divide-border-soft overflow-y-auto rounded-control border border-border-soft"
+          >
+            {request.targets.map(target => (
+              <li key={target.config.id} className="flex min-h-[44px] items-center gap-sm px-3 py-2 text-cell">
+                <span className="min-w-0 flex-1 truncate">{stopTargetName(target)}</span>
+                {ancestorIds.has(target.config.id) && (
+                  <span className="shrink-0 text-meta text-warn">Current-session ancestor</span>
+                )}
+                <span className="mono shrink-0 text-meta text-muted">{target.config.id}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {isResult && request.newOrphanedDescendants && request.newOrphanedDescendants.length > 0 && (
+          <div className="mb-3 rounded-control border border-warn/40 bg-warn/10 p-2 text-cell text-warn">
+            <p>
+              {request.newOrphanedDescendants.length} newly appeared live{' '}
+              {request.newOrphanedDescendants.length === 1 ? 'descendant was' : 'descendants were'} left running.
+            </p>
+            <ul
+              className="mt-2 max-h-[24dvh] divide-y divide-warn/20 overflow-y-auto"
+              aria-label="Newly left running descendants"
+            >
+              {request.newOrphanedDescendants.map(descendant => (
+                <li key={descendant.config.id} className="flex min-h-[44px] items-center gap-sm">
+                  <span className="min-w-0 flex-1 truncate">{stopTargetName(descendant)}</span>
+                  <span className="mono shrink-0 text-meta">{descendant.config.id}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {isResult && request.newTargets && request.newTargets.length > 0 && (
+          <div className="mb-3 rounded-control border border-warn/40 bg-warn/10 p-2 text-cell text-warn">
+            <p>
+              {request.newTargets.length} newly appeared matching{' '}
+              {request.newTargets.length === 1 ? 'session was' : 'sessions were'} not stopped.
+            </p>
+            <ul
+              className="mt-2 max-h-[24dvh] divide-y divide-warn/20 overflow-y-auto"
+              aria-label="Newly matching sessions"
+            >
+              {request.newTargets.map(target => (
+                <li key={target.config.id} className="flex min-h-[44px] items-center gap-sm">
+                  <span className="min-w-0 flex-1 truncate">{stopTargetName(target)}</span>
+                  <span className="mono shrink-0 text-meta">{target.config.id}</span>
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              onClick={() => onConfirmNew(request.newTargets!)}
+              className="kt-btn mt-2 min-h-[44px] w-full justify-center"
+            >
+              Review newly appeared sessions
+            </button>
+          </div>
+        )}
+        <div className="flex shrink-0 gap-sm">
+          <button
+            type="button"
+            disabled={request.running}
+            onClick={dismiss}
+            className="kt-btn min-h-[44px] flex-1 justify-center"
+          >
+            {isResult ? 'Close' : 'Cancel'}
+          </button>
+          {!isResult && (
+            <button
+              type="button"
+              disabled={request.running || request.targets.length === 0}
+              onClick={onConfirm}
+              data-variant="danger"
+              className="kt-btn min-h-[44px] flex-1 justify-center"
+            >
+              {request.running ? 'Refreshing…' : `Stop ${request.targets.length}`}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1046,7 +1380,9 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
   const [rowMenu, setRowMenu] = useState<{ view: SessionView; x: number; y: number } | null>(null);
   const [renameView, setRenameView] = useState<SessionView | null>(null);
   const [migrateView, setMigrateView] = useState<SessionView | null>(null);
+  const [bulkStop, setBulkStop] = useState<BulkStopRequest | null>(null);
   const rowMenuTrigger = useRef<HTMLElement | null>(null);
+  const bulkStopToken = useRef(0);
 
   const openSessionMenu = useCallback<OpenSessionMenu>((view, x, y, trigger) => {
     rowMenuTrigger.current = trigger;
@@ -1054,10 +1390,10 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
   }, []);
   const closeSessionMenu = useCallback(() => setRowMenu(null), []);
 
-  // Interrupt / Stop / Resume reuse the same api + store.upsertSession path the
-  // header controls use; a failure surfaces plainly rather than vanishing.
+  // Interrupt / Resume reuse the same api + store.upsertSession path the header
+  // controls use; every sidebar Stop goes through BulkStopConfirmation instead.
   const runSessionAction = useCallback(
-    (view: SessionView, action: SessionAction) => {
+    (view: SessionView, action: RowMenuAction) => {
       const id = view.config.id;
       const settle = (p: Promise<SessionView>) =>
         void p
@@ -1067,21 +1403,126 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
           });
       if (action === 'interrupt') settle(api.interrupt(id));
       else if (action === 'resume') settle(api.resume(id));
-      else if (action === 'stop') {
-        const reason =
-          typeof window !== 'undefined'
-            ? window.prompt('Reason for stopping this session:', 'stopped from browser')
-            : null;
-        if (reason == null) return;
-        settle(api.stop(id, reason.trim() || 'stopped from browser'));
-      }
     },
     [store],
   );
 
+  const openBulkStop = useCallback(
+    (selectedId: string, scope: StopScope, targets?: SessionView[]) => {
+      const selected = (sessions ?? []).find(view => view.config.id === selectedId);
+      const labelIdentity = scope === 'label' ? selected?.config.label : undefined;
+      if (scope === 'label' && !labelIdentity?.trim()) return;
+      const confirmedTargets = targets ?? selectStopTargets(sessions ?? [], selectedId, scope);
+      setBulkStop({
+        token: ++bulkStopToken.current,
+        selectedId,
+        scope,
+        labelIdentity,
+        targets: confirmedTargets,
+        orphanedDescendants: scope === 'orphan' ? selectLiveDescendants(sessions ?? [], selectedId) : undefined,
+      });
+    },
+    [sessions],
+  );
+
+  // Re-list immediately after the second confirmation so the request operates
+  // on current eligibility. Critically, the pass is restricted to IDs visible
+  // in that confirmation: a concurrently spawned matching session is reported
+  // below and needs a separate deliberate confirmation.
+  const confirmBulkStop = useCallback(async () => {
+    if (!bulkStop || bulkStop.running) return;
+    const runToken = bulkStop.token;
+    setBulkStop(current => (isCurrentBulkRun(current, runToken) ? { ...current, running: true } : current));
+    let fresh: SessionView[];
+    try {
+      fresh = await api.listSessions();
+      fresh.forEach(view => store.upsertSession(view));
+    } catch (error) {
+      setBulkStop(current =>
+        isCurrentBulkRun(current, runToken)
+          ? {
+              ...current,
+              running: false,
+              outcomes: [
+                {
+                  id: 'refresh-failed',
+                  name: 'Fleet refresh',
+                  ok: false,
+                  detail: error instanceof ApiError ? error.message : String(error),
+                },
+              ],
+            }
+          : current,
+      );
+      return;
+    }
+
+    const confirmedIds = new Set(bulkStop.targets.map(view => view.config.id));
+    const currentTargets = new Map(
+      selectStopTargets(fresh, bulkStop.selectedId, bulkStop.scope)
+        .filter(view => confirmedIds.has(view.config.id))
+        .map(view => [view.config.id, view]),
+    );
+    const outcomes: BulkStopOutcome[] = [];
+    for (const confirmed of bulkStop.targets) {
+      const target = currentTargets.get(confirmed.config.id);
+      if (!target) {
+        outcomes.push({
+          id: confirmed.config.id,
+          name: stopTargetName(confirmed),
+          ok: false,
+          detail: 'No longer eligible after refresh; not stopped',
+        });
+        continue;
+      }
+      try {
+        const next = await api.stop(target.config.id, bulkStopReason(bulkStop));
+        store.upsertSession(next);
+        outcomes.push({ id: target.config.id, name: stopTargetName(target), ok: true });
+      } catch (error) {
+        outcomes.push({
+          id: target.config.id,
+          name: stopTargetName(target),
+          ok: false,
+          detail: error instanceof ApiError ? error.message : String(error),
+        });
+      }
+    }
+
+    let newTargets: SessionView[] = [];
+    let newOrphanedDescendants: SessionView[] = [];
+    try {
+      const after = await api.listSessions();
+      after.forEach(view => store.upsertSession(view));
+      if (bulkStop.scope === 'orphan') {
+        const alreadyListed = new Set((bulkStop.orphanedDescendants ?? []).map(view => view.config.id));
+        newOrphanedDescendants = selectLiveDescendants(after, bulkStop.selectedId).filter(
+          view => !alreadyListed.has(view.config.id),
+        );
+      } else {
+        newTargets = selectStopTargets(after, bulkStop.selectedId, bulkStop.scope).filter(
+          view => !confirmedIds.has(view.config.id),
+        );
+      }
+    } catch (error) {
+      outcomes.push({
+        id: 'rescan-failed',
+        name: 'Fleet re-scan',
+        ok: false,
+        detail: error instanceof ApiError ? error.message : String(error),
+      });
+    }
+    setBulkStop(current =>
+      isCurrentBulkRun(current, runToken)
+        ? { ...current, running: false, outcomes, newTargets, newOrphanedDescendants }
+        : current,
+    );
+  }, [bulkStop, store]);
+
   const sessionMenuLayer = (
     <SessionRowMenuLayer
       state={rowMenu}
+      sessions={sessions ?? []}
       onClose={closeSessionMenu}
       triggerRef={rowMenuTrigger}
       touch={touchAffected}
@@ -1090,6 +1531,19 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
       onRename={setRenameView}
       onMigrate={setMigrateView}
       onRun={runSessionAction}
+      onBulkStop={openBulkStop}
+    />
+  );
+  const bulkStopLayer = (
+    <BulkStopConfirmation
+      request={bulkStop}
+      activeId={activeId}
+      sessions={sessions ?? []}
+      onClose={() => setBulkStop(null)}
+      onConfirm={() => void confirmBulkStop()}
+      onConfirmNew={targets => {
+        if (bulkStop) openBulkStop(bulkStop.selectedId, bulkStop.scope, targets);
+      }}
     />
   );
 
@@ -1184,6 +1638,7 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
           />
         </aside>
         {sessionMenuLayer}
+        {bulkStopLayer}
       </div>
     );
   }
@@ -1197,6 +1652,7 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
       <nav aria-label="Fleet sessions" className={cn('flex shrink-0 flex-col border-r border-border bg-bg', RAIL_W)}>
         <Rail count={visible.length} onExpand={expand} />
         {sessionMenuLayer}
+        {bulkStopLayer}
       </nav>
     );
   }
@@ -1231,6 +1687,7 @@ export function AgentSidebar({ activeId, drawerOpen, onCloseDrawer }: AgentSideb
         onOpenSessionMenu={openSessionMenu}
       />
       {sessionMenuLayer}
+      {bulkStopLayer}
     </nav>
   );
 }

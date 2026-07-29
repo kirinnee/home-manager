@@ -109,6 +109,21 @@ test('judged: a fresh verdict carries kind, reason, reportPath, not stale', () =
   expect(view.items[0]!.teammate).toBe('ada');
 });
 
+test('a board item carrying context reaches the fleet row; absence stays absent', () => {
+  const view = run({
+    sessions: [session('sess-1')],
+    boards: [
+      board('sess-1', [
+        item({ id: 'A1', context: 'A **warden** is the fleet supervisor; it flagged this session.' }),
+        item({ id: 'A2', waitingSince: '2026-07-28T11:00:00.000Z' }),
+      ]),
+    ],
+  });
+  const byId = new Map(view.items.map(entry => [entry.id, entry]));
+  expect(byId.get('A1')?.context).toBe('A **warden** is the fleet supervisor; it flagged this session.');
+  expect(byId.get('A2')?.context).toBeUndefined();
+});
+
 test('none: an item with no verdict yields an explicit none, never absent', () => {
   const view = run({
     sessions: [session('sess-1')],

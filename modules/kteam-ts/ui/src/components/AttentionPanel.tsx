@@ -61,6 +61,24 @@ export function actorLabel(by: AttentionBy, name: string | null): string {
   return by === 'human' ? 'you' : 'the daemon';
 }
 
+/** Who cleared an item, as a visible badge — not just an audit sentence. A
+ * human clear and an agent self-retraction are different facts: the human must
+ * be able to scan the audit for everything cleared WITHOUT them. */
+export function resolutionBadge(
+  by: AttentionBy,
+  name: string | null,
+): { label: string; cls: string; icon: typeof Check } {
+  if (by === 'agent') {
+    return {
+      label: `retracted by agent ${name ?? '(unnamed)'}`,
+      cls: 'border-warn/50 bg-warn/10 text-warn',
+      icon: Bot,
+    };
+  }
+  if (by === 'human') return { label: 'dismissed by you', cls: 'border-ok/50 bg-ok/10 text-ok', icon: UserRoundCheck };
+  return { label: 'cleared by the daemon', cls: 'border-border bg-surface-2 text-muted', icon: Check };
+}
+
 export function waitingAgeCopy(waitingSince: string, at = Date.now()): string {
   const elapsed = Math.max(0, at - Date.parse(waitingSince));
   const minutes = Math.floor(elapsed / 60_000);
@@ -262,8 +280,8 @@ export function AttentionSurface({
           )}
         </div>
         <p className="mx-auto w-full max-w-2xl px-panel pb-row-y text-meta leading-base text-faint">
-          Durable until marked done. Status changes alone do not erase a request, and every resolution records who
-          cleared it.
+          Durable until marked done. Status changes alone do not erase a request. An agent can only retract a request it
+          raised itself — everything else waits for you, and every clear records who did it.
         </p>
       </div>
 
@@ -407,6 +425,21 @@ function AttentionRow({
             onPinOpen={onPinOpen}
             className="mt-xs text-cell leading-base text-muted"
           />
+          {item.context && (
+            <div className="mt-sm rounded-control border border-border-soft bg-surface-2 px-cell-x py-1.5">
+              <span className="kt-label block text-faint">Context</span>
+              <Markdown
+                text={item.context}
+                sessionId={sessionId}
+                cwd={cwd}
+                onTaskOpen={onTaskOpen}
+                onCodeReferenceOpen={onCodeReferenceOpen}
+                onAttentionOpen={onAttentionOpen}
+                onPinOpen={onPinOpen}
+                className="mt-0.5 text-meta leading-base text-muted"
+              />
+            </div>
+          )}
           <div className="mt-sm rounded-control border border-border-soft bg-surface-2 px-cell-x py-1.5">
             <span className="kt-label block text-faint">How to resolve</span>
             <Markdown
@@ -484,44 +517,59 @@ function ResolutionAudit({
         <p className="m-0 px-cell-x py-row-y text-meta text-faint">No recorded resolutions.</p>
       ) : (
         <ul className="m-0 flex list-none flex-col gap-xs px-cell-x pb-row-y pt-xs">
-          {items.map(item => (
-            <li
-              key={`${item.id}:${item.resolvedAt}`}
-              id={attentionReferenceDomId(item.id)}
-              data-reference-target={targetedId === item.id || undefined}
-              className={cn(
-                'border-l-2 border-border-soft pl-sm text-meta leading-base',
-                targetedId === item.id && 'rounded-control ring-2 ring-accent ring-offset-2 ring-offset-surface',
-              )}
-            >
-              <Markdown
-                text={item.subject}
-                sessionId={sessionId}
-                cwd={cwd}
-                onTaskOpen={onTaskOpen}
-                onCodeReferenceOpen={onCodeReferenceOpen}
-                onAttentionOpen={onAttentionOpen}
-                onPinOpen={onPinOpen}
-                className="font-medium text-muted"
-              />
-              <p className="m-0 text-faint">
-                {attentionReference(item.id)} · Resolved by {actorLabel(item.resolvedBy, item.resolvedByName)} ·{' '}
-                {new Date(item.resolvedAt).toLocaleString()}
-              </p>
-              {item.resolutionNote && (
+          {items.map(item => {
+            const badge = resolutionBadge(item.resolvedBy, item.resolvedByName);
+            const BadgeIcon = badge.icon;
+            return (
+              <li
+                key={`${item.id}:${item.resolvedAt}`}
+                id={attentionReferenceDomId(item.id)}
+                data-reference-target={targetedId === item.id || undefined}
+                className={cn(
+                  'border-l-2 pl-sm text-meta leading-base',
+                  item.resolvedBy === 'agent' ? 'border-warn/60' : 'border-border-soft',
+                  targetedId === item.id && 'rounded-control ring-2 ring-accent ring-offset-2 ring-offset-surface',
+                )}
+              >
                 <Markdown
-                  text={item.resolutionNote}
+                  text={item.subject}
                   sessionId={sessionId}
                   cwd={cwd}
                   onTaskOpen={onTaskOpen}
                   onCodeReferenceOpen={onCodeReferenceOpen}
                   onAttentionOpen={onAttentionOpen}
                   onPinOpen={onPinOpen}
-                  className="text-faint"
+                  className="font-medium text-muted"
                 />
-              )}
-            </li>
-          ))}
+                <p className="m-0 flex flex-wrap items-center gap-x-sm gap-y-xs text-faint">
+                  <span
+                    className={cn(
+                      'inline-flex shrink-0 items-center gap-1 rounded border px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider',
+                      badge.cls,
+                    )}
+                  >
+                    <BadgeIcon size={11} aria-hidden="true" />
+                    {badge.label}
+                  </span>
+                  <span>
+                    {attentionReference(item.id)} · {new Date(item.resolvedAt).toLocaleString()}
+                  </span>
+                </p>
+                {item.resolutionNote && (
+                  <Markdown
+                    text={item.resolutionNote}
+                    sessionId={sessionId}
+                    cwd={cwd}
+                    onTaskOpen={onTaskOpen}
+                    onCodeReferenceOpen={onCodeReferenceOpen}
+                    onAttentionOpen={onAttentionOpen}
+                    onPinOpen={onPinOpen}
+                    className="text-faint"
+                  />
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
     </details>

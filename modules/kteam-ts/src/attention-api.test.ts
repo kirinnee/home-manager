@@ -101,6 +101,19 @@ describe('body parsing', () => {
         howToResolve: 'Choose one',
       }),
     ).toMatchObject({ action: 'add', input: { source: 'agent-raised', subject: 'Need a region' } });
+    expect(
+      parseAttentionActionBody({
+        action: 'add',
+        subject: 'Need a region',
+        why: 'Deploy blocked',
+        context: 'This is the nitroso release deploy; the region was never decided.',
+        howToResolve: 'Choose one',
+      }),
+    ).toMatchObject({ input: { context: 'This is the nitroso release deploy; the region was never decided.' } });
+    // Absent context stays absent rather than becoming an empty string.
+    expect(parseAttentionActionBody({ action: 'add', subject: 's', why: 'w', howToResolve: 'h' })).toMatchObject({
+      input: expect.not.objectContaining({ context: expect.anything() }),
+    });
     expect(parseAttentionActionBody({ action: 'done', id: '?A1', note: 'picked us-east' })).toEqual({
       action: 'resolve',
       id: 'A1',

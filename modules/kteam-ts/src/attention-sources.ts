@@ -9,6 +9,7 @@ import type { ScopedTaskSummary, SessionTaskListResponse, TaskActivity, TaskWork
 import { isValidShippedReopenActivity } from './session-tasks-store';
 import type { AddAttentionInput, AttentionService } from './attention-service';
 import {
+  MAX_ATTENTION_SUBJECT_LEN,
   TASK_REOPENED_ATTENTION_SOURCE_REF_PREFIX,
   type AttentionActor,
   type AttentionSnapshot,
@@ -46,6 +47,14 @@ export interface AttentionTaskSource {
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+/** The subject is the ask and must stay one line under the cap. Free text from
+ * tasks/questions is flattened and clipped so a long source can never make the
+ * add itself fail — the blocker must surface even when its text is unwieldy. */
+function subjectLine(value: string): string {
+  const line = value.replace(/\s+/gu, ' ').trim();
+  return line.length > MAX_ATTENTION_SUBJECT_LEN ? `${line.slice(0, MAX_ATTENTION_SUBJECT_LEN - 1)}…` : line;
 }
 
 function eventActor(event: KTeamEvent): AttentionActor {
@@ -92,10 +101,11 @@ function taskInput(task: ScopedTaskSummary, state: TaskAttentionState): AddAtten
   return {
     source: 'task',
     sourceRef: task.id,
-    subject: `#${task.id}: ${task.title}`,
+    subject: subjectLine(`Unblock task #${task.id}: ${task.title}`),
     why: state.reason,
+    context: `#${task.id} ("${task.title}") is a task tracked in this session. It is **blocked on you** — no agent can move it forward until you decide.`,
     waitingSince: state.since,
-    howToResolve: `Resolve the blocking condition for #${task.id}.`,
+    howToResolve: `- Read the reason above and give the missing decision or input.\n- Once #${task.id} is unblocked, this item clears itself.`,
   };
 }
 
@@ -123,10 +133,11 @@ function reopenedTaskInputFrom(raw: Record<string, unknown>, waitingSince: strin
     source: 'agent-raised',
     sourceRef: `${TASK_REOPENED_ATTENTION_SOURCE_REF_PREFIX}${id}`,
     sourceSeq: sourceSeq as number,
-    subject: `#${id}: shipped work reopened from ${from}`,
+    subject: `Re-verify #${id} — shipped work was reopened`,
     why: reason,
+    context: `Task #${id} had shipped (it was **${from}** — reviewed and accepted). An agent moved it back to **${to}** for repair, so the "done" you may have seen is no longer true.`,
     waitingSince,
-    howToResolve: `Review #${id}'s reopened ask, then explicitly resolve this item. After the repair returns to live, only the human should move it to done after verification.`,
+    howToResolve: `- Read why #${id} was reopened (reason above).\n- After the repair, **only you** should move it back to done, after verifying it.\n- Then mark this item done.`,
   };
 }
 
@@ -156,10 +167,13 @@ function questionInput(question: PendingQuestion, waitingSince: string): AddAtte
   return {
     source: 'question',
     sourceRef: question.toolUseId,
-    subject: first || 'A session question is waiting',
-    why: 'This session cannot continue until the pending question is answered.',
+    subject: first ? subjectLine(`Answer: ${first}`) : 'Answer a waiting question from this session',
+    why: 'The agent is **parked** — it cannot continue until someone answers.',
+    context:
+      'The agent in this session paused mid-run to ask this. The full question and its options are in the session view.',
     waitingSince,
-    howToResolve: 'Answer or explicitly abandon the pending question in this session.',
+    howToResolve:
+      '- Open the session and answer the question (or explicitly abandon it).\n- This item clears itself once answered.',
   };
 }
 
@@ -198,6 +212,19 @@ const PERMISSION_RESOLVED_EVENTS = new Set([
 ]);
 
 const PROVIDER_ATTENTION_PREFIX = 'provider-unavailable:';
+
+/** Shared warden needs-human copy. "Warden" is a kteam term of art, so the
+ * context glosses it for a reader who has never met one; the source-specific
+ * `why` (the warden's own reason) is supplied by the caller. */
+function wardenNeedsHumanCopy(): Pick<AddAttentionInput, 'subject' | 'context' | 'howToResolve'> {
+  return {
+    subject: 'Check this session — its warden flagged it for you',
+    context:
+      'A **warden** is kteam’s automated supervisor: it reviews sessions that look stuck or anomalous. It judged that this one cannot be fixed without a human.',
+    howToResolve:
+      '- Open the session and read the warden’s reason above.\n- Act on it (answer, restart, reroute, or stop the work).\n- Then mark this item done — it will not clear itself.',
+  };
+}
 
 async function forEachConcurrent<T>(
   values: readonly T[],
@@ -349,10 +376,9 @@ export class AttentionSources {
         .addFromSource(id, {
           source: 'agent-raised',
           sourceRef: wardenVerdictSourceRef(request.reportPath, parseWardenAnomalyKind(request.anomalyKind)),
-          subject: 'A warden requested human attention',
+          ...wardenNeedsHumanCopy(),
           why: request.reason,
           waitingSince: request.at ?? view.state.lastActivityAt ?? view.config.updatedAt,
-          howToResolve: 'Inspect the session and explicitly resolve this attention item after acting.',
         })
         .catch(error => this.report(id, 'warden baseline', error));
     }
@@ -493,10 +519,14 @@ export class AttentionSources {
       await this.attention.addFromSource(event.sessionId, {
         source: 'permission',
         sourceRef: permissionRef,
-        subject: textFrom(raw, ['subject', 'permission', 'message']) ?? 'A permission decision is waiting',
+        subject: subjectLine(
+          textFrom(raw, ['subject', 'permission', 'message']) ?? 'Approve or deny a waiting permission prompt',
+        ),
         why: textFrom(raw, ['why', 'reason']) ?? 'The session cannot continue without this permission decision.',
+        context:
+          'The agent hit an action it is not allowed to take on its own and is **paused** until someone decides.',
         waitingSince: event.time,
-        howToResolve: 'Approve or deny the permission prompt in this session.',
+        howToResolve: '- Open the session and approve or deny the prompt.\n- This item clears itself once decided.',
       });
       return;
     }
@@ -511,16 +541,15 @@ export class AttentionSources {
     }
 
     if (event.type === 'fleet.needs_human') {
-      const why = textFrom(raw, ['reason']) ?? 'A warden requested human attention.';
+      const why = textFrom(raw, ['reason']) ?? 'A warden decided this session needs a human.';
       const reportPath = textFrom(raw, ['reportPath']);
       const anomalyKind = parseWardenAnomalyKind(textFrom(raw, ['anomalyKind']));
       await this.attention.addFromSource(event.sessionId, {
         source: 'agent-raised',
         sourceRef: wardenVerdictSourceRef(reportPath, anomalyKind),
-        subject: 'A warden requested human attention',
+        ...wardenNeedsHumanCopy(),
         why,
         waitingSince: event.time,
-        howToResolve: 'Inspect the session and explicitly resolve this attention item after acting.',
       });
     }
   }
@@ -548,11 +577,12 @@ export class AttentionSources {
           await this.attention.addFromSource(sessionId, {
             source: 'agent-raised',
             sourceRef,
-            subject: `Provider ${provider} is unavailable (${affected} session${affected === 1 ? '' : 's'})`,
+            subject: `Restore provider ${provider} — ${affected} session${affected === 1 ? ' is' : 's are'} stalled on it`,
             why: anomaly.detail,
+            context: `A **provider** is a model account the agents run on (${provider} here). While it is down, every session using it is stalled, not failed.`,
             waitingSince: anomaly.since,
             howToResolve:
-              'Check `kteam warden status` and `kfleet usage`; wait for cooldown, top up spend, or re-authenticate as indicated, reroute affected work, then explicitly resolve this item.',
+              '- Run `kteam warden status` and `kfleet usage` to see the cause.\n- **Cooldown**: wait it out · **spend cap**: top up · **auth**: re-authenticate.\n- Reroute urgent work to another provider meanwhile.\n- Then mark this item done — it will not clear itself.',
           });
           this.providerAnchors.set(sourceRef, sessionId);
           lastError = undefined;

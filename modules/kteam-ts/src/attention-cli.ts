@@ -14,21 +14,31 @@ import {
 
 export const ATTENTION_CLI_USAGE = `kteam attention <command>
 
-  attention "<what you need>"           raise an explicit request on THIS session
-  attention add "<subject>"              same, explicit
-             [--why <context>] [--resolve <how>]
+  attention "<the ask>"                 raise a request on THIS session
+  attention add "<the ask>"              same, explicit
+             [--context <background>] [--why <why-now>] [--resolve <how>]
   attention ls                           list unresolved items, oldest first
   attention done ?A3 [--note <text>]
-                                         resolve an item (resolver is recorded)
+                                         retract an item YOU raised; items raised
+                                         by the daemon or another agent are
+                                         dismissed by the human only
   attention history                      show recent resolution audit
 
   [--session <id>]                       target another session; an agent may
                                          only mutate its own session
 
-Defaults to KTEAM_SESSION_ID. Attention items never expire or auto-clear.`;
+The reader has NOT been following this session. Write for that reader:
+  <the ask>   one line: what the human must decide or do — not backstory
+  --context   background they need; EXPAND every codename/term of art
+  --why       why this needs them now (what is blocked or at risk)
+  --resolve   the concrete action that clears it
+
+All fields render as markdown: use short bullet points, bold the key
+point, no walls of text. Defaults to KTEAM_SESSION_ID. Attention items
+never expire or auto-clear.`;
 
 export type AttentionCliCommand =
-  | { command: 'add'; subject: string; why: string; howToResolve: string; session?: string }
+  | { command: 'add'; subject: string; why: string; context?: string; howToResolve: string; session?: string }
   | { command: 'ls'; session?: string }
   | { command: 'history'; session?: string }
   | { command: 'done'; id: AttentionId; note?: string; session?: string };
@@ -63,11 +73,19 @@ export function parseAttentionCli(argv: readonly string[]): AttentionCliCommand 
   const subject = (head === 'add' ? positional.slice(1) : positional).join(' ').trim();
   if (!subject) return invalid('say what you need, or choose ls/done/history');
   const whyFlag = flags.get('why')?.at(-1);
+  const contextFlag = flags.get('context')?.at(-1);
   const resolveFlag = flags.get('resolve')?.at(-1) ?? flags.get('how')?.at(-1);
   const why = whyFlag && whyFlag.trim() ? whyFlag : subject;
   const howToResolve =
     resolveFlag && resolveFlag.trim() ? resolveFlag : 'Respond in this session, then mark this attention item done.';
-  return { command: 'add', subject, why, howToResolve, ...scoped };
+  return {
+    command: 'add',
+    subject,
+    why,
+    ...(contextFlag && contextFlag.trim() ? { context: contextFlag } : {}),
+    howToResolve,
+    ...scoped,
+  };
 }
 
 export interface AttentionCliRequest {
@@ -98,6 +116,7 @@ export function attentionCliRequest(
           source: 'agent-raised',
           subject: command.subject,
           why: command.why,
+          ...(command.context ? { context: command.context } : {}),
           howToResolve: command.howToResolve,
         },
       };
@@ -126,6 +145,7 @@ export function renderAttentionList(snapshot: AttentionSnapshot): string {
   const lines = [`${snapshot.count} unresolved item(s) in ${snapshot.sessionId} — oldest first`];
   for (const item of snapshot.items) {
     lines.push(`  ${attentionReference(item.id)}  [${item.source}]  ${compact(item.subject)}`);
+    if (item.context) lines.push(`      context: ${compact(item.context)}`);
     lines.push(`      why: ${compact(item.why)}`);
     lines.push(`      resolve: ${compact(item.howToResolve)}`);
     lines.push(`      since ${item.waitingSince} · raised by ${actorLabel(item.raisedBy, item.raisedByName)}`);

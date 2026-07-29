@@ -46,8 +46,14 @@ export interface AddAttentionInput {
   sourceRef?: string | null;
   /** Honoured only for trusted daemon source adapters. */
   sourceSeq?: number;
+  /** The ask — one line: what the human must decide or do. */
   subject?: string;
+  /** Why this needs the human now. Markdown. */
   why?: string;
+  /** Background for a reader who has NOT followed this session; expand every
+   * codename and term of art. Markdown. */
+  context?: string | null;
+  /** The concrete action that resolves it, short point form. Markdown. */
   howToResolve?: string;
   /** Honoured only for the daemon's source adapters. Client adds are stamped
    * at receipt so an agent cannot backdate itself to the top of the list. */
@@ -106,6 +112,9 @@ function validSourceSeq(value: unknown): number {
 }
 
 const sameText = (a: string, b: string): boolean => a.trim() === b.trim();
+
+const sameOptionalText = (a: string | null | undefined, b: string | null | undefined): boolean =>
+  (a ?? '').trim() === (b ?? '').trim();
 
 export class AttentionService {
   private readonly store: AttentionStore;
@@ -167,7 +176,16 @@ export class AttentionService {
       throw new AttentionError('forbidden', `only the daemon may raise a ${source} attention item`);
     }
     const subject = requiredText(input.subject, 'subject', MAX_ATTENTION_SUBJECT_LEN);
+    // The subject is the ask and leads every rendering of the item. A subject
+    // that is a paragraph buries the ask, so the shape refuses it up front.
+    if (/[\r\n]/u.test(subject)) {
+      throw new AttentionError(
+        'invalid',
+        'subject must be one line stating the ask; put background in context and detail in why/howToResolve',
+      );
+    }
     const why = requiredText(input.why, 'why', MAX_ATTENTION_DETAIL_LEN);
+    const context = optionalText(input.context, 'context', MAX_ATTENTION_DETAIL_LEN);
     const howToResolve = requiredText(input.howToResolve, 'howToResolve', MAX_ATTENTION_DETAIL_LEN);
     const sourceRef = optionalText(input.sourceRef, 'sourceRef', MAX_ATTENTION_SOURCE_REF_LEN);
     const reopenedTaskId = taskIdFromReopenedAttentionSourceRef(sourceRef);
@@ -188,6 +206,7 @@ export class AttentionService {
       ...(sourceSeq === undefined ? {} : { sourceSeq }),
       subject,
       why,
+      ...(context === null ? {} : { context }),
       waitingSince,
       howToResolve,
       raisedBy: provenance.by,
@@ -211,6 +230,7 @@ export class AttentionService {
           if (
             sameText(existing.subject, subject) &&
             sameText(existing.why, why) &&
+            sameOptionalText(existing.context, context) &&
             sameText(existing.howToResolve, howToResolve) &&
             (reopenedTaskId === null || existing.sourceSeq === sourceSeq)
           ) {
@@ -221,17 +241,18 @@ export class AttentionService {
           // human-facing decision context in place.
           return {
             ...current,
-            items: current.items.map(item =>
-              item.id === existing.id
-                ? {
-                    ...item,
-                    subject,
-                    why,
-                    howToResolve,
-                    ...(sourceSeq === undefined ? {} : { sourceSeq }),
-                  }
-                : item,
-            ),
+            items: current.items.map(item => {
+              if (item.id !== existing.id) return item;
+              const { context: _dropped, ...withoutContext } = item;
+              return {
+                ...withoutContext,
+                subject,
+                why,
+                ...(context === null ? {} : { context }),
+                howToResolve,
+                ...(sourceSeq === undefined ? {} : { sourceSeq }),
+              };
+            }),
           };
         }
         // Startup queues live events while durable baselines are seeded. If a
@@ -261,6 +282,7 @@ export class AttentionService {
           existing.raisedBySession === provenance.session &&
           sameText(existing.subject, subject) &&
           sameText(existing.why, why) &&
+          sameOptionalText(existing.context, context) &&
           sameText(existing.howToResolve, howToResolve),
       );
       if (duplicate) return current;
@@ -277,8 +299,12 @@ export class AttentionService {
     return this.finishMutation(mutation, provenance);
   }
 
-  /** Explicitly resolve by id. Both humans and agents may resolve; agents stay
-   * scoped to their own session, and every clear is retained in the audit. */
+  /** Explicitly resolve by id. The human may dismiss anything. An agent may
+   * only RETRACT a request it raised itself (honest self-cleanup); it may not
+   * dismiss an item raised by the daemon or by another agent — those exist so
+   * the human sees them, and clearing one unseen would defeat the ledger.
+   * Evidence-driven clears (question answered, task unblocked) stay on the
+   * trusted resolveFromSource path, which this guard does not touch. */
   async resolve(
     sessionId: string,
     id: string,
@@ -296,6 +322,19 @@ export class AttentionService {
       if (target === undefined) {
         if (current.resolved.some(item => item.id === canonical)) return current;
         throw new AttentionError('not-found', `no unresolved attention item ${canonical} in this session`);
+      }
+      const { by, session } = authorized.provenance;
+      if (by === 'agent' && !(target.raisedBy === 'agent' && target.raisedBySession === session)) {
+        throw new AttentionError(
+          'forbidden',
+          `an agent may only retract an attention item it raised itself; ${canonical} was raised by ${
+            target.raisedBy === 'daemon'
+              ? 'the daemon'
+              : target.raisedBy === 'human'
+                ? 'the human'
+                : `agent ${target.raisedByName ?? target.raisedBySession}`
+          }. Resolve the underlying cause so its source clears it, or leave it for the human.`,
+        );
       }
       await this.acknowledgeReopen(authorized.session.id, target, authorized.provenance, resolutionNote);
       return resolveState(current, target, authorized.provenance, resolutionNote);

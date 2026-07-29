@@ -56,6 +56,16 @@ describe('path and item parsing', () => {
     expect(isSafeAttentionSessionId('a.b')).toBe(false);
   });
 
+  test('optional context round-trips, tolerates absence and rejects a non-string', () => {
+    expect(parseAttentionItem(item())?.context).toBeUndefined();
+    const withContext = { ...item(), context: 'Background for a reader new to this session.' };
+    expect(parseAttentionItem(withContext)?.context).toBe('Background for a reader new to this session.');
+    // Stored null is legacy-equivalent to absent.
+    expect(parseAttentionItem({ ...item(), context: null })?.context).toBeUndefined();
+    expect(parseAttentionItem({ ...item(), context: 42 })).toBeNull();
+    expect(parseAttentionItem({ ...item(), context: 'x'.repeat(2_049) })).toBeNull();
+  });
+
   test('parses every required field and rejects malformed provenance', () => {
     expect(parseAttentionItem(item())?.subject).toContain('deployment');
     expect(parseAttentionItem({ ...item(), subject: '' })).toBeNull();

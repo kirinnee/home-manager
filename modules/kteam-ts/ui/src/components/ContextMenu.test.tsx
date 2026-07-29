@@ -120,4 +120,18 @@ describe('ContextMenu markup', () => {
     );
     expect(html).toContain('disabled');
   });
+
+  test('renders a compact optional detail beside the menu label', () => {
+    const html = renderToStaticMarkup(
+      <ContextMenu
+        open
+        anchor={{ x: 0, y: 0 }}
+        ariaLabel="Menu"
+        onClose={() => {}}
+        items={[{ key: 'tree', label: 'Stop tree', detail: '3 sessions', onSelect: () => {} }]}
+      />,
+    );
+    expect(html).toContain('Stop tree');
+    expect(html).toContain('3 sessions');
+  });
 });

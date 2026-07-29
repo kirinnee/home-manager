@@ -31,6 +31,15 @@ describe('attention client parsing', () => {
     expect(parseAttentionItem({ ...item, raisedBy: 'agent', raisedBySession: null })).toBeNull();
   });
 
+  test('optional context flows through and legacy records without it still parse', () => {
+    expect(parseAttentionItem(item)?.context).toBeUndefined();
+    expect(parseAttentionItem({ ...item, context: null })?.context).toBeUndefined();
+    expect(parseAttentionItem({ ...item, context: 'Background for a new reader.' })?.context).toBe(
+      'Background for a new reader.',
+    );
+    expect(parseAttentionItem({ ...item, context: 42 })).toBeNull();
+  });
+
   test('a whole snapshot is all-or-nothing and session-addressed', () => {
     const value = {
       v: 1,
