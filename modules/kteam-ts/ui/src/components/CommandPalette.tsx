@@ -1,8 +1,16 @@
 // THE COMMAND PALETTE — Cmd/Ctrl+K, one dialog, mounted once for the app's life.
 //
-// Sessions and Settings share this one search surface. Settings metadata comes
-// from lib/settings.ts, the same catalog the Settings UI maps, so searchable
-// controls cannot drift from the page that owns them.
+// Destinations, sessions and Settings share this one search surface. Settings
+// metadata comes from lib/settings.ts, the same catalog the Settings UI maps, so
+// searchable controls cannot drift from the page that owns them; destinations
+// come from the top bar's own `APP_BAR_DESTINATIONS` through
+// lib/palette-destinations.ts, for exactly the same reason — and every one of
+// them is route-guarded there, so nothing is offered that the router would
+// quietly resolve to somewhere else.
+//
+// On a phone this dialog is the primary navigation surface: the bar has one
+// icon-sized opener, the session route hides the bar entirely, and a pull-down
+// on the dashboard scroller opens this (hooks/usePullToPalette.ts).
 //
 // Four things this file is careful about:
 //
@@ -23,7 +31,7 @@
 //                  dashboard and the transcript exactly nothing.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react';
-import { ArrowDown, ArrowUp, CornerDownLeft, KeyRound, Search, Settings } from 'lucide-react';
+import { ArrowDown, ArrowUp, Compass, CornerDownLeft, KeyRound, Plus, Search, Settings } from 'lucide-react';
 import type { SessionView } from '../types';
 import { navigate } from '../lib/router';
 import { useStore } from '../lib/store';
@@ -42,6 +50,15 @@ import { useInputModality } from '../hooks/useInputModality';
 import { useSttSettings } from '../lib/stt/stt-settings';
 import { dictationShortcutLabel } from '../lib/stt/dictation-shortcut';
 import { actOnBrowserLogin } from '../lib/browser-login';
+// THE BAR'S OWN LIST, not a copy of it — every top-bar destination is searchable
+// here by construction, and one added there needs no edit in this file.
+//
+// This import closes a cycle (AppBar imports the shortcut label and keyshortcut
+// string from here). It is safe ONLY because neither side touches the other at
+// module scope: `APP_BAR_DESTINATIONS` is read inside `paletteDestinations`,
+// which runs during render. Do not hoist it into a module-level constant.
+import { APP_BAR_DESTINATIONS } from './AppBar';
+import { destinationPaletteEntries, type DestinationPaletteEntry } from '../lib/palette-destinations';
 
 /** Stable element ids. The palette is a SINGLETON (App mounts exactly one), so
  *  these are constants rather than `useId()` values — an option id that changed
@@ -51,9 +68,11 @@ const PANEL_ID = 'kt-palette';
 const INPUT_ID = 'kt-palette-input';
 const LISTBOX_ID = 'kt-palette-listbox';
 const COMMANDS_HEADING_ID = 'kt-palette-group-commands';
+const DESTINATIONS_HEADING_ID = 'kt-palette-group-destinations';
 const SETTINGS_HEADING_ID = 'kt-palette-group-settings';
 const SESSIONS_HEADING_ID = 'kt-palette-group-sessions';
 const commandOptionId = (id: string) => `kt-palette-option-command-${id}`;
+const destinationOptionId = (id: string) => `kt-palette-option-${id}`;
 const sessionOptionId = (sessionId: string) => `kt-palette-option-session-${sessionId}`;
 const settingsOptionId = (id: string) => `kt-palette-option-${id}`;
 
@@ -98,12 +117,44 @@ const BROWSER_LOGIN_COMMAND = {
 type PaletteCommand = typeof BROWSER_LOGIN_COMMAND;
 type PaletteResult =
   | { kind: 'command'; entry: PaletteCommand }
+  | { kind: 'destination'; entry: DestinationPaletteEntry }
   | { kind: 'settings'; entry: SettingsPaletteEntry }
   | { kind: 'session'; entry: PaletteSession };
 
 function paletteResultId(result: PaletteResult): string {
-  if (result.kind === 'command') return commandOptionId(result.entry.id);
-  return result.kind === 'settings' ? settingsOptionId(result.entry.id) : sessionOptionId(result.entry.id);
+  switch (result.kind) {
+    case 'command':
+      return commandOptionId(result.entry.id);
+    case 'destination':
+      return destinationOptionId(result.entry.id);
+    case 'settings':
+      return settingsOptionId(result.entry.id);
+    default:
+      return sessionOptionId(result.entry.id);
+  }
+}
+
+/** The searchable destinations, read from the top bar's own list. `taken` is
+ *  every href the Settings group is ALREADY offering, so "settings" cannot
+ *  return two rows that go to the same page. Exported so the destination
+ *  coverage — and the route guard behind it — is assertable directly. */
+export function paletteDestinations(query: string, taken: readonly string[] = []): DestinationPaletteEntry[] {
+  return destinationPaletteEntries(query, APP_BAR_DESTINATIONS, { taken });
+}
+
+/** Where the Settings group is already sending people. A section row lands on
+ *  its own anchor (`/settings#density`), which is a different destination from
+ *  the page itself and does not suppress it. */
+export function settingsDestinationHrefs(entries: readonly SettingsPaletteEntry[]): string[] {
+  return entries.map(entry => entry.href ?? settingsHref(entry.settingId));
+}
+
+/** Icons come from the bar for its own destinations, so the same page is not
+ *  drawn with two different marks in two places. */
+function destinationIcon(id: string) {
+  const barIcon = APP_BAR_DESTINATIONS.find(destination => `destination-${destination.id}` === id)?.Icon;
+  if (barIcon) return barIcon;
+  return id === 'destination-new-session' ? Plus : Compass;
 }
 
 export function matchesBrowserLoginCommand(query: string): boolean {
@@ -214,14 +265,29 @@ export function CommandPalette({
     [query, shortcutLabel],
   );
   const browserLoginCommand = matchesBrowserLoginCommand(query) ? BROWSER_LOGIN_COMMAND : null;
+  // Destinations lead the list. On a phone the palette IS the navigation
+  // surface — the pull-down is its opener and the bar has no room for tabs — so
+  // opening it cold must answer "where can I go" before it answers anything
+  // else.
+  const destinationResults = useMemo(
+    () => paletteDestinations(query, settingsDestinationHrefs(settingsResults)),
+    [query, settingsResults],
+  );
   const results = useMemo<PaletteResult[]>(
     () => [
+      ...destinationResults.map(entry => ({ kind: 'destination' as const, entry })),
       ...(browserLoginCommand ? [{ kind: 'command' as const, entry: browserLoginCommand }] : []),
       ...settingsResults.map(entry => ({ kind: 'settings' as const, entry })),
       ...sessionResults.map(entry => ({ kind: 'session' as const, entry })),
     ],
-    [browserLoginCommand, sessionResults, settingsResults],
+    [browserLoginCommand, destinationResults, sessionResults, settingsResults],
   );
+  // One arithmetic source for the rendered rows: every group's first index is
+  // the running total of the groups above it, so a group appearing or vanishing
+  // cannot leave `aria-activedescendant` pointing at the wrong row.
+  const commandOffset = destinationResults.length;
+  const settingsOffset = commandOffset + (browserLoginCommand ? 1 : 0);
+  const sessionsOffset = settingsOffset + settingsResults.length;
 
   // The active row is DERIVED and clamped rather than corrected in an effect: a
   // streaming fleet can shrink the result list between renders, and an effect
@@ -278,6 +344,11 @@ export function CommandPalette({
       }
       if (result.kind === 'session') {
         navigate(`/session/${encodeURIComponent(result.entry.id)}`);
+        onClose();
+        return;
+      }
+      if (result.kind === 'destination') {
+        navigate(result.entry.href);
         onClose();
         return;
       }
@@ -394,6 +465,22 @@ export function CommandPalette({
             (the transcript); this is an overlay and never nests inside it. */}
         <div className="min-h-0 flex-1 overflow-y-auto scroll-thin px-xs py-xs">
           <div id={LISTBOX_ID} role="listbox" aria-label="Results">
+            {destinationResults.length > 0 && (
+              <div role="group" aria-labelledby={DESTINATIONS_HEADING_ID}>
+                <div id={DESTINATIONS_HEADING_ID} className="kt-label px-cell-x pb-xs pt-xs">
+                  Go to
+                </div>
+                {destinationResults.map((entry, index) => (
+                  <DestinationOption
+                    key={entry.id}
+                    entry={entry}
+                    selected={index === activeIndex}
+                    onActivate={() => run({ kind: 'destination', entry })}
+                    onHover={() => setActive(index)}
+                  />
+                ))}
+              </div>
+            )}
             {browserLoginCommand && (
               <div role="group" aria-labelledby={COMMANDS_HEADING_ID}>
                 <div id={COMMANDS_HEADING_ID} className="kt-label px-cell-x pb-xs pt-xs">
@@ -401,9 +488,9 @@ export function CommandPalette({
                 </div>
                 <CommandOption
                   entry={browserLoginCommand}
-                  selected={activeIndex === 0}
+                  selected={activeIndex === commandOffset}
                   onActivate={() => run({ kind: 'command', entry: browserLoginCommand })}
-                  onHover={() => setActive(0)}
+                  onHover={() => setActive(commandOffset)}
                 />
               </div>
             )}
@@ -413,7 +500,7 @@ export function CommandPalette({
                   {trimmed ? 'Settings' : 'Commands'}
                 </div>
                 {settingsResults.map((entry, index) => {
-                  const resultIndex = (browserLoginCommand ? 1 : 0) + index;
+                  const resultIndex = settingsOffset + index;
                   return (
                     <SettingsOption
                       key={entry.id}
@@ -432,7 +519,7 @@ export function CommandPalette({
                   {trimmed ? 'Sessions' : 'Recent sessions'}
                 </div>
                 {sessionResults.map((entry, index) => {
-                  const resultIndex = (browserLoginCommand ? 1 : 0) + settingsResults.length + index;
+                  const resultIndex = sessionsOffset + index;
                   return (
                     <SessionOption
                       key={entry.id}
@@ -451,8 +538,8 @@ export function CommandPalette({
             <p className="m-0 px-cell-x py-row-y text-cell text-muted">
               {trimmed ? (
                 <>
-                  Nothing matches <span className="mono text-fg-soft">{trimmed}</span>. Try a setting, teammate
-                  callsign, task, project folder, or the start of a session id.
+                  Nothing matches <span className="mono text-fg-soft">{trimmed}</span>. Try a page (analytics, warden,
+                  learning, settings), a setting, teammate callsign, task, project folder, or the start of a session id.
                 </>
               ) : (
                 'No sessions yet.'
@@ -495,6 +582,37 @@ function CommandOption({
       className="kt-navrow min-h-[44px] cursor-pointer items-start"
     >
       <KeyRound size={14} className="mt-0.5 shrink-0 text-warn" aria-hidden="true" />
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="font-semibold text-fg">{entry.label}</span>
+        <span className="truncate text-meta text-muted">{entry.description}</span>
+      </span>
+    </div>
+  );
+}
+
+function DestinationOption({
+  entry,
+  selected,
+  onActivate,
+  onHover,
+}: {
+  entry: DestinationPaletteEntry;
+  selected: boolean;
+  onActivate: () => void;
+  onHover: () => void;
+}) {
+  const Icon = destinationIcon(entry.id);
+  return (
+    <div
+      id={destinationOptionId(entry.id)}
+      role="option"
+      aria-selected={selected}
+      data-active={selected ? 'true' : undefined}
+      onClick={onActivate}
+      onPointerMove={onHover}
+      className="kt-navrow min-h-[44px] cursor-pointer items-start"
+    >
+      <Icon size={14} className="mt-0.5 shrink-0 text-accent" aria-hidden="true" />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="font-semibold text-fg">{entry.label}</span>
         <span className="truncate text-meta text-muted">{entry.description}</span>

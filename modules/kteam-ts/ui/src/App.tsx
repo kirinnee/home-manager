@@ -16,7 +16,8 @@
 // keeping the pane mounted to preserve. visibility:hidden keeps layout, paints
 // nothing, and takes its subtree out of the tab order.
 
-import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
+import { Search } from 'lucide-react';
 import { navigate, useRoute } from './lib/router';
 import { AppBar } from './components/AppBar';
 import { AgentSidebar } from './components/AgentSidebar';
@@ -32,6 +33,7 @@ import { useAppViewport } from './hooks/useAppViewport';
 import { useLayoutMode } from './hooks/useLayoutMode';
 import { useNotificationWatch } from './hooks/useNotifications';
 import { useServiceWorkerUpdate } from './hooks/useServiceWorkerUpdate';
+import { usePullToPalette } from './hooks/usePullToPalette';
 import { useChrome, useStore } from './lib/store';
 import { isSettingId, settingsHref, type SettingId } from './lib/settings';
 import { useBrowserLogin } from './lib/browser-login';
@@ -257,6 +259,19 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey, true);
   }, [openPalette]);
 
+  // PULL DOWN TO OPEN THE PALETTE — phones only.
+  //
+  // Wired here, once, and delegated from `<main>`: the shell keeps several pages
+  // mounted at a time, so per-page listeners would have to know which one is
+  // visible. The gesture only arms inside a scroller that opted in with
+  // `data-pull-to-palette` (the dashboard list), which is what keeps it away
+  // from the transcript, where a pull at the top already means "load older".
+  const mainRef = useRef<HTMLElement | null>(null);
+  const pull = usePullToPalette(mainRef, {
+    enabled: layout === 'drawer' && !palette.open,
+    onOpen: openPalette,
+  });
+
   // Most-recently-visited first; the array IS the LRU. Adjusted DURING render
   // (the supported "derive state from props" pattern) rather than in an effect:
   // an effect would commit one frame in which the route names a session that has
@@ -347,7 +362,22 @@ export function App() {
         {!fullWidthDestination && (
           <AgentSidebar activeId={route.sessionId} drawerOpen={drawerOpen} onCloseDrawer={() => setDrawerOpen(false)} />
         )}
-        <main className="relative min-h-0 min-w-0 flex-1">
+        <main ref={mainRef} className="relative min-h-0 min-w-0 flex-1">
+          {/* The pull indicator overlays the top of the page rather than joining
+              its scroll flow, so a page that has not opted into the gesture
+              (the transcript) never reserves a pixel for it. */}
+          {pull.distance > 0 && (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-center justify-center gap-xs overflow-hidden text-meta text-muted"
+              style={{ height: Math.min(pull.distance * 0.5, 40), opacity: pull.progress }}
+            >
+              <Search size={13} className={cn(pull.armed && 'text-accent')} />
+              <span className={cn(pull.armed && 'text-accent')}>
+                {pull.armed ? 'Release to search everything' : 'Pull to search everything'}
+              </span>
+            </div>
+          )}
           {/* Keep the dashboard behind the same recovery boundary as every
               other pane. Warden owns its own route now, so no Warden polling or
               markdown work remains mounted here. */}
