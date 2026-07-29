@@ -293,6 +293,7 @@ describe('unified browser chrome', () => {
 
     expect(html).toContain('Where to?');
     expect(html).toContain('Nothing opens until you choose where to go');
+    expect(html).toContain('Open browser login window');
     expect(html).toContain('placeholder="URL or DuckDuckGo search"');
     const backTag = html.match(/<button[^>]*aria-label="Back in preview"[^>]*>/)?.[0];
     const forwardTag = html.match(/<button[^>]*aria-label="Forward in preview"[^>]*>/)?.[0];

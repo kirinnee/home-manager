@@ -22,6 +22,7 @@ import { Button } from './Primitives';
 import { browserDestination, InAppBrowserFrame, isLoopbackHostname, type BrowserDestination } from './InAppBrowser';
 import { RemoteBrowserPane, type RemoteBrowserPaneProps } from './RemoteBrowserPane';
 import { remoteBrowserApi, type RemoteBrowserActionResult, type RemoteBrowserStatus } from '../lib/remote-browser';
+import { actOnBrowserLogin } from '../lib/browser-login';
 
 export type BrowserEngine = 'preview' | 'remote';
 
@@ -208,6 +209,7 @@ export function UnifiedBrowserSurface({
   const [remoteStatus, setRemoteStatus] = useState<RemoteBrowserStatus | null>(null);
   const [address, setAddress] = useState(destination?.href ?? '');
   const [busy, setBusy] = useState(false);
+  const [loginBusy, setLoginBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const addressRef = useRef<HTMLInputElement | null>(null);
   const engineRef = useRef(engine);
@@ -336,6 +338,15 @@ export function UnifiedBrowserSurface({
     }
     if (target) setAddress(target.href);
     void runRemote(() => remoteApi.open(sessionId, target?.href));
+  };
+
+  const openBrowserLogin = async () => {
+    setLoginBusy(true);
+    setError(null);
+    const status = await actOnBrowserLogin('start');
+    if (status.state === 'unknown' || status.state === 'error')
+      setError(status.error ?? 'Could not open the browser login window.');
+    setLoginBusy(false);
   };
 
   const remoteChanged = useCallback((location: RemoteLocation) => {
@@ -537,6 +548,18 @@ export function UnifiedBrowserSurface({
             <p className="mb-0 mt-2 text-ui leading-base text-muted">
               Enter a URL or search terms above. Nothing opens until you choose where to go.
             </p>
+            <div className="mt-4 border-t border-border-soft pt-3 text-left">
+              <p className="m-0 text-meta leading-base text-muted">Need to sign in to the shared browser?</p>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={loginBusy}
+                onClick={() => void openBrowserLogin()}
+                className="mt-2 min-h-[44px] w-full justify-center"
+              >
+                {loginBusy ? 'Opening login window…' : 'Open browser login window'}
+              </Button>
+            </div>
           </div>
         </div>
       ) : (
