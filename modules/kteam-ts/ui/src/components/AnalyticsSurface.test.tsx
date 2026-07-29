@@ -39,18 +39,18 @@ describe('session analytics query surface', () => {
   });
 
   test('sends the exact session as a separate server-side boundary', async () => {
-    const original = api.analytics;
+    const original = api.sessionAnalytics;
     const calls: Array<[string | undefined, string | undefined]> = [];
-    api.analytics = ((query?: string, sessionId?: string) => {
-      calls.push([query, sessionId]);
+    api.sessionAnalytics = ((sessionId: string, query?: string) => {
+      calls.push([sessionId, query]);
       return Promise.resolve({} as AnalyticsRawResponse);
-    }) as typeof api.analytics;
+    }) as typeof api.sessionAnalytics;
     try {
       await querySessionAnalytics('session-*', 'sum {id=someone-else}');
     } finally {
-      api.analytics = original;
+      api.sessionAnalytics = original;
     }
-    expect(calls).toEqual([['sum {id==session-*}', 'session-*']]);
+    expect(calls).toEqual([['session-*', 'sum {id==session-*}']]);
   });
 
   test('renders one query-driven section, with no independent summary/tree/comparison panels', () => {

@@ -77,7 +77,7 @@ export function sessionAnalyticsStarterQueries(sessionId: string): AnalyticsStar
  * session separately so the API server replaces the matcher again at its own
  * boundary. The global page omits that parameter and remains fleet-wide. */
 export function querySessionAnalytics(sessionId: string, query?: string): Promise<AnalyticsResponse> {
-  return api.analytics(scopeAnalyticsQuery(query, sessionId), sessionId);
+  return api.sessionAnalytics(sessionId, scopeAnalyticsQuery(query, sessionId));
 }
 
 function rawEquivalentCost(row: AnalyticsRawSession): string {
