@@ -569,6 +569,13 @@ describe('UI to daemon route coverage', () => {
     expect(patterns).toContain('/v1/sessions/*/runtime-models');
   });
 
+  test('the CLI-only direct-notify route is mounted (&F140)', async () => {
+    // `kteam attention notify` has no UI caller, so the static extractor never
+    // sees it; assert its reachability against the assembled router directly.
+    const { dispatch, server } = captureAssembledRouter();
+    expect(await routeIsReachable('/v1/sessions/*/notify', dispatch, server)).toBe(true);
+  });
+
   test('every UI /v1 path reaches the router assembled by daemon-entry', async () => {
     const { dispatch, server } = captureAssembledRouter();
     const unmatched: UiRoute[] = [];

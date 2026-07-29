@@ -60,6 +60,12 @@ class FakeService implements AttentionApiService {
     this.items = this.items.filter(item => item.id !== itemId);
     return this.snapshot();
   }
+
+  async dismiss(id: string, itemId: string): Promise<AttentionSnapshot> {
+    this.calls.push(`dismiss:${id}:${itemId}`);
+    this.items = this.items.filter(item => item.id !== itemId);
+    return this.snapshot();
+  }
 }
 
 describe('routing and scope', () => {
@@ -76,6 +82,14 @@ describe('routing and scope', () => {
   test('warden reads but cannot mutate', () => {
     expect(attentionWardenDenial('GET', `/v1/sessions/${SID}/attention`)).toBeNull();
     expect(attentionWardenDenial('POST', `/v1/sessions/${SID}/attention`)).toBe('change attention items');
+  });
+
+  test('the direct-notify route is POST-only, session-addressed and warden-denied', () => {
+    expect(matchAttentionRoute('POST', `/v1/sessions/${SID}/notify`)).toEqual({ id: SID, kind: 'notify' });
+    expect(matchAttentionRoute('GET', `/v1/sessions/${SID}/notify`)).toBeNull();
+    expect(matchAttentionRoute('POST', '/v1/sessions/..%2Fevil/notify')).toBeNull();
+    expect(attentionWardenDenial('POST', `/v1/sessions/${SID}/notify`)).toBe('send notifications');
+    expect(attentionWardenDenial('GET', `/v1/sessions/${SID}/notify`)).toBe('send notifications');
   });
 
   test('HTTP actor resolution canonicalizes sessions and refuses reserved or unknown refs', async () => {
@@ -122,6 +136,36 @@ describe('body parsing', () => {
     expect(() => parseAttentionActionBody({ action: 'add', source: 'forged' })).toThrow();
     expect(() => parseAttentionActionBody({ action: 'resolve' })).toThrow();
     expect(() => parseAttentionActionBody({ action: 'resolve', id: 'legacy-uuid' })).toThrow();
+  });
+
+  test('parses the four ask kinds on add and structured responses on resolve', () => {
+    expect(
+      parseAttentionActionBody({
+        action: 'add',
+        subject: 'Region?',
+        why: 'w',
+        howToResolve: 'h',
+        ask: { kind: 'multiple-choice', options: [{ label: 'eu' }, { label: 'us' }] },
+      }),
+    ).toMatchObject({ input: { ask: { kind: 'multiple-choice', options: [{ label: 'eu' }, { label: 'us' }] } } });
+    expect(() =>
+      parseAttentionActionBody({ action: 'add', subject: 's', why: 'w', howToResolve: 'h', ask: { kind: 'nope' } }),
+    ).toThrow(/ask must be one of/);
+    expect(
+      parseAttentionActionBody({ action: 'resolve', id: 'A1', response: { kind: 'permission', decision: 'approve' } }),
+    ).toEqual({ action: 'resolve', id: 'A1', response: { kind: 'permission', decision: 'approve' } });
+    expect(() =>
+      parseAttentionActionBody({ action: 'resolve', id: 'A1', response: { kind: 'permission', decision: 'maybe' } }),
+    ).toThrow(/answer shapes/);
+  });
+
+  test('parses dismiss with an optional note', () => {
+    expect(parseAttentionActionBody({ action: 'dismiss', id: '?A2', note: 'stale' })).toEqual({
+      action: 'dismiss',
+      id: 'A2',
+      note: 'stale',
+    });
+    expect(() => parseAttentionActionBody({ action: 'dismiss' })).toThrow();
   });
 });
 
@@ -264,4 +308,56 @@ test('error status mapping', () => {
   expect(attentionErrorStatus('rate-limited')).toBe(429);
   expect(attentionErrorStatus('full')).toBe(409);
   expect(attentionErrorStatus('corrupt')).toBe(409);
+});
+
+describe('dismiss and notify dispatch', () => {
+  test('a dismiss action routes to the dismiss surface, never resolve', async () => {
+    const fake = new FakeService();
+    const api = new AttentionApi(fake);
+    await api.handle({
+      method: 'POST',
+      url: url(`/v1/sessions/${SID}/attention`),
+      body: { action: 'add', subject: 'Need it', why: 'Blocked', howToResolve: 'Reply' },
+      actor: { actor: 'user' },
+    });
+    const response = await api.handle({
+      method: 'POST',
+      url: url(`/v1/sessions/${SID}/attention`),
+      body: { action: 'dismiss', id: '?A1', note: 'stale' },
+      actor: { actor: 'user' },
+    });
+    expect(response?.status).toBe(200);
+    expect(fake.calls).toContain(`dismiss:${SID}:A1`);
+    expect(fake.calls.some(call => call.startsWith('resolve:'))).toBe(false);
+  });
+
+  test('POST notify delivers through the sink with the resolved actor and reports the count', async () => {
+    const sent: string[] = [];
+    const api = new AttentionApi(new FakeService(), undefined, {
+      notifyDirect: async (sessionId, input, actor) => {
+        sent.push(`${sessionId}:${input.body}:${actor.actor}`);
+        return { delivered: 2 };
+      },
+    });
+    const response = await api.handle({
+      method: 'POST',
+      url: url(`/v1/sessions/${SID}/notify`),
+      body: { body: 'Build green', title: 'CI' },
+      actor: { actor: SID },
+    });
+    expect(response).toEqual({ status: 200, body: { sessionId: SID, delivered: 2 } });
+    expect(sent).toEqual([`${SID}:Build green:${SID}`]);
+  });
+
+  test('notify without a sink is refused; malformed notify bodies map to 400', async () => {
+    const bare = new AttentionApi(new FakeService());
+    expect(
+      (await bare.handle({ method: 'POST', url: url(`/v1/sessions/${SID}/notify`), body: { body: 'x' } }))?.status,
+    ).toBe(403);
+    const api = new AttentionApi(new FakeService(), undefined, {
+      notifyDirect: async () => ({ delivered: 0 }),
+    });
+    expect((await api.handle({ method: 'POST', url: url(`/v1/sessions/${SID}/notify`), body: {} }))?.status).toBe(400);
+    expect(await api.handle({ method: 'GET', url: url(`/v1/sessions/${SID}/notify`) })).toBeNull();
+  });
 });

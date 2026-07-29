@@ -224,3 +224,47 @@ describe('PushNotifier', () => {
     expect(h.logs.join('\n')).not.toContain('Diene Exec');
   });
 });
+
+describe('deliverDirect (&F140 attention/notify path)', () => {
+  const payload = (kind: 'attention' | 'completed' | undefined, eventKey = 'attention:s1:A1') => ({
+    version: 1 as const,
+    eventKey,
+    title: 'noel',
+    body: 'Unblock task #F31',
+    tag: 'kteam-s1',
+    url: '/session/s1',
+    count: 1,
+    sessionId: 's1',
+    ...(kind === undefined ? {} : { kind }),
+  });
+
+  test('filters by device preference and returns the delivered count', async () => {
+    const wantsNothing = device({
+      id: 'push-00000000-0000-4000-8000-000000000001',
+      prefs: { events: { attention: false, question: false, failed: false, completed: false }, interactiveOnly: false },
+    });
+    const h = await notifierHarness([device(), wantsNothing]);
+    h.sender.result.delivered = 1;
+    const delivered = await h.notifier.deliverDirect([{ payload: payload('attention'), mode: 'auto' }]);
+    expect(delivered).toBe(1);
+    expect(h.sender.deliveries).toHaveLength(1);
+    expect(h.sender.deliveries[0]!.device.id).toBe(device().id);
+  });
+
+  test('interactiveOnly devices skip auto sessions and a kindless payload never sends', async () => {
+    const interactiveOnly = device({ prefs: { ...structuredClone(DEFAULT_PUSH_PREFERENCES), interactiveOnly: true } });
+    const h = await notifierHarness([interactiveOnly]);
+    expect(await h.notifier.deliverDirect([{ payload: payload('attention'), mode: 'auto' }])).toBe(0);
+    expect(await h.notifier.deliverDirect([{ payload: payload(undefined), mode: 'interactive' }])).toBe(0);
+    h.sender.result.delivered = 1;
+    expect(await h.notifier.deliverDirect([{ payload: payload('attention'), mode: 'interactive' }])).toBe(1);
+  });
+
+  test('expired devices are pruned through the shared store path', async () => {
+    const h = await notifierHarness();
+    h.sender.result.expiredDeviceRevisions = new Map([[device().id, 1]]);
+    await h.notifier.deliverDirect([{ payload: payload('completed'), mode: 'auto' }]);
+    expect(h.removed).toHaveLength(1);
+    expect(h.removed[0]!.get(device().id)).toBe(1);
+  });
+});

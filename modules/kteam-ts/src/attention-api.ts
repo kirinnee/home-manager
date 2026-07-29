@@ -6,14 +6,19 @@ import {
   ATTENTION_SOURCES,
   AttentionError,
   isAttentionError,
+  parseAttentionAsk,
   parseAttentionId,
+  parseAttentionResponse,
   type AttentionActor,
+  type AttentionAsk,
   type AttentionId,
+  type AttentionResponse,
   type AttentionSnapshot,
   type AttentionSource,
 } from './attention-types';
 import { isSafeAttentionSessionId } from './attention-store';
 import type { AddAttentionInput } from './attention-service';
+import { parseDirectNotificationBody, type DirectNotificationInput } from './attention-notifier';
 
 export interface AttentionApiService {
   list(sessionId: string): Promise<AttentionSnapshot>;
@@ -24,8 +29,25 @@ export interface AttentionApiService {
     id: string,
     note: string | null | undefined,
     actor: AttentionActor,
+    response?: AttentionResponse,
+  ): Promise<AttentionSnapshot>;
+  dismiss(
+    sessionId: string,
+    id: string,
+    note: string | null | undefined,
+    actor: AttentionActor,
   ): Promise<AttentionSnapshot>;
   subscribe?(listener: (event: import('./types').KTeamEvent) => void): () => void;
+}
+
+/** Direct notification sink (&F140). A notification is NOT an attention item:
+ * nothing durable is written and nothing needs resolution. */
+export interface AttentionNotifySink {
+  notifyDirect(
+    sessionId: string,
+    input: DirectNotificationInput,
+    actor: AttentionActor,
+  ): Promise<{ delivered: number }>;
 }
 
 export interface AttentionActorLookup {
@@ -59,12 +81,17 @@ export async function resolveAttentionApiActor(
   return { actor: view.config.id, actorName };
 }
 
-export type AttentionRoute = { id: string; kind: 'read' | 'write' };
+export type AttentionRoute = { id: string; kind: 'read' | 'write' | 'notify' };
 
 export const isAttentionPath = (pathname: string): boolean => /^\/v1\/sessions\/[^/]+\/attention\/?$/.test(pathname);
 
-export function matchAttentionRoute(method: string, pathname: string): AttentionRoute | null {
-  const match = pathname.match(/^\/v1\/sessions\/([^/]+)\/attention\/?$/);
+/** Direct notification route. Kept beside attention because it shares the
+ * actor model and rate limiting, but it is deliberately NOT the attention
+ * collection: a POST here presents a push notification and records nothing. */
+export const isAttentionNotifyPath = (pathname: string): boolean => /^\/v1\/sessions\/[^/]+\/notify\/?$/.test(pathname);
+
+function sessionIdFromPath(pathname: string, suffix: 'attention' | 'notify'): string | null {
+  const match = pathname.match(new RegExp(`^\\/v1\\/sessions\\/([^/]+)\\/${suffix}\\/?$`));
   if (!match) return null;
   let id: string;
   try {
@@ -72,15 +99,26 @@ export function matchAttentionRoute(method: string, pathname: string): Attention
   } catch {
     return null;
   }
-  if (!isSafeAttentionSessionId(id)) return null;
-  if (method === 'GET') return { id, kind: 'read' };
-  if (method === 'POST') return { id, kind: 'write' };
+  return isSafeAttentionSessionId(id) ? id : null;
+}
+
+export function matchAttentionRoute(method: string, pathname: string): AttentionRoute | null {
+  const attentionId = sessionIdFromPath(pathname, 'attention');
+  if (attentionId !== null) {
+    if (method === 'GET') return { id: attentionId, kind: 'read' };
+    if (method === 'POST') return { id: attentionId, kind: 'write' };
+    return null;
+  }
+  const notifyId = sessionIdFromPath(pathname, 'notify');
+  if (notifyId !== null && method === 'POST') return { id: notifyId, kind: 'notify' };
   return null;
 }
 
 /** Warden capability tokens may inspect the board, but mutations remain on the
- * authenticated admin/agent path exactly like pins. */
+ * authenticated admin/agent path exactly like pins. Notifications have no
+ * warden form at all. */
 export function attentionWardenDenial(method: string, pathname: string): string | null {
+  if (isAttentionNotifyPath(pathname)) return 'send notifications';
   if (!isAttentionPath(pathname)) return null;
   return method === 'GET' ? null : 'change attention items';
 }
@@ -112,7 +150,8 @@ export function attentionErrorBody(error: AttentionError): { error: string; code
 
 export type AttentionAction =
   | { action: 'add'; input: AddAttentionInput }
-  | { action: 'resolve'; id: string; note?: string };
+  | { action: 'resolve'; id: string; note?: string; response?: AttentionResponse }
+  | { action: 'dismiss'; id: string; note?: string };
 
 const object = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -133,6 +172,17 @@ export function parseAttentionActionBody(value: unknown): AttentionAction {
       if (source !== undefined && !(ATTENTION_SOURCES as readonly unknown[]).includes(source)) {
         throw new AttentionError('invalid', `source must be one of ${ATTENTION_SOURCES.join(', ')}`);
       }
+      let ask: AttentionAsk | undefined;
+      if (raw['ask'] !== undefined) {
+        const parsed = parseAttentionAsk(raw['ask']);
+        if (parsed === null) {
+          throw new AttentionError(
+            'invalid',
+            'ask must be one of permission, multiple-choice (2+ distinct bounded options), answer-review, open-question',
+          );
+        }
+        ask = parsed;
+      }
       return {
         action: 'add',
         input: {
@@ -146,19 +196,36 @@ export function parseAttentionActionBody(value: unknown): AttentionAction {
           why: optionalString(raw['why']),
           ...(optionalString(raw['context']) ? { context: optionalString(raw['context']) } : {}),
           howToResolve: optionalString(raw['howToResolve']),
+          ...(ask === undefined ? {} : { ask }),
           ...(optionalString(raw['waitingSince']) ? { waitingSince: optionalString(raw['waitingSince']) } : {}),
         },
       };
     }
     case 'resolve':
-    case 'done':
+    case 'done': {
+      let response: AttentionResponse | undefined;
+      if (raw['response'] !== undefined) {
+        const parsed = parseAttentionResponse(raw['response']);
+        if (parsed === null) {
+          throw new AttentionError('invalid', 'response does not match any of the four attention answer shapes');
+        }
+        response = parsed;
+      }
       return {
         action: 'resolve',
         id: id(raw['id']),
         ...(optionalString(raw['note']) ? { note: optionalString(raw['note']) } : {}),
+        ...(response === undefined ? {} : { response }),
+      };
+    }
+    case 'dismiss':
+      return {
+        action: 'dismiss',
+        id: id(raw['id']),
+        ...(optionalString(raw['note']) ? { note: optionalString(raw['note']) } : {}),
       };
     default:
-      throw new AttentionError('invalid', "body needs action: 'add' | 'resolve'");
+      throw new AttentionError('invalid', "body needs action: 'add' | 'resolve' | 'dismiss'");
   }
 }
 
@@ -244,6 +311,7 @@ export class AttentionApi {
   constructor(
     private readonly service: AttentionApiService,
     private readonly actorLookup?: AttentionActorLookup,
+    private readonly notifySink?: AttentionNotifySink,
   ) {}
 
   subscribe(listener: (event: import('./types').KTeamEvent) => void): () => void {
@@ -260,7 +328,6 @@ export class AttentionApi {
         }
         return { status: 200, body: await this.service.list(route.id) };
       }
-      const action = parseAttentionActionBody(request.body);
       let resolvedActor = request.actor ?? {};
       if (request.actor === undefined && request.actorSource !== undefined) {
         if (this.actorLookup === undefined) {
@@ -269,6 +336,20 @@ export class AttentionApi {
         resolvedActor = await resolveAttentionApiActor(this.actorLookup, request.actorSource);
       }
       const key = `${route.id}\n${request.requestId ?? ''}\n${Bun.hash(canonicalJson(request.body)).toString(16)}`;
+      if (route.kind === 'notify') {
+        const input = parseDirectNotificationBody(request.body);
+        return await this.once(request.requestId, key, async () => {
+          if (this.notifySink === undefined) {
+            throw new AttentionError('forbidden', 'direct notifications are unavailable on this daemon');
+          }
+          if (!this.limiter.take(route.id, at)) {
+            throw new AttentionError('rate-limited', 'too many notifications for this session; slow down');
+          }
+          const result = await this.notifySink.notifyDirect(route.id, input, resolvedActor);
+          return { status: 200, body: { sessionId: route.id, delivered: result.delivered } };
+        });
+      }
+      const action = parseAttentionActionBody(request.body);
       return await this.once(request.requestId, key, async () => {
         if (!this.limiter.take(route.id, at)) {
           throw new AttentionError('rate-limited', 'too many attention writes for this session; slow down');
@@ -278,7 +359,9 @@ export class AttentionApi {
           body:
             action.action === 'add'
               ? await this.service.add(route.id, action.input, resolvedActor)
-              : await this.service.resolve(route.id, action.id, action.note, resolvedActor),
+              : action.action === 'dismiss'
+                ? await this.service.dismiss(route.id, action.id, action.note, resolvedActor)
+                : await this.service.resolve(route.id, action.id, action.note, resolvedActor, action.response),
         };
       });
     } catch (error) {

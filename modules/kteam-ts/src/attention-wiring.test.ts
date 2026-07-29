@@ -103,11 +103,15 @@ test('the production daemon owns the Attention service, sources, API, and lifecy
   const source = await Bun.file(new URL('./daemon-entry.ts', import.meta.url)).text();
   for (const required of [
     'new AttentionService(paths, attentionSessions)',
-    'new AttentionApi(attentionService, manager)',
+    'new AttentionApi(attentionService, manager, {',
     'new AttentionSources(attentionService, manager, taskService)',
     'attention: attentionApi',
     'await attentionSources.start()',
     'attentionSources.close()',
+    // &F140: new items push through the notifier; direct notify is mounted.
+    'new AttentionNotifier(manager, pushService)',
+    'attentionNotifier?.notifyNewItem(sessionId, item)',
+    'attentionNotifier.notifyDirect(sessionId, input, actor)',
   ]) {
     expect(source).toContain(required);
   }

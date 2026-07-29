@@ -46,3 +46,11 @@ export {
 } from './attention-cli';
 export { AttentionSources, type AttentionSessionSource, type AttentionTaskSource } from './attention-sources';
 export { notificationPolicyForAttention, notificationCreatesAttention } from './notification-policy';
+export {
+  AttentionNotifier,
+  parseDirectNotificationBody,
+  DIRECT_NOTIFICATION_KINDS,
+  type AttentionPushDelivery,
+  type DirectNotificationInput,
+  type DirectNotificationKind,
+} from './attention-notifier';

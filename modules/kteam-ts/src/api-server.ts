@@ -19,7 +19,7 @@ import { resolveTaskActor, taskApiRequestFrom } from './tasks-api';
 import type { PinApi } from './pins-api';
 import { isPinPath, pinWardenDenial } from './pins-api';
 import type { AttentionApi } from './attention-api';
-import { isAttentionPath, attentionWardenDenial } from './attention-api';
+import { isAttentionNotifyPath, isAttentionPath, attentionWardenDenial } from './attention-api';
 import type { PushApi } from './push-api';
 import { isPushPath, pushWardenDenial } from './push-api';
 import { isTaskPath, taskWardenDenial } from './tasks-contract';
@@ -863,7 +863,7 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
 
           // MUST precede the generic session match, exactly like pins/tasks.
           // Provenance comes from authenticated actor context, never the body.
-          if (options.attention && isAttentionPath(url.pathname)) {
+          if (options.attention && (isAttentionPath(url.pathname) || isAttentionNotifyPath(url.pathname))) {
             const attentionResponse = await options.attention.handle({
               method: request.method,
               url,

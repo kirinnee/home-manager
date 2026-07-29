@@ -18,8 +18,11 @@ import {
   ATTENTION_SCHEMA_VERSION,
   ATTENTION_SOURCES,
   AttentionError,
+  attentionResponseMatchesAsk,
   emptyAttentionSnapshot,
+  parseAttentionAsk,
   parseAttentionId,
+  parseAttentionResponse,
   taskIdFromReopenedAttentionSourceRef,
   type AttentionBy,
   type AttentionItem,
@@ -143,6 +146,7 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
   const context = optionalText(raw['context'], MAX_ATTENTION_DETAIL_LEN);
   const waitingSince = iso(raw['waitingSince']);
   const howToResolve = requiredText(raw['howToResolve'], MAX_ATTENTION_DETAIL_LEN);
+  const ask = raw['ask'] === undefined ? undefined : parseAttentionAsk(raw['ask']);
   const raisedBy = raw['raisedBy'];
   const raisedBySession = optionalText(raw['raisedBySession'], 128);
   const raisedByName = optionalText(raw['raisedByName'], 128);
@@ -156,6 +160,7 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
     context === undefined ||
     waitingSince === null ||
     howToResolve === null ||
+    ask === null ||
     !isBy(raisedBy) ||
     raisedBySession === undefined ||
     raisedByName === undefined
@@ -174,6 +179,7 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
     ...(context === null ? {} : { context }),
     waitingSince,
     howToResolve,
+    ...(ask === undefined ? {} : { ask }),
     raisedBy,
     raisedBySession,
     raisedByName,
@@ -189,18 +195,32 @@ export function parseResolvedAttentionItem(value: unknown): ResolvedAttentionIte
   const resolvedBySession = optionalText(raw['resolvedBySession'], 128);
   const resolvedByName = optionalText(raw['resolvedByName'], 128);
   const resolutionNote = optionalText(raw['resolutionNote'], MAX_ATTENTION_DETAIL_LEN);
+  const response = raw['response'] === undefined ? undefined : parseAttentionResponse(raw['response']);
+  const disposition = raw['disposition'];
   if (
     resolvedAt === null ||
     !isBy(resolvedBy) ||
     resolvedBySession === undefined ||
     resolvedByName === undefined ||
-    resolutionNote === undefined
+    resolutionNote === undefined ||
+    response === null ||
+    (response !== undefined && !attentionResponseMatchesAsk(item.ask, response)) ||
+    (disposition !== undefined && disposition !== 'done' && disposition !== 'dismissed')
   ) {
     return null;
   }
   if (resolvedBy === 'agent' && resolvedBySession === null) return null;
   if (resolvedBy !== 'agent' && resolvedBySession !== null) return null;
-  return { ...item, resolvedAt, resolvedBy, resolvedBySession, resolvedByName, resolutionNote };
+  return {
+    ...item,
+    resolvedAt,
+    resolvedBy,
+    resolvedBySession,
+    resolvedByName,
+    resolutionNote,
+    ...(response === undefined ? {} : { response }),
+    ...(disposition === undefined ? {} : { disposition }),
+  };
 }
 
 const idNumber = (item: AttentionItem): number => Number(item.id.slice(1));
@@ -310,6 +330,7 @@ export function serializeAttentionItem(item: AttentionItem): AttentionItem {
     ...(item.context === null || item.context === undefined ? {} : { context: item.context }),
     waitingSince: item.waitingSince,
     howToResolve: item.howToResolve,
+    ...(item.ask === undefined ? {} : { ask: structuredClone(item.ask) }),
     raisedBy: item.raisedBy,
     raisedBySession: item.raisedBySession,
     raisedByName: item.raisedByName,
@@ -324,6 +345,8 @@ export function serializeResolvedAttentionItem(item: ResolvedAttentionItem): Res
     resolvedBySession: item.resolvedBySession,
     resolvedByName: item.resolvedByName,
     resolutionNote: item.resolutionNote,
+    ...(item.response === undefined ? {} : { response: structuredClone(item.response) }),
+    ...(item.disposition === undefined ? {} : { disposition: item.disposition }),
   };
 }
 

@@ -263,3 +263,88 @@ test('serializeAttentionFile derives count from items', () => {
   });
   expect(file.count).toBe(1);
 });
+
+describe('ask, response and disposition persistence (&F138/&F139)', () => {
+  const CHOICE = {
+    kind: 'multiple-choice' as const,
+    options: [{ label: 'eu' }, { label: 'us', description: 'US east' }],
+  };
+
+  test('a valid ask round-trips; a malformed ask is a parse error, not a silent drop', () => {
+    expect(parseAttentionItem({ ...item(), ask: CHOICE })?.ask).toEqual(CHOICE);
+    expect(parseAttentionItem({ ...item(), ask: { kind: 'permission' } })?.ask).toEqual({ kind: 'permission' });
+    expect(parseAttentionItem(item())?.ask).toBeUndefined();
+    expect(parseAttentionItem({ ...item(), ask: { kind: 'multiple-choice', options: [] } })).toBeNull();
+    expect(parseAttentionItem({ ...item(), ask: { kind: 'nope' } })).toBeNull();
+    // Duplicate option labels are one ambiguous answer — refused.
+    expect(
+      parseAttentionItem({ ...item(), ask: { kind: 'multiple-choice', options: [{ label: 'eu' }, { label: 'eu' }] } }),
+    ).toBeNull();
+  });
+
+  test('a resolved row keeps its response and disposition, and both persist through the store', async () => {
+    const store = new AttentionStore(paths, { role: 'daemon' });
+    await store.mutate(SID, current => ({
+      ...current,
+      nextId: 3,
+      items: [],
+      resolved: [
+        {
+          ...item({ id: 'A1' }),
+          ask: { kind: 'permission' as const },
+          resolvedAt: '2026-07-29T01:00:00.000Z',
+          resolvedBy: 'human' as const,
+          resolvedBySession: null,
+          resolvedByName: null,
+          resolutionNote: null,
+          response: { kind: 'permission' as const, decision: 'approve' as const },
+          disposition: 'done' as const,
+        },
+        {
+          ...item({ id: 'A2' }),
+          resolvedAt: '2026-07-29T02:00:00.000Z',
+          resolvedBy: 'agent' as const,
+          resolvedBySession: SID,
+          resolvedByName: 'zoe',
+          resolutionNote: 'stale',
+          disposition: 'dismissed' as const,
+        },
+      ],
+    }));
+    const snapshot = await store.snapshot(SID);
+    expect(snapshot.parseErrors).toBe(0);
+    const approved = snapshot.resolved.find(entry => entry.id === 'A1');
+    const dismissed = snapshot.resolved.find(entry => entry.id === 'A2');
+    expect(approved).toMatchObject({ response: { kind: 'permission', decision: 'approve' }, disposition: 'done' });
+    expect(dismissed).toMatchObject({ disposition: 'dismissed', resolvedByName: 'zoe' });
+  });
+
+  test('a response that does not fit the row ask is refused at parse time', () => {
+    const resolved = {
+      ...item({ id: 'A1' }),
+      ask: CHOICE,
+      resolvedAt: '2026-07-29T01:00:00.000Z',
+      resolvedBy: 'human' as const,
+      resolvedBySession: null,
+      resolvedByName: null,
+      resolutionNote: null,
+    };
+    const parse = (value: unknown) =>
+      parseAttentionFile(
+        JSON.stringify({
+          v: ATTENTION_SCHEMA_VERSION,
+          sessionId: SID,
+          nextId: 2,
+          items: [],
+          resolved: [value],
+          count: 0,
+          updatedAt: '2026-07-29T01:00:00.000Z',
+        }),
+        SID,
+      );
+    expect(parse({ ...resolved, response: { kind: 'multiple-choice', choice: 'eu' } }).parseErrors).toBe(0);
+    expect(parse({ ...resolved, response: { kind: 'multiple-choice', choice: 'mars' } }).parseErrors).toBe(1);
+    expect(parse({ ...resolved, response: { kind: 'permission', decision: 'approve' } }).parseErrors).toBe(1);
+    expect(parse({ ...resolved, disposition: 'shrugged' }).parseErrors).toBe(1);
+  });
+});

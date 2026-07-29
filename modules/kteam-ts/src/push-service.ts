@@ -3,9 +3,10 @@ import { PushApi } from './push-api';
 import { PushNotifier } from './push-notifier';
 import { PushSender } from './push-sender';
 import { PushSubscriptionStore, pushSubscriptionFile } from './push-subscriptions';
-import type { RegisterPushDeviceInput } from './push-types';
+import type { PushNotificationPayload, RegisterPushDeviceInput } from './push-types';
 import { VapidKeyStore, vapidKeyFile } from './push-vapid';
 import type { KTeamService } from './service';
+import type { InteractionMode } from './types';
 
 /** Production composition root kept out of daemon-entry.ts. The daemon patch
  * constructs this once, passes `api` to startApiServer, and includes close() in
@@ -35,6 +36,11 @@ export class PushService {
     const service = new PushService(paths, sessions);
     await service.notifier.start();
     return service;
+  }
+
+  /** Preference-filtered direct delivery for the attention/notify path. */
+  deliverDirect(items: readonly { payload: PushNotificationPayload; mode: InteractionMode }[]): Promise<number> {
+    return this.notifier.deliverDirect(items);
   }
 
   close(): Promise<void> {

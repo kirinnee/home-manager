@@ -1,7 +1,8 @@
-// Source adapter for the four durable attention classes. It listens to the
-// existing session/task streams and calls AttentionService; it never presents an
-// OS notification. Question/permission notifications continue through the
-// canonical session-status path (see notification-policy.ts).
+// Source adapter for the durable attention sources. It listens to the existing
+// session/task streams and calls AttentionService; it never presents an OS
+// notification. Question notifications continue through the canonical
+// session-status path; other new items push via the attention path itself
+// (see notification-policy.ts and attention-notifier.ts).
 
 import type { SessionView } from './service';
 import type { KTeamEvent, PendingQuestion } from './types';
@@ -185,14 +186,6 @@ function questionInput(question: PendingQuestion, waitingSince: string): AddAtte
   };
 }
 
-const refFrom = (raw: Record<string, unknown>): string | null => {
-  for (const key of ['toolUseId', 'requestId', 'permissionId']) {
-    const value = raw[key];
-    if (typeof value === 'string' && value) return value;
-  }
-  return null;
-};
-
 const textFrom = (raw: Record<string, unknown>, keys: readonly string[]): string | null => {
   for (const key of keys) {
     const value = raw[key];
@@ -201,23 +194,10 @@ const textFrom = (raw: Record<string, unknown>, keys: readonly string[]): string
   return null;
 };
 
-// UNIMPLEMENTED PRODUCER: the current daemon emits none of these permission
-// events. This allowlist is only the receiving contract, covered by synthetic
-// tests; permission attention will not appear until a producer is wired. Keep
-// it explicit so an unrelated regex-matching event cannot add or clear an item.
-const PERMISSION_OPEN_EVENTS = new Set([
-  'interaction.permission_requested',
-  'interaction.permission_prompted',
-  'interaction.permission_awaiting',
-]);
-
-const PERMISSION_RESOLVED_EVENTS = new Set([
-  'interaction.permission_granted',
-  'interaction.permission_denied',
-  'interaction.permission_answered',
-  'interaction.permission_resolved',
-  'interaction.permission_cancelled',
-]);
+// The old `permission` source and its speculative interaction.permission_*
+// receiving contract are gone: the daemon never produced those events, so the
+// declaration was dead. Permission asks are now `ask.kind: 'permission'` on
+// agent-raised items, produced by the `kteam attention` CLI (&F138).
 
 const PROVIDER_ATTENTION_PREFIX = 'provider-unavailable:';
 
@@ -253,8 +233,8 @@ async function forEachConcurrent<T>(
 /** Coordinates durable sources. Startup baselines create missing records and
  * reconcile explicit task/question actions that happened while kteamd was
  * down. Live explicit actions (task moved out of blocked, question
- * answered/abandoned, permission granted/denied) record a resolver; generic
- * status drift never clears the board. */
+ * answered/abandoned) record a resolver; generic status drift never clears
+ * the board. */
 export class AttentionSources {
   private readonly blocked = new Map<string, Set<string>>();
   /** Stable provider source-ref → per-session board anchor. */
@@ -509,33 +489,6 @@ export class AttentionSources {
           : 'Question answered.',
         eventActor(event),
       );
-      return;
-    }
-
-    const permissionRef = refFrom(raw);
-    if (permissionRef && PERMISSION_RESOLVED_EVENTS.has(event.type)) {
-      await this.attention.resolveFromSource(
-        event.sessionId,
-        'permission',
-        permissionRef,
-        `Permission prompt resolved by ${event.type}.`,
-        eventActor(event),
-      );
-      return;
-    }
-    if (permissionRef && PERMISSION_OPEN_EVENTS.has(event.type)) {
-      await this.attention.addFromSource(event.sessionId, {
-        source: 'permission',
-        sourceRef: permissionRef,
-        subject: subjectLine(
-          textFrom(raw, ['subject', 'permission', 'message']) ?? 'Approve or deny a waiting permission prompt',
-        ),
-        why: textFrom(raw, ['why', 'reason']) ?? 'The session cannot continue without this permission decision.',
-        context:
-          'The agent hit an action it is not allowed to take on its own and is **paused** until someone decides.',
-        waitingSince: event.time,
-        howToResolve: '- Open the session and approve or deny the prompt.\n- This item clears itself once decided.',
-      });
       return;
     }
 

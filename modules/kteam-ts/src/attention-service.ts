@@ -18,12 +18,18 @@ import {
   MAX_ATTENTION_SUBJECT_LEN,
   ATTENTION_SOURCES,
   AttentionError,
+  attentionResponseMatchesAsk,
+  parseAttentionAsk,
   parseAttentionId,
+  parseAttentionResponse,
   taskIdFromReopenedAttentionSourceRef,
+  type AttentionAsk,
+  type AttentionDisposition,
   type AttentionId,
   type AttentionActor,
   type AttentionBy,
   type AttentionItem,
+  type AttentionResponse,
   type AttentionSnapshot,
   type AttentionSource,
   type ResolvedAttentionItem,
@@ -38,6 +44,10 @@ export interface AttentionDeps {
    * daemon wires TaskService so resolution can persist the displayed reopen
    * generation before the Attention item is moved to audit history. */
   ackReopen?(sessionId: string, taskId: string, seq: number, actor: AttentionActor, note?: string): Promise<void>;
+  /** Fired after a mutation genuinely CREATES an item (dedupes and in-place
+   * refreshes stay silent). The daemon wires the web-push notifier here; a
+   * listener failure never rolls the durable write back. */
+  notifyNewItem?(sessionId: string, item: AttentionItem): void;
 }
 
 export interface AddAttentionInput {
@@ -55,6 +65,8 @@ export interface AddAttentionInput {
   context?: string | null;
   /** The concrete action that resolves it, short point form. Markdown. */
   howToResolve?: string;
+  /** What the human is asked to do, with its answer options structural. */
+  ask?: AttentionAsk;
   /** Honoured only for the daemon's source adapters. Client adds are stamped
    * at receipt so an agent cannot backdate itself to the top of the list. */
   waitingSince?: string;
@@ -115,6 +127,11 @@ const sameText = (a: string, b: string): boolean => a.trim() === b.trim();
 
 const sameOptionalText = (a: string | null | undefined, b: string | null | undefined): boolean =>
   (a ?? '').trim() === (b ?? '').trim();
+
+/** Asks are canonical after parseAttentionAsk, so structural JSON equality is
+ * exact: same kind, same options, same order. */
+const sameAsk = (a: AttentionAsk | undefined, b: AttentionAsk | undefined): boolean =>
+  JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
 export class AttentionService {
   private readonly store: AttentionStore;
@@ -187,6 +204,13 @@ export class AttentionService {
     const why = requiredText(input.why, 'why', MAX_ATTENTION_DETAIL_LEN);
     const context = optionalText(input.context, 'context', MAX_ATTENTION_DETAIL_LEN);
     const howToResolve = requiredText(input.howToResolve, 'howToResolve', MAX_ATTENTION_DETAIL_LEN);
+    const ask = input.ask === undefined ? undefined : parseAttentionAsk(input.ask);
+    if (ask === null) {
+      throw new AttentionError(
+        'invalid',
+        'ask must be one of permission, multiple-choice (2+ distinct bounded options), answer-review, open-question',
+      );
+    }
     const sourceRef = optionalText(input.sourceRef, 'sourceRef', MAX_ATTENTION_SOURCE_REF_LEN);
     const reopenedTaskId = taskIdFromReopenedAttentionSourceRef(sourceRef);
     if (reopenedTaskId !== null && provenance.by !== 'daemon') {
@@ -209,11 +233,13 @@ export class AttentionService {
       ...(context === null ? {} : { context }),
       waitingSince,
       howToResolve,
+      ...(ask === undefined ? {} : { ask }),
       raisedBy: provenance.by,
       raisedBySession: provenance.session,
       raisedByName: provenance.name,
     };
 
+    let createdId: AttentionId | null = null;
     const mutation = await this.store.mutateWithResult(sessionId, current => {
       if (sourceRef !== null) {
         const existing = current.items.find(item => item.source === source && item.sourceRef === sourceRef);
@@ -232,6 +258,7 @@ export class AttentionService {
             sameText(existing.why, why) &&
             sameOptionalText(existing.context, context) &&
             sameText(existing.howToResolve, howToResolve) &&
+            sameAsk(existing.ask, ask) &&
             (reopenedTaskId === null || existing.sourceSeq === sourceSeq)
           ) {
             return current;
@@ -243,13 +270,14 @@ export class AttentionService {
             ...current,
             items: current.items.map(item => {
               if (item.id !== existing.id) return item;
-              const { context: _dropped, ...withoutContext } = item;
+              const { context: _dropped, ask: _droppedAsk, ...withoutContext } = item;
               return {
                 ...withoutContext,
                 subject,
                 why,
                 ...(context === null ? {} : { context }),
                 howToResolve,
+                ...(ask === undefined ? {} : { ask }),
                 ...(sourceSeq === undefined ? {} : { sourceSeq }),
               };
             }),
@@ -283,19 +311,31 @@ export class AttentionService {
           sameText(existing.subject, subject) &&
           sameText(existing.why, why) &&
           sameOptionalText(existing.context, context) &&
-          sameText(existing.howToResolve, howToResolve),
+          sameText(existing.howToResolve, howToResolve) &&
+          sameAsk(existing.ask, ask),
       );
       if (duplicate) return current;
       if (current.nextId >= Number.MAX_SAFE_INTEGER) {
         throw new AttentionError('full', 'this session has exhausted its attention id sequence');
       }
       const id = `A${current.nextId}` as AttentionId;
+      createdId = id;
       return {
         ...current,
         nextId: current.nextId + 1,
         items: [...current.items, { id, ...itemWithoutId }],
       };
     });
+    if (mutation.changed && createdId !== null && this.deps.notifyNewItem !== undefined) {
+      const created = mutation.snapshot.items.find(item => item.id === createdId);
+      if (created !== undefined) {
+        try {
+          this.deps.notifyNewItem(sessionId, created);
+        } catch {
+          // Notification is convergence only; it never rolls the write back.
+        }
+      }
+    }
     return this.finishMutation(mutation, provenance);
   }
 
@@ -310,11 +350,16 @@ export class AttentionService {
     id: string,
     note: string | null | undefined,
     actor: AttentionActor,
+    response?: AttentionResponse,
   ): Promise<AttentionSnapshot> {
     const authorized = await this.authorize(sessionId, actor);
     const canonical = parseAttentionId(id);
     if (canonical === null) throw new AttentionError('invalid', 'attention id must look like A3 or !A3');
     const resolutionNote = optionalText(note, 'resolution note', MAX_ATTENTION_DETAIL_LEN);
+    const parsedResponse = response === undefined ? undefined : parseAttentionResponse(response);
+    if (parsedResponse === null) {
+      throw new AttentionError('invalid', 'response does not match any of the four attention answer shapes');
+    }
     const mutation = await this.store.mutateWithResult(authorized.session.id, async current => {
       const target = current.items.find(item => item.id === canonical);
       // A retried resolve is idempotent and may not overwrite the original
@@ -322,6 +367,14 @@ export class AttentionService {
       if (target === undefined) {
         if (current.resolved.some(item => item.id === canonical)) return current;
         throw new AttentionError('not-found', `no unresolved attention item ${canonical} in this session`);
+      }
+      if (parsedResponse !== undefined && !attentionResponseMatchesAsk(target.ask, parsedResponse)) {
+        throw new AttentionError(
+          'invalid',
+          target.ask === undefined
+            ? `${canonical} has no structured ask; resolve it with a note instead of a response`
+            : `${canonical} asks for a ${target.ask.kind} answer; the response does not fit it`,
+        );
       }
       const { by, session } = authorized.provenance;
       if (by === 'agent' && !(target.raisedBy === 'agent' && target.raisedBySession === session)) {
@@ -333,11 +386,40 @@ export class AttentionService {
               : target.raisedBy === 'human'
                 ? 'the human'
                 : `agent ${target.raisedByName ?? target.raisedBySession}`
-          }. Resolve the underlying cause so its source clears it, or leave it for the human.`,
+          }. Use \`kteam attention dismiss\` to explicitly dismiss it, or leave it for the human.`,
         );
       }
       await this.acknowledgeReopen(authorized.session.id, target, authorized.provenance, resolutionNote);
-      return resolveState(current, target, authorized.provenance, resolutionNote);
+      return resolveState(current, target, authorized.provenance, resolutionNote, 'done', parsedResponse);
+    });
+    return this.finishMutation(mutation, authorized.provenance);
+  }
+
+  /** Explicit dismissal — the "stop asking" clear that BOTH sides may use
+   * (&F139 supersedes the retract-only rule). The human may dismiss anything;
+   * an agent may dismiss items in its own session only (authorize() scoping).
+   * Provenance is server-resolved and lands on the audit row as
+   * disposition:'dismissed', so a dismissal can never masquerade as an answer. */
+  async dismiss(
+    sessionId: string,
+    id: string,
+    note: string | null | undefined,
+    actor: AttentionActor,
+  ): Promise<AttentionSnapshot> {
+    const authorized = await this.authorize(sessionId, actor);
+    const canonical = parseAttentionId(id);
+    if (canonical === null) throw new AttentionError('invalid', 'attention id must look like A3 or ?A3');
+    const resolutionNote = optionalText(note, 'resolution note', MAX_ATTENTION_DETAIL_LEN);
+    const mutation = await this.store.mutateWithResult(authorized.session.id, async current => {
+      const target = current.items.find(item => item.id === canonical);
+      if (target === undefined) {
+        if (current.resolved.some(item => item.id === canonical)) return current;
+        throw new AttentionError('not-found', `no unresolved attention item ${canonical} in this session`);
+      }
+      // A dismissed reopen must still acknowledge its generation, or the next
+      // startup baseline would resurrect the very item that was just dismissed.
+      await this.acknowledgeReopen(authorized.session.id, target, authorized.provenance, resolutionNote);
+      return resolveState(current, target, authorized.provenance, resolutionNote, 'dismissed');
     });
     return this.finishMutation(mutation, authorized.provenance);
   }
@@ -362,7 +444,7 @@ export class AttentionService {
       const target = current.items.find(item => item.source === source && item.sourceRef === ref);
       if (target === undefined) return current;
       await this.acknowledgeReopen(session.id, target, provenance, resolutionNote);
-      return resolveState(current, target, provenance, resolutionNote);
+      return resolveState(current, target, provenance, resolutionNote, 'done');
     });
     return this.finishMutation(mutation, provenance);
   }
@@ -470,6 +552,8 @@ function resolveState(
   target: AttentionItem,
   provenance: Provenance,
   resolutionNote: string | null,
+  disposition: AttentionDisposition,
+  response?: AttentionResponse,
 ): AttentionState {
   const resolvedAt = now();
   const resolved: ResolvedAttentionItem = {
@@ -479,6 +563,8 @@ function resolveState(
     resolvedBySession: provenance.session,
     resolvedByName: provenance.name,
     resolutionNote,
+    disposition,
+    ...(response === undefined ? {} : { response }),
   };
   return {
     ...current,
