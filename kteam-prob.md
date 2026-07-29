@@ -3579,3 +3579,21 @@ collisions — is what makes the break unfixable by the person who discovers it.
 **Workaround for a lead.** When a teammate reports a gate failure that is entirely in files
 they do not own, accept their focused tests plus a scoped typecheck rather than blocking
 them, and route the repair to the type's owner immediately.
+
+## 2026-07-29 ~09:1x — launch-storm load spike falsely killed one session, lost another pane (lead-b1 batch)
+
+**Problem:** Launching 10 auto sessions in ~6 min (batches lead-b1/lead-b2) drove loadavg to
+~138 (box has no per-agent caps yet at that point). Two casualties: cael (ms5uoqc4, Fable,
+long-thinking) was stall-killed by the daemon (`session.nudged` → `session.killed` →
+`session.stalled`) while healthy — A6-class false positive under load; keshon (ms5uou8e,
+codex/terra) lost its tmux pane while state said `tool_running`. `kteam` CLI calls also hit
+"daemon did not answer /v1/sessions within 120s" (known slow-listener class, daemon was fine).
+
+**Evidence:** uptime loadavg 114-138 at 09:13Z; cael events.jsonl nudged/killed/stalled tail;
+keshon pane absent from `tmux ls` while state.json showed tool_running turn 1.
+
+**Workaround:** `kteam resume <id> "<reorientation>"` recovered both with context intact.
+
+**Fix landed the same day:** two-level cgroup caps (commit 4060bcb, handover 74) — fleet slice
+90% CPU/RAM, per-agent 25%, kteamd outside the cap. New launches are capped; a launch storm can
+no longer starve the daemon or trip the stall detector fleet-wide.
