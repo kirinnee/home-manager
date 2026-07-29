@@ -859,11 +859,16 @@ export function RemoteBrowserPane({
         )}
       </div>
 
-      <div className="shrink-0 border-t border-border-soft px-3 py-1.5 text-meta text-muted">
-        {status
-          ? `${status.viewport.width}×${status.viewport.height} · ${status.viewers} viewer${status.viewers === 1 ? '' : 's'} · ${Math.round(status.idleTimeoutSeconds / 60)}m idle stop`
-          : 'Checking browser lifecycle…'}
-      </div>
+      {/* Governor info (viewport · viewers · idle-stop). Hidden when this pane is
+          embedded in the unified browser surface, which surfaces the same facts in
+          its single-bar menu — the standalone pane still shows it. */}
+      {showNavigation && (
+        <div className="shrink-0 border-t border-border-soft px-3 py-1.5 text-meta text-muted">
+          {status
+            ? `${status.viewport.width}×${status.viewport.height} · ${status.viewers} viewer${status.viewers === 1 ? '' : 's'} · ${Math.round(status.idleTimeoutSeconds / 60)}m idle stop`
+            : 'Checking browser lifecycle…'}
+        </div>
+      )}
     </section>
   );
 }

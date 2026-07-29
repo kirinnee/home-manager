@@ -265,6 +265,13 @@ function visit(node: unknown, predicate: (element: ElementLike) => boolean): Ele
   return visit(element.props?.children, predicate);
 }
 
+/** The single bar folds secondary controls behind the ⋯ trigger; open it before
+ *  asserting on engine selection, status detail, or the escape actions. */
+function openBrowserMenu(output: unknown): void {
+  const trigger = visit(output, element => element.props?.['aria-label'] === 'Browser controls')!;
+  (trigger.props!.onClick as () => void)();
+}
+
 function flush(): Promise<void> {
   return Promise.resolve()
     .then(() => Promise.resolve())
@@ -303,7 +310,7 @@ describe('unified browser chrome', () => {
     expect(html).not.toContain('autofocus');
   });
 
-  test('defaults a tapped transcript link to the deployed iframe with manual, thumb-safe escape controls', () => {
+  test('defaults a tapped transcript link to the deployed iframe with manual, thumb-safe escape controls', async () => {
     const html = renderToStaticMarkup(
       <UnifiedBrowserSurface
         sessionId="session-a"
@@ -314,28 +321,51 @@ describe('unified browser chrome', () => {
       />,
     );
 
-    expect(html).toContain('aria-label="Browser engine"');
-    expect(html).toContain('aria-pressed="true"');
+    // The single bar carries the address and a ⋯ trigger; the iframe body deploys.
     expect(html).toContain('URL or DuckDuckGo search');
-    expect(html).toContain('Open in real browser');
-    expect(html).toContain('Open externally in a new tab');
+    expect(html).toContain('aria-label="Browser controls"');
     expect(html).toContain('min-h-[44px]');
     expect(html).toContain('<iframe');
     expect(html).toContain('sandbox=');
     expect(html).not.toContain('autofocus');
     expect(html).not.toContain('aria-modal');
+
+    // Engine selection and the escape actions fold into the ⋯ menu.
+    const harness = new HookHarness();
+    harness.render(() =>
+      UnifiedBrowserSurface({
+        sessionId: 'session-a',
+        destination,
+        presentation: 'pane',
+        titleId: 'browser-title',
+        onClose: () => undefined,
+      }),
+    );
+    openBrowserMenu(harness.output);
+    await flush();
+    expect(visit(harness.output, element => element.props?.['aria-label'] === 'Browser engine')).toBeDefined();
+    expect(visit(harness.output, element => element.props?.['aria-pressed'] === true)).toBeDefined();
+    expect(visit(harness.output, element => element.props?.['aria-label'] === 'Open in real browser')).toBeDefined();
+    expect(
+      visit(harness.output, element => element.props?.['aria-label'] === 'Open externally in a new tab'),
+    ).toBeDefined();
+    harness.unmount();
   });
 
-  test('states the embedded-reader limit plainly without claiming refusal detection', () => {
-    const html = renderToStaticMarkup(
-      <UnifiedBrowserSurface
-        sessionId="session-a"
-        destination={destination}
-        presentation="pane"
-        titleId="browser-title"
-        onClose={() => undefined}
-      />,
+  test('states the embedded-reader limit plainly without claiming refusal detection', async () => {
+    const harness = new HookHarness();
+    harness.render(() =>
+      UnifiedBrowserSurface({
+        sessionId: 'session-a',
+        destination,
+        presentation: 'pane',
+        titleId: 'browser-title',
+        onClose: () => undefined,
+      }),
     );
+    openBrowserMenu(harness.output);
+    await flush();
+    const html = renderToStaticMarkup(harness.output as React.ReactElement);
 
     expect(html).toContain('Preview accepts the address');
     expect(html).toContain('refuse to load in an embedded reader');
@@ -343,6 +373,7 @@ describe('unified browser chrome', () => {
     expect(html).toContain('Real is the full interactive browser');
     // Preview owns no tab strip: the only Chrome tabs live inside the REAL engine.
     expect(html).not.toContain('role="tablist"');
+    harness.unmount();
   });
 
   test('embeds the remote engine content-only and detaches its viewer while the retained surface is hidden', () => {
@@ -402,6 +433,8 @@ describe('unified browser chrome', () => {
         dependencies,
       }),
     );
+    openBrowserMenu(harness.output);
+    await flush();
 
     const realButton = visit(harness.output, element => element.props?.children === 'Real')!;
     (realButton.props!.onClick as () => void)();
@@ -515,6 +548,8 @@ describe('unified browser chrome', () => {
         dependencies,
       });
     harness.render(render);
+    openBrowserMenu(harness.output);
+    await flush();
     const realButton = visit(harness.output, element => element.props?.children === 'Real')!;
     (realButton.props!.onClick as () => void)();
     await flush();
@@ -716,6 +751,33 @@ describe('unified browser chrome', () => {
     expect(
       visit(harness.output, element => element.props?.['aria-label'] === 'Back in real browser')!.props!.disabled,
     ).toBe(false);
+    harness.unmount();
+  });
+
+  test('surfaces the remote governor info inside the single-bar menu', async () => {
+    rememberBrowserEngine('session-a', 'remote');
+    const dependencies: UnifiedBrowserDependencies = { remoteApi, RemotePane: () => <div /> };
+    const harness = new HookHarness();
+    harness.render(() =>
+      UnifiedBrowserSurface({
+        sessionId: 'session-a',
+        destination,
+        presentation: 'pane',
+        titleId: 'browser-title',
+        onClose: () => undefined,
+        dependencies,
+      }),
+    );
+    await flush();
+
+    const pane = visit(harness.output, element => element.type === dependencies.RemotePane)!;
+    (pane.props!.onStatusChange as (status: RemoteBrowserStatus) => void)(remoteStatus);
+    await flush();
+
+    openBrowserMenu(harness.output);
+    await flush();
+    const html = renderToStaticMarkup(harness.output as React.ReactElement);
+    expect(html).toContain('800×600 · 1 viewer · 10m idle stop');
     harness.unmount();
   });
 });

@@ -17,7 +17,17 @@
 // independent linear history and invents no tabs of its own.
 
 import { useCallback, useEffect, useRef, useState, type ComponentType, type FormEvent } from 'react';
-import { ArrowLeft, ArrowRight, ExternalLink, Globe2, Monitor, RefreshCw, ShieldAlert, X } from 'lucide-react';
+import {
+  ArrowLeft,
+  ArrowRight,
+  ExternalLink,
+  Globe2,
+  Monitor,
+  MoreVertical,
+  RefreshCw,
+  ShieldAlert,
+  X,
+} from 'lucide-react';
 import { Button } from './Primitives';
 import { browserDestination, InAppBrowserFrame, isLoopbackHostname, type BrowserDestination } from './InAppBrowser';
 import { RemoteBrowserPane, type RemoteBrowserPaneProps } from './RemoteBrowserPane';
@@ -211,7 +221,14 @@ export function UnifiedBrowserSurface({
   const [busy, setBusy] = useState(false);
   const [loginBusy, setLoginBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The single bar folds every secondary control (engine, status detail,
+  // governor info, the old footer's escape actions) into one ⋯ menu. It opens
+  // anchored to its trigger and dismisses on outside pointer or Escape, matching
+  // the side-pane picker popover's manners.
+  const [menuOpen, setMenuOpen] = useState(false);
   const addressRef = useRef<HTMLInputElement | null>(null);
+  const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef(engine);
   const incomingDestinationRef = useRef(destination);
   const mountedRef = useRef(true);
@@ -282,6 +299,29 @@ export function UnifiedBrowserSurface({
   useEffect(() => {
     if (typeof document === 'undefined' || document.activeElement !== addressRef.current) setAddress(currentUrl);
   }, [currentUrl]);
+
+  // Outside pointer or Escape closes the ⋯ menu and returns focus to its
+  // trigger, exactly like the side-pane tab picker. SSR/no-DOM is a no-op.
+  useEffect(() => {
+    if (!menuOpen || typeof document === 'undefined') return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (!menuRef.current?.contains(target) && !menuTriggerRef.current?.contains(target)) setMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      setMenuOpen(false);
+      window.requestAnimationFrame(() => menuTriggerRef.current?.focus());
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [menuOpen]);
 
   const chooseEngine = (next: BrowserEngine) => {
     if (next === engineRef.current) return;
@@ -373,160 +413,238 @@ export function UnifiedBrowserSurface({
   const remotePageState = engine === 'remote' ? remoteStatus?.pageState : undefined;
   const remotePageError = engine === 'remote' ? remoteStatus?.pageError : undefined;
   const Heading = presentation === 'pane' ? 'h2' : 'h1';
+  const menuId = `${titleId}-menu`;
 
   return (
     <section className="flex min-h-0 flex-1 flex-col bg-surface" aria-label="Browser">
-      <header className="shrink-0 border-b border-border-soft px-2 pb-2">
-        <div className="flex min-h-[44px] items-center gap-xs">
-          <span
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-control border border-accent bg-accent-soft text-accent"
-            aria-hidden="true"
-          >
-            <Globe2 size={17} />
-          </span>
-          <Heading
-            id={titleId}
-            className="m-0 min-w-0 flex-1 truncate font-display text-title font-semibold tracking-display text-fg"
-          >
-            Browser
-          </Heading>
-          <div
-            role="group"
-            aria-label="Browser engine"
-            className="flex shrink-0 items-center rounded-control border border-strong bg-surface-2 p-0.5"
-          >
-            <Button
-              type="button"
-              variant={engine === 'preview' ? 'primary' : 'ghost'}
-              size="sm"
-              aria-pressed={engine === 'preview'}
-              onClick={() => chooseEngine('preview')}
-              className="min-h-[44px] min-w-[44px] px-2"
-            >
-              Preview
-            </Button>
-            <Button
-              type="button"
-              variant={engine === 'remote' ? 'primary' : 'ghost'}
-              size="sm"
-              aria-pressed={engine === 'remote'}
-              onClick={() => chooseEngine('remote')}
-              className="min-h-[44px] min-w-[44px] px-2"
-            >
-              Real
-            </Button>
-          </div>
-          {presentation === 'pane' && (
+      <header className="shrink-0 border-b border-border-soft px-2 py-1.5">
+        {/* The heading is visually hidden: the bar carries the controls, but the
+            host's aria-labelledby still resolves to a real "Browser" name. */}
+        <Heading id={titleId} className="sr-only">
+          Browser
+        </Heading>
+        <div className="flex items-center gap-xs">
+          <form onSubmit={navigate} className="flex min-w-0 flex-1 items-center gap-xs">
             <Button
               type="button"
               variant="ghost"
-              onClick={onClose}
+              disabled={busy || backDisabled}
+              onClick={goBack}
               className="min-h-[44px] min-w-[44px] justify-center p-0"
-              aria-label="Close browser pane"
-              title="Close browser pane"
+              aria-label={`Back in ${engine === 'preview' ? 'preview' : 'real browser'}`}
+              title="Back"
             >
-              <X size={17} aria-hidden="true" />
+              <ArrowLeft size={16} aria-hidden="true" />
             </Button>
-          )}
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={busy || forwardDisabled}
+              onClick={goForward}
+              className="min-h-[44px] min-w-[44px] justify-center p-0"
+              aria-label={`Forward in ${engine === 'preview' ? 'preview' : 'real browser'}`}
+              title="Forward"
+            >
+              <ArrowRight size={16} aria-hidden="true" />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={busy}
+              onClick={reload}
+              className="min-h-[44px] min-w-[44px] justify-center p-0"
+              aria-label={`Reload ${engine === 'preview' ? 'preview' : 'real browser'}`}
+              title="Reload"
+            >
+              <RefreshCw size={16} aria-hidden="true" />
+            </Button>
+            <label className="flex min-h-[44px] min-w-0 flex-1 items-center gap-xs rounded-control border border-strong bg-surface-2 px-2">
+              <span className="sr-only">URL or DuckDuckGo search</span>
+              <Globe2 size={14} aria-hidden="true" className="shrink-0 text-muted" />
+              {/* No onBlur reset: tapping Go blurs this input first, and restoring
+                  the previous URL there submitted the OLD address. */}
+              <input
+                ref={addressRef}
+                value={address}
+                onChange={event => setAddress(event.target.value)}
+                placeholder="URL or DuckDuckGo search"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                className="h-10 min-w-0 flex-1 bg-transparent font-mono text-meta text-fg placeholder:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+              />
+            </label>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={busy || !address.trim()}
+              className="min-h-[44px] min-w-[44px] justify-center px-2"
+            >
+              Go
+            </Button>
+          </form>
+
+          {/* One bar: every secondary control folds into this ⋯ menu — engine,
+              status detail, governor info, and the old footer's escape actions. */}
+          <span className="relative flex shrink-0 items-center">
+            <Button
+              ref={menuTriggerRef}
+              type="button"
+              variant="ghost"
+              onClick={() => setMenuOpen(open => !open)}
+              aria-haspopup="dialog"
+              aria-expanded={menuOpen}
+              aria-controls={menuOpen ? menuId : undefined}
+              aria-label="Browser controls"
+              title={remoteLocation?.title || currentUrl || 'Browser controls'}
+              className="min-h-[44px] min-w-[44px] justify-center p-0"
+            >
+              <MoreVertical size={16} aria-hidden="true" />
+            </Button>
+            {menuOpen && (
+              <div
+                ref={menuRef}
+                id={menuId}
+                role="dialog"
+                aria-label="Browser controls"
+                className="absolute right-0 top-full z-50 mt-1 w-[min(300px,calc(100vw-16px))] overflow-y-auto rounded-panel border border-border bg-surface p-2 shadow-popover"
+                style={{ maxHeight: 'min(70dvh, 460px)' }}
+              >
+                <div
+                  role="group"
+                  aria-label="Browser engine"
+                  className="flex items-center rounded-control border border-strong bg-surface-2 p-0.5"
+                >
+                  <Button
+                    type="button"
+                    variant={engine === 'preview' ? 'primary' : 'ghost'}
+                    aria-pressed={engine === 'preview'}
+                    onClick={() => chooseEngine('preview')}
+                    className="min-h-[40px] flex-1 justify-center px-2"
+                  >
+                    Preview
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={engine === 'remote' ? 'primary' : 'ghost'}
+                    aria-pressed={engine === 'remote'}
+                    onClick={() => chooseEngine('remote')}
+                    className="min-h-[40px] flex-1 justify-center px-2"
+                  >
+                    Real
+                  </Button>
+                </div>
+
+                <div className="mt-2 text-meta leading-base text-muted">
+                  {engine === 'preview' ? (
+                    <p className="m-0 flex items-start gap-xs">
+                      <ShieldAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-warn" />
+                      <span>
+                        Preview accepts the address, but a site can refuse to load in an embedded reader and this reader
+                        cannot tell when it does. Real is the full interactive browser.
+                      </span>
+                    </p>
+                  ) : (
+                    <div className="space-y-1">
+                      <p className="m-0 flex items-start gap-xs">
+                        <Monitor size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-accent" />
+                        <span className="min-w-0 break-words" title={remoteLocation?.title || currentUrl}>
+                          {busy
+                            ? 'Working…'
+                            : remotePageState === 'loading'
+                              ? 'Loading page…'
+                              : remoteLocation?.title || 'Shared Chrome · persistent session'}
+                        </span>
+                      </p>
+                      {remoteStatus && (
+                        <p className="m-0 text-faint">
+                          {remoteStatus.viewport.width}×{remoteStatus.viewport.height} · {remoteStatus.viewers} viewer
+                          {remoteStatus.viewers === 1 ? '' : 's'} · {Math.round(remoteStatus.idleTimeoutSeconds / 60)}m
+                          idle stop
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-2 space-y-1 border-t border-border-soft pt-2">
+                  <Button
+                    type="button"
+                    variant="primary"
+                    disabled={busy}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      openInRealBrowser();
+                    }}
+                    className="min-h-[44px] w-full justify-center gap-xs"
+                    aria-label="Open in real browser"
+                    title="Open this address in the persistent real browser"
+                  >
+                    <Monitor size={16} aria-hidden="true" className="shrink-0" />
+                    <span className="truncate">Open in real browser</span>
+                  </Button>
+                  {externalDestination ? (
+                    <a
+                      href={externalDestination.href}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={() => setMenuOpen(false)}
+                      className="kt-btn min-h-[44px] w-full justify-center gap-xs"
+                      aria-label="Open externally in a new tab"
+                      title="Open externally"
+                    >
+                      <ExternalLink size={16} aria-hidden="true" className="shrink-0" />
+                      <span className="truncate">Open externally</span>
+                    </a>
+                  ) : (
+                    <span
+                      className="kt-btn min-h-[44px] w-full cursor-not-allowed justify-center gap-xs opacity-50"
+                      aria-disabled="true"
+                      aria-label="This browser address cannot be opened externally"
+                    >
+                      <ExternalLink size={16} aria-hidden="true" className="shrink-0" />
+                      <span className="truncate">Open externally</span>
+                    </span>
+                  )}
+                  <Button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onClose();
+                    }}
+                    className="min-h-[44px] w-full justify-center gap-xs"
+                    aria-label="Done browsing"
+                    title="Done"
+                  >
+                    <X size={16} aria-hidden="true" className="shrink-0" />
+                    <span>Done</span>
+                  </Button>
+                </div>
+              </div>
+            )}
+          </span>
         </div>
 
-        <form
-          onSubmit={navigate}
-          className="mt-1 grid grid-cols-[auto_auto_auto_minmax(0,1fr)_auto] items-center gap-xs"
-        >
-          <Button
-            type="button"
-            variant="ghost"
-            disabled={busy || backDisabled}
-            onClick={goBack}
-            className="min-h-[44px] min-w-[44px] justify-center p-0"
-            aria-label={`Back in ${engine === 'preview' ? 'preview' : 'real browser'}`}
-            title="Back"
-          >
-            <ArrowLeft size={16} aria-hidden="true" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            disabled={busy || forwardDisabled}
-            onClick={goForward}
-            className="min-h-[44px] min-w-[44px] justify-center p-0"
-            aria-label={`Forward in ${engine === 'preview' ? 'preview' : 'real browser'}`}
-            title="Forward"
-          >
-            <ArrowRight size={16} aria-hidden="true" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            disabled={busy}
-            onClick={reload}
-            className="min-h-[44px] min-w-[44px] justify-center p-0"
-            aria-label={`Reload ${engine === 'preview' ? 'preview' : 'real browser'}`}
-            title="Reload"
-          >
-            <RefreshCw size={16} aria-hidden="true" />
-          </Button>
-          <label className="flex min-h-[44px] min-w-0 items-center gap-xs rounded-control border border-strong bg-surface-2 px-2">
-            <span className="sr-only">URL or DuckDuckGo search</span>
-            <Globe2 size={14} aria-hidden="true" className="shrink-0 text-muted" />
-            {/* No onBlur reset: tapping Go blurs this input first, and restoring
-                the previous URL there submitted the OLD address. */}
-            <input
-              ref={addressRef}
-              value={address}
-              onChange={event => setAddress(event.target.value)}
-              placeholder="URL or DuckDuckGo search"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              className="h-10 min-w-0 flex-1 bg-transparent font-mono text-meta text-fg placeholder:text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-            />
-          </label>
-          <Button
-            type="submit"
-            variant="primary"
-            disabled={busy || !address.trim()}
-            className="min-h-[44px] min-w-[44px] justify-center px-2"
-          >
-            Go
-          </Button>
-        </form>
-
-        <div
-          className="mt-1 flex min-h-[44px] items-center gap-xs text-meta leading-base text-muted"
-          aria-live="polite"
-        >
-          {engine === 'preview' ? (
-            <>
-              <ShieldAlert size={14} aria-hidden="true" className="shrink-0 text-warn" />
-              <span>
-                Preview accepts the address, but a site can refuse to load in an embedded reader and this reader cannot
-                tell when it does. Real is the full interactive browser.
-              </span>
-            </>
-          ) : (
-            <>
-              <Monitor size={14} aria-hidden="true" className="shrink-0 text-accent" />
-              <span className="min-w-0 truncate" title={remoteLocation?.title || currentUrl}>
-                {busy
-                  ? 'Working…'
-                  : remotePageState === 'loading'
-                    ? 'Loading page…'
-                    : remoteLocation?.title || 'Shared Chrome · persistent session'}
-              </span>
-            </>
-          )}
-        </div>
+        {(busy || remotePageState === 'loading') && (
+          <div className="mt-1 h-0.5 w-full overflow-hidden rounded-full bg-surface-2" role="status" aria-live="polite">
+            <span className="sr-only">{busy ? 'Working…' : 'Loading page…'}</span>
+          </div>
+        )}
 
         {remotePageError && (
-          <div role="alert" className="rounded-control border border-err/30 bg-err-soft px-2 py-1.5 text-meta text-err">
+          <div
+            role="alert"
+            className="mt-1 rounded-control border border-err/30 bg-err-soft px-2 py-1.5 text-meta text-err"
+          >
             {remotePageError}
           </div>
         )}
 
         {error && (
-          <div role="alert" className="rounded-control border border-err/30 bg-err-soft px-2 py-1.5 text-meta text-err">
+          <div
+            role="alert"
+            className="mt-1 rounded-control border border-err/30 bg-err-soft px-2 py-1.5 text-meta text-err"
+          >
             {error}
           </div>
         )}
@@ -571,50 +689,6 @@ export function UnifiedBrowserSurface({
           onStatusChange={remoteStatusChanged}
         />
       )}
-
-      <footer className="grid shrink-0 grid-cols-[minmax(0,1fr)_44px_44px] gap-xs border-t border-border-soft bg-surface px-2 py-2">
-        <Button
-          type="button"
-          variant="primary"
-          disabled={busy}
-          onClick={openInRealBrowser}
-          className="min-h-[44px] min-w-0 justify-center gap-xs px-2"
-          aria-label="Open in real browser"
-          title="Open this address in the persistent real browser"
-        >
-          <Monitor size={16} aria-hidden="true" className="shrink-0" />
-          <span className="truncate">Open in real browser</span>
-        </Button>
-        {externalDestination ? (
-          <a
-            href={externalDestination.href}
-            target="_blank"
-            rel="noreferrer"
-            className="kt-btn min-h-[44px] min-w-[44px] justify-center p-0"
-            aria-label="Open externally in a new tab"
-            title="Open externally"
-          >
-            <ExternalLink size={16} aria-hidden="true" />
-          </a>
-        ) : (
-          <span
-            className="kt-btn min-h-[44px] min-w-[44px] cursor-not-allowed justify-center p-0 opacity-50"
-            aria-disabled="true"
-            aria-label="This browser address cannot be opened externally"
-          >
-            <ExternalLink size={16} aria-hidden="true" />
-          </span>
-        )}
-        <Button
-          type="button"
-          onClick={onClose}
-          className="min-h-[44px] min-w-[44px] justify-center p-0"
-          aria-label="Done browsing"
-          title="Done"
-        >
-          <X size={16} aria-hidden="true" />
-        </Button>
-      </footer>
     </section>
   );
 }
