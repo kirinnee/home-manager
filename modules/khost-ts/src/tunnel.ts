@@ -48,7 +48,7 @@ async function cloudflaredBin(): Promise<string> {
   return (await run(['sh', '-c', 'command -v cloudflared'])).stdout.trim();
 }
 
-function cfdPlist(bin: string, token: string): string {
+export function cfdPlist(bin: string, token: string, protocol = tunnelProtocol): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -57,8 +57,9 @@ function cfdPlist(bin: string, token: string): string {
   <key>ProgramArguments</key>
   <array>
     <string>${bin}</string>
-    <string>tunnel</string><string>run</string>
-    <string>--protocol</string><string>${tunnelProtocol}</string>
+    <string>tunnel</string>
+    <string>--protocol</string><string>${protocol}</string>
+    <string>run</string>
     <string>--token</string><string>${token}</string>
   </array>
   <key>RunAtLoad</key><true/>
