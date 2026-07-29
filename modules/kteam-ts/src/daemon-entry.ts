@@ -88,6 +88,7 @@ const manager = await SessionManager.create(paths, {
   remoteControl: config.remoteControl,
   warden: config.warden,
   scratch: config.scratch,
+  cgroups: config.cgroups,
   onSelfRestart: async () => {
     if (!(await supervised())) return false;
     requestStop('session index unhealable in place');

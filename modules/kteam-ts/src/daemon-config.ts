@@ -4,6 +4,7 @@ import type { KTeamPaths } from './paths';
 import { atomicJson, readJson } from './io';
 import { defaultLearningConfig, type LearningConfig } from './learning-types';
 import { defaultPwaConfig, parsePwaConfig, type PwaConfig } from './pwa';
+import { defaultCgroupConfig, type CgroupConfig } from './cgroups';
 
 /** One configured warden account. String shorthand `"claude-auto-glm52a"` is
  *  accepted anywhere a WardenAccount is and normalizes to `{ wrapper }`. */
@@ -139,6 +140,9 @@ export interface DaemonConfig {
   scratch: ScratchConfig;
   retention: RetentionConfig;
   learning: LearningConfig;
+  /** Linux systemd/cgroup-v2 resource ceilings for the aggregate fleet and
+   *  each individual agent. */
+  cgroups: CgroupConfig;
   /** Context-window overrides for transcript-based context accounting:
    *  substring pattern → window size, longest match wins. Built-ins: `[1m]`
    *  ⇒ 1M, default 200k (codex reports its own window in token_count). */
@@ -221,6 +225,7 @@ export const defaultDaemonConfig = (): DaemonConfig => ({
   scratch: defaultScratchConfig(),
   retention: defaultRetentionConfig(),
   learning: defaultLearningConfig(),
+  cgroups: defaultCgroupConfig(),
 });
 
 export async function loadDaemonConfig(paths: KTeamPaths): Promise<DaemonConfig> {
@@ -246,6 +251,12 @@ export async function loadDaemonConfig(paths: KTeamPaths): Promise<DaemonConfig>
     scratch: { ...defaultScratchConfig(), ...(onDisk.scratch ?? {}) },
     retention: { ...defaultRetentionConfig(), ...(onDisk.retention ?? {}) },
     learning: { ...defaultLearningConfig(), ...(onDisk.learning ?? {}) },
+    cgroups: {
+      ...defaultCgroupConfig(),
+      ...(onDisk.cgroups ?? {}),
+      fleet: { ...defaultCgroupConfig().fleet, ...(onDisk.cgroups?.fleet ?? {}) },
+      perAgent: { ...defaultCgroupConfig().perAgent, ...(onDisk.cgroups?.perAgent ?? {}) },
+    },
   };
   if (process.env.KTEAM_HOST) merged.host = process.env.KTEAM_HOST;
   if (process.env.KTEAM_PORT) merged.port = Number(process.env.KTEAM_PORT);

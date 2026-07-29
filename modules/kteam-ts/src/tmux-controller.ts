@@ -7,6 +7,7 @@ import type { KTeamPaths } from './paths';
 import { sessionDir } from './paths';
 import type { PendingQuestion, SessionConfig, SessionState } from './types';
 import { WARDEN_LABEL } from './warden-detect';
+import type { CgroupController } from './cgroups';
 
 export interface PaneState {
   alive: boolean;
@@ -1344,6 +1345,7 @@ export class TmuxController {
   constructor(
     private readonly paths: KTeamPaths,
     private readonly daemonUrl: string,
+    private readonly cgroups?: CgroupController,
   ) {}
 
   async alive(name: string): Promise<boolean> {
@@ -1444,6 +1446,10 @@ export class TmuxController {
     const result = await run(['tmux', 'display-message', '-p', '-t', name, '#{pane_pid}']);
     const panePid = Number(result.stdout.trim());
     return result.code === 0 && Number.isFinite(panePid) && panePid > 1 ? panePid : undefined;
+  }
+
+  async paneProcessId(name: string): Promise<number | undefined> {
+    return await this.panePid(name);
   }
 
   protected async processTable(): Promise<ProcessRecord[]> {
@@ -1575,6 +1581,8 @@ export class TmuxController {
       if (config.stopCapability) pane.KTEAM_STOP_CAPABILITY = config.stopCapability;
     }
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    const harnessCommand = [config.binary, ...interactiveHarnessArgs(config)];
+    const launchCommand = this.cgroups ? await this.cgroups.agentCommand(config.id, harnessCommand) : harnessCommand;
     const launcher = path.join(sessionDir(this.paths, config.id), 'launch.sh');
     await mkdir(path.dirname(launcher), { recursive: true, mode: 0o700 });
     await writeFile(
@@ -1597,7 +1605,7 @@ export class TmuxController {
         // was itself started from a polluted shell would hand them to the pane
         // anyway. Unset them in the pane, right before exec'ing the wrapper.
         `unset CLAUDECODE ${[...managedEnv].filter(key => key.startsWith('CLAUDE_') || key.startsWith('ANTHROPIC_')).join(' ')}`,
-        `exec ${[config.binary, ...interactiveHarnessArgs(config)].map(quote).join(' ')}`,
+        `exec ${launchCommand.map(quote).join(' ')}`,
         '',
       ].join('\n'),
       { mode: 0o700 },

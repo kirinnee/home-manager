@@ -1928,6 +1928,23 @@ describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
       ran.push('recover');
       throw new Error('recover exploded');
     };
+    const cgroupConfig = {
+      enabled: false,
+      fleet: { cpuPercent: 90, memoryPercent: 90 },
+      perAgent: { cpuPercent: 25, memoryPercent: 25 },
+    };
+    manager.cgroups = {
+      config: cgroupConfig,
+      daemonOutsideFleet: async () => true,
+      apply: async () => {
+        ran.push('cgroups');
+        return {
+          config: cgroupConfig,
+          restartRequiredSessions: [],
+        };
+      },
+    };
+    manager.liveCgroupTargets = async () => [];
     manager.startWarden = async () => {
       ran.push('warden');
     };
@@ -1936,7 +1953,7 @@ describe('partition-tolerant loud bootstrap (turn-019 P0)', () => {
     };
     await (manager as unknown as { bootstrap: () => Promise<void> }).bootstrap();
     // warden ALWAYS armed, and scratch gc runs after it
-    expect(ran).toEqual(['import', 'recover', 'warden', 'scratch-gc']);
+    expect(ran).toEqual(['import', 'recover', 'cgroups', 'warden', 'scratch-gc']);
     const errors = manager.bootstrapErrors as string[];
     expect(errors).toHaveLength(2);
     expect(errors[0]).toContain('import');
@@ -3809,6 +3826,73 @@ describe('migrate — cross-account continuation', () => {
     expect(current.harnessHome).toBe('/old/home');
     expect(current.model).toBe('claude-fable-5');
     expect(current.migration).toBeUndefined();
+  });
+});
+
+describe('cgroup config transition ordering', () => {
+  test('a live pane with an unreadable PID stays visible while a confirmed queued bootstrap is omitted', async () => {
+    const manager = bareManager();
+    manager.list = async () => [
+      { config: { id: 'known', tmuxSession: 'tmux-known' }, state: { status: 'running' } },
+      { config: { id: 'uncertain', tmuxSession: 'tmux-uncertain' }, state: { status: 'running' } },
+      { config: { id: 'queued', tmuxSession: 'tmux-queued' }, state: { status: 'starting' } },
+    ];
+    manager.tmux = {
+      paneProcessId: async (name: string) => (name === 'tmux-known' ? 123 : undefined),
+      alive: async (name: string) => name === 'tmux-uncertain',
+    };
+    const targets = await (
+      manager as unknown as { liveCgroupTargets: () => Promise<Array<{ sessionId: string; panePid?: number }>> }
+    ).liveCgroupTargets();
+    expect(targets).toEqual([
+      { sessionId: 'known', panePid: 123 },
+      { sessionId: 'uncertain', panePid: undefined },
+    ]);
+  });
+
+  test('a config PATCH waits for an in-flight pane bootstrap before inspecting live targets', async () => {
+    const manager = bareManager();
+    const paths = manager.paths as ReturnType<typeof createPaths>;
+    await mkdir(paths.daemon, { recursive: true });
+    let releaseBootstrap!: () => void;
+    manager.bootstrapChain = new Promise<void>(resolve => {
+      releaseBootstrap = resolve;
+    });
+    const initial = {
+      enabled: true,
+      fleet: { cpuPercent: 90, memoryPercent: 90 },
+      perAgent: { cpuPercent: 25, memoryPercent: 25 },
+    };
+    let inspected = false;
+    manager.cgroups = {
+      config: initial,
+      supported: true,
+      apply: async (config: typeof initial) => ({
+        config,
+        supported: true,
+        fleetSlice: 'kteam-fleet.slice',
+        effective: {},
+        restartRequiredSessions: [],
+        warnings: [],
+      }),
+    };
+    manager.liveCgroupTargets = async () => {
+      inspected = true;
+      return [];
+    };
+    manager.emitTransient = () => undefined;
+
+    const updating = (
+      manager as unknown as {
+        updateCgroupConfig: (patch: { enabled: boolean }) => Promise<unknown>;
+      }
+    ).updateCgroupConfig({ enabled: false });
+    await Promise.resolve();
+    expect(inspected).toBe(false);
+
+    releaseBootstrap();
+    await updating;
+    expect(inspected).toBe(true);
   });
 });
 

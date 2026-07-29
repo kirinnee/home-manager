@@ -78,6 +78,14 @@ import {
   claudeTranscriptPath,
 } from './harness';
 import {
+  defaultCgroupConfig,
+  mergeCgroupConfig,
+  validateCgroupConfig,
+  CgroupController,
+  type CgroupConfig,
+  type CgroupTarget,
+} from './cgroups';
+import {
   defaultProviderOutageConfig,
   defaultScratchConfig,
   type ScratchConfig,
@@ -90,6 +98,8 @@ import type { KTeamPaths } from './paths';
 import { configFile, markerFile, sessionDir, stateFile, turnLog, turnPrompt } from './paths';
 import type {
   AttachmentView,
+  CgroupConfigPatch,
+  CgroupConfigView,
   KTeamService,
   SearchResponse,
   SearchResult,
@@ -340,6 +350,10 @@ interface SessionManagerOptions {
   remoteControl?: boolean;
   warden: WardenConfig;
   scratch?: ScratchConfig;
+  /** Optional for construction-site compatibility. Production always passes
+   *  the deep-merged daemon setting; omitted test fixtures keep the old direct
+   *  launch path. */
+  cgroups?: CgroupConfig;
   contextWindows?: Record<string, number>;
   /** Invoked when the daemon decides its own index is unhealable and a clean
    *  restart is the only repair. The entrypoint owns HOW (and WHETHER â only a
@@ -875,6 +889,7 @@ export function needsHumanStateCoversAnomaly(
 
 export class SessionManager implements KTeamService {
   private readonly tmux: TmuxController;
+  private readonly cgroups: CgroupController;
   private readonly attachments: AttachmentStore;
   private readonly monitors = new Map<string, MonitorHandle>();
   private readonly listeners = new Set<(event: KTeamEvent) => void>();
@@ -1028,7 +1043,8 @@ export class SessionManager implements KTeamService {
     private readonly store: EventStore,
     private readonly options: SessionManagerOptions,
   ) {
-    this.tmux = new TmuxController(paths, options.publicUrl);
+    this.cgroups = new CgroupController(options.cgroups ?? { ...defaultCgroupConfig(), enabled: false });
+    this.tmux = new TmuxController(paths, options.publicUrl, this.cgroups);
     this.attachments = new AttachmentStore({ rootDir: paths.home });
     const hermetic = process.env.KTEAM_TEST_HERMETIC === '1' || process.env.NODE_ENV === 'test';
     this.usageFeed = new UsageFeed(options.quotaUrl, { fallback: hermetic ? undefined : fetchKfleetUsage });
@@ -1390,6 +1406,23 @@ export class SessionManager implements KTeamService {
       // safely overlap that repair.
       this.indexImported = true;
       await phase('recover', signal => this.recover(signal));
+      await phase('cgroups', async () => {
+        const daemonOutside = await this.cgroups.daemonOutsideFleet(process.pid);
+        if (daemonOutside === false)
+          throw new Error(
+            `kteamd pid ${process.pid} is inside ${this.cgroups.config.enabled ? 'the enabled' : 'a stale'} fleet cap`,
+          );
+        const view = await this.cgroups.apply(this.cgroups.config, await this.liveCgroupTargets());
+        if (view.restartRequiredSessions.length > 0) {
+          console.error(
+            `kteamd: ${view.restartRequiredSessions.length} live session(s) require relaunch for the cgroup setting`,
+          );
+          this.emitTransient('fleet.cgroup_restart_required', {
+            sessionIds: view.restartRequiredSessions,
+            enabled: view.config.enabled,
+          });
+        }
+      });
       await phase('warden', () => this.startWarden());
       await phase('scratch-gc', () => this.sweepScratch());
     } finally {
@@ -8829,6 +8862,54 @@ export class SessionManager implements KTeamService {
 
   async wardenConfigView(): Promise<WardenConfigView> {
     return this.describeWardenConfig(this.wardenConfig);
+  }
+
+  private async liveCgroupTargets(): Promise<CgroupTarget[]> {
+    const live = (await this.list()).filter(view => !protectedStatuses.includes(view.state.status));
+    const targets = await Promise.all(
+      live.map(async view => {
+        const panePid = await this.tmux.paneProcessId(view.config.tmuxSession);
+        if (panePid !== undefined) return { sessionId: view.config.id, panePid };
+        // A confirmed absent pane is a queued bootstrap and will read the
+        // current setting when it launches. If tmux says the pane is alive but
+        // its PID query failed, preserve that uncertainty for the controller:
+        // it must warn and require relaunch rather than silently omit a
+        // potentially capped process.
+        return (await this.tmux.alive(view.config.tmuxSession))
+          ? { sessionId: view.config.id, panePid: undefined }
+          : undefined;
+      }),
+    );
+    return targets.filter((target): target is CgroupTarget => target !== undefined);
+  }
+
+  async cgroupConfigView(): Promise<CgroupConfigView> {
+    return await this.cgroups.describe(await this.liveCgroupTargets());
+  }
+
+  /** Persist into the existing daemon config and apply live wherever systemd
+   *  owns an existing kteam-agent scope. Adoption/removal requires relaunch
+   *  and is returned explicitly by the controller. */
+  async updateCgroupConfig(patch: CgroupConfigPatch): Promise<CgroupConfigView> {
+    // Share the pane-bootstrap barrier: otherwise a PATCH can inspect the
+    // fleet between agentCommand() choosing direct/scoped execution and tmux
+    // creating the pane, then falsely report that no relaunch is required.
+    return await this.serializedBootstrap(async () => {
+      const next = mergeCgroupConfig(this.cgroups.config, patch);
+      validateCgroupConfig(next);
+      if (next.enabled && !this.cgroups.supported)
+        throw new Error(`cgroup limits require Linux with cgroup v2 (current platform: ${process.platform})`);
+      const onDisk = await readJson<Record<string, unknown>>(this.paths.daemonConfig).catch(
+        () => ({}) as Record<string, unknown>,
+      );
+      await atomicJson(this.paths.daemonConfig, { ...onDisk, cgroups: next });
+      const view = await this.cgroups.apply(next, await this.liveCgroupTargets());
+      this.emitTransient('fleet.cgroup_config_changed', {
+        fields: Object.keys(patch),
+        restartRequiredSessions: view.restartRequiredSessions,
+      });
+      return view;
+    });
   }
 
   private describeWardenConfig(config: WardenConfig): WardenConfigView {

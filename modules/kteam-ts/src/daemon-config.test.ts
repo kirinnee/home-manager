@@ -64,3 +64,27 @@ describe('warden config merge (failover fields)', () => {
     expect(warden.accounts).toBeUndefined();
   });
 });
+
+describe('cgroup config merge', () => {
+  test('an old config gains the complete platform default block', async () => {
+    const config = await loadDaemonConfig(await pathsWithConfig({ host: '127.0.0.1' }));
+    expect(config.cgroups).toEqual({
+      enabled: process.platform === 'linux',
+      fleet: { cpuPercent: 90, memoryPercent: 90 },
+      perAgent: { cpuPercent: 25, memoryPercent: 25 },
+    });
+  });
+
+  test('partial nested limits preserve their sibling defaults', async () => {
+    const config = await loadDaemonConfig(
+      await pathsWithConfig({
+        cgroups: { enabled: false, fleet: { cpuPercent: 80 }, perAgent: { memoryPercent: 10 } },
+      }),
+    );
+    expect(config.cgroups).toEqual({
+      enabled: false,
+      fleet: { cpuPercent: 80, memoryPercent: 90 },
+      perAgent: { cpuPercent: 25, memoryPercent: 10 },
+    });
+  });
+});

@@ -173,6 +173,28 @@ class FakeService implements KTeamService {
     this.lastWardenConfigPatch = patch;
     return this.wardenConfigView();
   };
+  lastCgroupConfigPatch: Record<string, unknown> | undefined = undefined;
+  cgroupConfigView = async () => ({
+    config: {
+      enabled: true,
+      fleet: { cpuPercent: 90, memoryPercent: 90 },
+      perAgent: { cpuPercent: 25, memoryPercent: 25 },
+    },
+    supported: true,
+    fleetSlice: 'kteam-fleet.slice',
+    effective: {
+      cpus: 8,
+      memoryBytes: 32_000,
+      fleet: { cpuQuota: '720%', memoryMax: '28800' },
+      perAgent: { cpuQuota: '200%', memoryMax: '8000' },
+    },
+    restartRequiredSessions: [],
+    warnings: [],
+  });
+  updateCgroupConfig = async (patch: Record<string, unknown>) => {
+    this.lastCgroupConfigPatch = patch;
+    return this.cgroupConfigView();
+  };
   wrappers = async () => [
     {
       name: 'claude-auto-loge',
@@ -606,6 +628,31 @@ describe('kteam daemon API', () => {
     const base = `http://127.0.0.1:${server.port}`;
     const res = await fetch(`${base}/v1/usage`, { headers: { authorization: 'Bearer warden-secret' } });
     expect(res.status).toBe(200);
+  });
+
+  test('serves and updates cgroup settings for admins but denies the warden token', async () => {
+    const service = new FakeService();
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      wardenToken: 'warden-secret',
+      service,
+    });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}/v1/cgroups/config`;
+    const admin = { authorization: 'Bearer secret' };
+    expect((await fetch(base, { headers: admin })).status).toBe(200);
+    const updated = await fetch(base, {
+      method: 'PATCH',
+      headers: { ...admin, 'content-type': 'application/json' },
+      body: JSON.stringify({ perAgent: { cpuPercent: 20 } }),
+    });
+    expect(updated.status).toBe(200);
+    expect(service.lastCgroupConfigPatch).toEqual({ perAgent: { cpuPercent: 20 } });
+    const denied = await fetch(base, { headers: { authorization: 'Bearer warden-secret' } });
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toEqual({ error: 'the warden-scoped token may not change fleet resource limits' });
   });
 
   test('exposes transcript search with a scanned count', async () => {

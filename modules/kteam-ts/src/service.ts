@@ -18,6 +18,9 @@ import type { ScratchPlan } from './session-manager';
 import type { FsDiffView, FsFileView, FsListing } from './fs';
 import type { GitChangesView } from './git';
 import type { RuntimeModelCatalog } from './codex-runtime';
+import type { CgroupConfigPatch, CgroupConfigView } from './cgroups';
+
+export type { CgroupConfigPatch, CgroupConfigView } from './cgroups';
 
 // Fleet-wide, read-only Warden Attention projection. Re-exported here so the API
 // wire types live beside the other views (and can be mirrored into the UI).
@@ -279,6 +282,11 @@ export interface KTeamService {
    *  re-arms the sweep timer when intervalMinutes changed. Unknown wrappers
    *  warn rather than reject. */
   updateWardenConfig(patch: WardenConfigPatch): Promise<WardenConfigView>;
+  /** Effective two-level resource config and any live sessions that need a
+   *  relaunch to enter/leave managed scopes. */
+  cgroupConfigView(): Promise<CgroupConfigView>;
+  /** Persist and hot-apply cgroup limits wherever possible. */
+  updateCgroupConfig(patch: CgroupConfigPatch): Promise<CgroupConfigView>;
   /** Recent warden verdicts parsed from the reports (newest first). */
   wardenVerdicts(): Promise<WardenVerdict[]>;
   /** Raw markdown of one warden report; `path` is validated to live under the
