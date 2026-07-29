@@ -47,6 +47,31 @@ let
   }
   // (linkDirs ".kfleet/skills" (kfleetAssets + "/skills"))
   // (linkDirs ".kfleet/skills-codex" (kfleetAssets + "/skills-codex"));
+
+  # Every Obsidian vault that syncs continuously on Linux boxes. Adding one here
+  # enables it at activation; also add the matching xdg.configFile line below
+  # (that option takes literal keys, so the set cannot be generated from a list
+  # without colliding with the other entries beside it).
+  obsidianVaults = [ "HQ" "Main" ];
+  obsidianUnitName = vault: "obsidian-sync-${lib.toLower vault}";
+  obsidianSyncUnit = vault: {
+    enable = profile.kernel == "linux";
+    text = ''
+      [Unit]
+      Description=Obsidian Sync (continuous) for the ${vault} vault
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      ExecStart=%h/.nix-profile/bin/ob sync --path %h/Obsidian/${vault} --continuous
+      Restart=always
+      RestartSec=15
+      TimeoutStopSec=30
+
+      [Install]
+      WantedBy=default.target
+    '';
+  };
 in
 
 ##################
@@ -295,24 +320,8 @@ rec {
   # box syncs without an interactive `ob login`. `ob login` itself has no
   # service-token option — only email/password/MFA — so the derived token is
   # what gets stored; safer than a password and unaffected by MFA.
-  xdg.configFile."systemd/user/obsidian-sync-hq.service" = {
-    enable = profile.kernel == "linux";
-    text = ''
-      [Unit]
-      Description=Obsidian Sync (continuous) for the HQ vault
-      After=network-online.target
-      Wants=network-online.target
-
-      [Service]
-      ExecStart=%h/.nix-profile/bin/ob sync --path %h/Obsidian/HQ --continuous
-      Restart=always
-      RestartSec=15
-      TimeoutStopSec=30
-
-      [Install]
-      WantedBy=default.target
-    '';
-  };
+  xdg.configFile."systemd/user/obsidian-sync-hq.service" = obsidianSyncUnit "HQ";
+  xdg.configFile."systemd/user/obsidian-sync-main.service" = obsidianSyncUnit "Main";
 
   home.activation.load-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     export SECRETS_FILE="${./secrets.enc.yaml}"
@@ -353,8 +362,21 @@ rec {
     lib.optionalString (profile.kernel == "linux") ''
       export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
       if [ -d "$XDG_RUNTIME_DIR" ]; then
+        # `systemctl --user enable` does NOT work on these units: the unit file
+        # is a symlink into the nix store, so systemd classifies it as an alias
+        # and silently skips creating the default.target.wants link — meaning
+        # nothing would start at boot on a fresh box. Create the want ourselves,
+        # which is what [Install] WantedBy=default.target would have produced.
+        wants="$HOME/.config/systemd/user/default.target.wants"
+        mkdir -p "$wants"
         systemctl --user daemon-reload || true
-        systemctl --user enable --now obsidian-sync-hq.service || true
+        ${lib.concatMapStringsSep "\n        "
+          (vault:
+            let unit = "${obsidianUnitName vault}.service"; in
+            ''ln -sf "$HOME/.config/systemd/user/${unit}" "$wants/${unit}"
+        systemctl --user start ${unit} || true'')
+          obsidianVaults}
+        systemctl --user daemon-reload || true
       fi
     ''
   );
