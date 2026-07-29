@@ -46,19 +46,19 @@
   });
 
   // sw/precache.gen.ts
-  var RELEASE_ID = "55dc4438a3d2";
+  var RELEASE_ID = "e4e086aa2e7d";
   var PRECACHE_URLS = [
-    "/assets/AnalyticsSurface-Dj6000lG.js",
-    "/assets/GlobalAnalyticsPage-DnbXMAWO.js",
-    "/assets/Markdown-DkStbehN.js",
+    "/assets/AnalyticsSurface-D3P0nC9m.js",
+    "/assets/GlobalAnalyticsPage-DDzKX2yD.js",
+    "/assets/Markdown-CHK0cjVu.js",
+    "/assets/SessionChatPage-D_mSdva7.js",
     "/assets/SessionChatPage-J_Pba2bE.css",
-    "/assets/SessionChatPage-LJTxhsOV.js",
     "/assets/addon-fit-DOCEibfw.js",
-    "/assets/index-Bi63Q5vE.css",
-    "/assets/index-Cs-1FvVV.js",
-    "/assets/index-DtjKXRW8.js",
+    "/assets/index-BXWT9jJi.js",
+    "/assets/index-CsYIHH8u.js",
+    "/assets/index-DcUH_Ud2.css",
     "/assets/ort.bundle.min-B0AK_E7l.js",
-    "/assets/remote-enhancement-C6oyskhX.js",
+    "/assets/remote-enhancement-CW5zhOto.js",
     "/assets/xterm-CASmyfyk.js",
     "/icons/apple-touch-icon.1d79d00c19.png",
     "/icons/favicon.1e0c791b41.ico",
@@ -67,7 +67,7 @@
     "/icons/icon-512.4d6591da01.png",
     "/icons/maskable-192.a2dc4e508d.png",
     "/icons/maskable-512.17e4f04ec4.png",
-    "/offline.55dc4438a3d2.html"
+    "/offline.e4e086aa2e7d.html"
   ];
 
   // sw/policy.ts
