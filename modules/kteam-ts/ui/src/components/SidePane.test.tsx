@@ -202,8 +202,12 @@ describe('workspace', () => {
     expect(html).toContain('data-conversation="visible"');
     expect(html).toContain('role="complementary"');
     expect(html).toContain('role="tablist"');
-    // Nine side-pane surfaces plus the Task surface's List/Kanban/DAG tabs.
-    expect(html.match(/role="tab"/g)?.length).toBe(12);
+    // The seven DEFAULT tabs (pins, tasks, skills, tree, mcp, needs, cost)
+    // plus the Task surface's own List/Kanban/DAG tabs. Web, files and
+    // terminals join the strip only when something opens them.
+    expect(html.match(/role="tab"/g)?.length).toBe(10);
+    // The + picker rides beside the strip.
+    expect(html).toContain('aria-label="Add or remove tabs"');
     expect(html).toContain('role="tabpanel"');
     expect(html).toContain('Opened Tasks beside the conversation');
     expect(html).not.toContain('aria-modal');
@@ -270,8 +274,11 @@ describe('workspace', () => {
     // The conversation STAYS MOUNTED behind the sheet — draft and scroll survive.
     expect(html).toContain('data-conversation="visible"');
     expect(html).toContain('aria-modal="true"');
-    expect(html).toContain('kt-sheet-tabs');
-    expect(html.match(/role="tab"/g)?.length).toBe(9);
+    // Mobile NEVER shows a horizontal tab strip: one tab control opens the
+    // switcher modal instead.
+    expect(html).not.toContain('kt-sheet-tabs');
+    expect(html).not.toContain('role="tablist"');
+    expect(html).toContain('aria-label="Switch tab — Pins is showing"');
     expect(html).toContain(SIDE_PANE_SURFACES.pins.closeLabel);
     expect(html).not.toContain('role="complementary"');
   });

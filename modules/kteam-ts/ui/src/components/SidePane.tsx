@@ -54,15 +54,29 @@ import {
   CircleAlert,
   FolderGit2,
   GitFork,
-  Globe2,
   LayoutGrid,
   ListTodo,
-  Pin,
-  Sparkles,
   SquareTerminal,
   X,
   type LucideIcon,
 } from 'lucide-react';
+import {
+  activateSidePaneTab,
+  deactivateSidePane,
+  getSidePaneTabDefinition,
+  getSidePaneTabDefinitions,
+  openSidePaneTab,
+  readSidePaneTabsState,
+  removeSidePaneTab,
+  resetSidePaneTabsStates,
+  SIDE_PANE_BUILT_IN_TABS,
+  sortSidePaneTabs,
+  subscribeSidePaneTabRegistry,
+  subscribeSidePaneTabsState,
+  writeSidePaneTabsState,
+  type SidePaneTabDefinition,
+  type SidePaneTabId,
+} from '../lib/side-pane-tab-model';
 import {
   clampSidePaneWidth,
   getSidePanePreferences,
@@ -88,7 +102,7 @@ import { AttentionSurface } from './AttentionPanel';
 import { LineageSurface } from './LineageSurface';
 import { SkillsSurface } from './SkillsSurface';
 import { SidePaneResizeHandle } from './SidePaneResizeHandle';
-import { SidePaneTabs, sidePanePanelId, sidePaneTabId, type SidePaneTabSpec } from './SidePaneTabs';
+import { SidePaneTabs, sidePanePanelId, sidePaneTabId } from './SidePaneTabs';
 import { UnifiedBrowserSurface } from './UnifiedBrowserSurface';
 import { WebTerminals } from './WebTerminals';
 
@@ -117,91 +131,84 @@ export interface SidePaneSurfaceMeta {
   unavailableReason?: string;
 }
 
-/** What the reader is told opened, and how the sheet dismiss is labelled. */
-export const SIDE_PANE_SURFACES: Record<SidePaneSurface, SidePaneSurfaceMeta> = {
-  browser: { label: 'Browser', tabLabel: 'Web', closeLabel: 'Close browser', icon: Globe2 },
-  files: { label: 'Files', tabLabel: 'Files', closeLabel: 'Close files', icon: FolderGit2 },
-  tasks: { label: 'Tasks', tabLabel: 'Tasks', closeLabel: 'Close tasks', icon: ListTodo },
-  pins: { label: 'Pins', tabLabel: 'Pins', closeLabel: 'Close pins', icon: Pin },
-  terminals: { label: 'Terminals', tabLabel: 'Term', closeLabel: 'Close terminals', icon: SquareTerminal },
-  skills: { label: 'Skills', tabLabel: 'Skill', closeLabel: 'Close skills', icon: Sparkles },
-  lineage: { label: 'Lineage', tabLabel: 'Tree', closeLabel: 'Close lineage', icon: GitFork },
-  analytics: {
-    label: 'Analytics',
-    tabLabel: 'Cost',
-    closeLabel: 'Close analytics',
-    icon: ChartNoAxesCombined,
-  },
-  attention: {
-    label: 'Attention',
-    tabLabel: 'Needs',
-    closeLabel: 'Close attention',
-    icon: CircleAlert,
-  },
-  mcp: {
-    label: 'MCP',
-    tabLabel: 'MCP',
-    closeLabel: 'Close MCP',
-    icon: Cable,
-    unavailableReason: 'No MCP data source is connected yet.',
-  },
-};
+/** What the reader is told opened, and how the sheet dismiss is labelled.
+ *  Derived from the tab model's built-in definitions — ONE source of tab
+ *  identity — in the historical key order existing consumers iterate. */
+export const SIDE_PANE_SURFACES: Record<SidePaneSurface, SidePaneSurfaceMeta> = Object.fromEntries(
+  SIDE_PANE_BUILT_IN_TABS.map(def => [
+    def.id,
+    {
+      label: def.label,
+      tabLabel: def.shortLabel,
+      closeLabel: def.closeLabel,
+      icon: def.icon,
+      ...(def.unavailableReason ? { unavailableReason: def.unavailableReason } : {}),
+    },
+  ]),
+) as Record<SidePaneSurface, SidePaneSurfaceMeta>;
 
 /** Surfaces that, once opened, stay MOUNTED (hidden) on desktop when the
  *  reader switches surface or closes the pane — for surfaces whose unmount
- *  tears down something expensive or stateful. Members: `terminals` (each open
- *  terminal holds a live WebSocket and an xterm scrollback buffer; unmounting
- *  per open would drop scrollback and churn reconnects) and `browser` (a live
- *  Chrome/profile the human may be logged into).
+ *  tears down something expensive or stateful. Members (the definitions'
+ *  `retain` flag): `terminals` (each open terminal holds a live WebSocket and
+ *  an xterm scrollback buffer; unmounting per open would drop scrollback and
+ *  churn reconnects) and `browser` (a live Chrome/profile the human may be
+ *  logged into).
  *  Everything else stays mount-per-open on purpose — that is what resets
  *  transient state (pins relies on it). Skills likewise remounts so its dynamic
  *  account catalog refreshes. Retention is desktop-only — the mobile sheet is
  *  a focus-trapped dialog and must fully unmount on close. */
-export const RETAINED_SURFACES: ReadonlySet<SidePaneSurface> = new Set<SidePaneSurface>(['browser', 'terminals']);
+export const RETAINED_SURFACES: ReadonlySet<SidePaneSurface> = new Set(
+  SIDE_PANE_BUILT_IN_TABS.filter(def => def.retain).map(def => def.id as SidePaneSurface),
+);
 
 /** The spoken confirmation for a surface opening. Desktop names WHERE it
  *  opened, because the reader's context did not change — the conversation is
  *  still in front of them. The browser adds the one fact that distinguishes
  *  this open from the last: the URL. */
 export function sidePaneAnnouncement(
-  surface: SidePaneSurface,
+  surface: SidePaneTabId,
   presentation: SidePanePresentation,
   browser: BrowserDestination | null,
 ): string {
-  const label = SIDE_PANE_SURFACES[surface].label;
+  const label = getSidePaneTabDefinition(surface)?.label ?? surface;
   const base = presentation === 'pane' ? `Opened ${label} beside the conversation` : `Opened ${label}`;
   return surface === 'browser' && browser ? `${base}: ${browser.href}` : base;
 }
 
 // ---- per-session memory ------------------------------------------------------
 //
-// Module state, NOT React state: the workspace component is created and
-// destroyed with its retained session pane (bounded LRU in App.tsx), and an
-// evicted-then-revisited session should come back to the surface it had open.
-// Keyed strictly on session id — this is what makes the pane session-scoped
-// rather than app-scoped.
+// Tab state lives in the unified tab model (../lib/side-pane-tab-model.ts) —
+// module state, NOT React state, keyed strictly on session id, so an
+// evicted-then-revisited session comes back to the tabs it had. The exports
+// below are the HISTORICAL single-surface view of that model, kept for the
+// callers and tests that predate the strip: `surface` is the active tab.
 
 export interface SidePaneSnapshot {
   surface: SidePaneSurface | null;
   browser: BrowserDestination | null;
 }
 
-const CLOSED: SidePaneSnapshot = { surface: null, browser: null };
-const sessionPanes = new Map<string, SidePaneSnapshot>();
-
 export function readSidePaneState(sessionId: string): SidePaneSnapshot {
-  return sessionPanes.get(sessionId) ?? CLOSED;
+  const state = readSidePaneTabsState(sessionId);
+  return { surface: state.active as SidePaneSurface | null, browser: state.browser };
 }
 
-/** Test seam + the workspace's own write path. */
+/** Test seam + the workspace's own write path. Writing a surface also adds
+ *  its tab to the session's strip, exactly like opening it via the model. */
 export function writeSidePaneState(sessionId: string, next: SidePaneSnapshot): void {
-  sessionPanes.set(sessionId, next);
+  const current = readSidePaneTabsState(sessionId);
+  writeSidePaneTabsState(sessionId, {
+    open: next.surface && !current.open.includes(next.surface) ? [...current.open, next.surface] : current.open,
+    active: next.surface,
+    browser: next.browser,
+  });
 }
 
 /** Test seam — the memory is module state, so tests must be able to start
  *  from nothing. */
 export function resetSidePaneStates(): void {
-  sessionPanes.clear();
+  resetSidePaneTabsStates();
 }
 
 // ---- the host contract ---------------------------------------------------------
@@ -210,17 +217,19 @@ export interface SidePaneHost {
   /** The pane element's id, for `aria-controls` on triggers. */
   paneId: string;
   presentation: SidePanePresentation;
-  /** Which surface is open right now (null when closed). */
-  surface: SidePaneSurface | null;
+  /** The ACTIVE tab right now (null when the pane is closed). Widened from
+   *  the built-in surface union: registered wave-2 tabs are ids too. */
+  surface: SidePaneTabId | null;
   /** Authoritative root of this session's Files surface. */
   cwd?: string;
-  /** Open a surface. The opener element, when given, receives focus back on
-   *  close — focus is NEVER moved on open. */
-  open: (surface: SidePaneSurface, opener?: HTMLElement | null) => void;
+  /** Open a tab: add it to the session's strip if absent and activate it.
+   *  The opener element, when given, receives focus back on close — focus is
+   *  NEVER moved on open. */
+  open: (surface: SidePaneTabId, opener?: HTMLElement | null) => void;
   close: () => void;
   /** The trigger gesture: open when closed or on another surface, close when
    *  this surface is already the open one. */
-  toggle: (surface: SidePaneSurface, opener?: HTMLElement | null) => void;
+  toggle: (surface: SidePaneTabId, opener?: HTMLElement | null) => void;
   /** Open one fleet-global task directly in the task surface. */
   openTask: (taskId: string, opener?: HTMLElement | null) => void;
   /** Open a proven session file, optionally selecting one source line/range. */
@@ -462,7 +471,7 @@ function SurfaceBody({
   onAttentionOpen,
   onPinOpen,
 }: {
-  surface: SidePaneSurface;
+  surface: SidePaneTabId;
   sessionId: string;
   cwd?: string;
   browser: BrowserDestination | null;
@@ -606,6 +615,36 @@ function SurfaceBody({
           </div>
         </>
       );
+    default: {
+      // Not a built-in surface: a wave-2 tab registered into the model. Its
+      // definition brings its own body; a definition without one — or an id
+      // whose registration vanished — renders an explicit unknown, never a
+      // confident default.
+      const def = getSidePaneTabDefinition(surface);
+      if (def?.render) {
+        return <>{def.render({ sessionId, presentation, titleId, onClose, cwd, isActive })}</>;
+      }
+      const DefIcon = def?.icon;
+      return (
+        <>
+          <SurfaceHeader
+            icon={DefIcon ? <DefIcon size={17} /> : <CircleAlert size={17} />}
+            label={def?.label ?? 'Unknown tab'}
+            titleId={titleId}
+            presentation={presentation}
+            onClose={onClose}
+            closeLabel={def?.closeLabel ?? 'Close tab'}
+          />
+          <div className="flex min-h-[240px] flex-1 items-center justify-center px-panel py-8 text-center">
+            <p className="m-0 max-w-xs text-ui leading-base text-muted">
+              {def
+                ? (def.unavailableReason ?? 'This tab registered no content to show.')
+                : 'This tab is not registered in this build.'}
+            </p>
+          </div>
+        </>
+      );
+    }
   }
 }
 
@@ -879,7 +918,19 @@ export function SidePaneWorkspace({
   const paneId = `session-side-pane-${generatedId}`;
   const titleId = `${paneId}-title`;
   const openerRef = useRef<HTMLElement | null>(null);
-  const [state, setState] = useState<SidePaneSnapshot>(() => readSidePaneState(sessionId));
+  // Tab state and the tab registry are external stores (the model). The
+  // registry snapshot doubles as the picker catalogue, and subscribing to it
+  // makes a late wave-2 registration appear in a live strip.
+  const allTabs = useSyncExternalStore(
+    subscribeSidePaneTabRegistry,
+    getSidePaneTabDefinitions,
+    getSidePaneTabDefinitions,
+  );
+  const state = useSyncExternalStore(
+    subscribeSidePaneTabsState,
+    () => readSidePaneTabsState(sessionId),
+    () => readSidePaneTabsState(sessionId),
+  );
   const storedPreferences = useSyncExternalStore(
     subscribeSidePanePreferences,
     getSidePanePreferences,
@@ -903,64 +954,52 @@ export function SidePaneWorkspace({
     setSidePaneWidth(width);
     setPreviewWidth(null);
   }, []);
-  // RETAINED_SURFACES members that have been opened in this workspace's life.
-  // They stay mounted (hidden) on desktop after the reader moves away, so
-  // switching surface never tears down a live remote session. Bounded by the
-  // retained set's size and reset with the workspace (session pane eviction).
-  const [everRetained, setEverRetained] = useState<ReadonlySet<SidePaneSurface>>(() => new Set());
+  // Retained tabs (definition `retain` flag) that have been opened in this
+  // workspace's life. They stay mounted (hidden) on desktop after the reader
+  // moves away, so switching tab never tears down a live remote session.
+  // Bounded by the retained definitions and reset with the workspace.
+  const [everRetained, setEverRetained] = useState<ReadonlySet<SidePaneTabId>>(() => new Set());
   const presentation: SidePanePresentation = compact ? 'sheet' : 'pane';
-  const tabSpecs = useMemo<readonly SidePaneTabSpec<SidePaneSurface>[]>(
+  // The strip: this session's open tabs, definitions resolved, strip order.
+  // An id whose registration vanished renders nowhere (unknown must not
+  // invent a tab); its body, if active, says so explicitly.
+  const openTabDefs = useMemo(
     () =>
-      (Object.entries(SIDE_PANE_SURFACES) as Array<[SidePaneSurface, SidePaneSurfaceMeta]>)
-        .filter(([, meta]) => !meta.unavailableReason)
-        .map(([key, meta]) => {
-          const Icon = meta.icon;
-          return {
-            key,
-            label: meta.label,
-            shortLabel: meta.tabLabel,
-            icon: <Icon size={15} aria-hidden="true" />,
-          };
-        }),
-    [],
+      sortSidePaneTabs(state.open)
+        .map(id => getSidePaneTabDefinition(id))
+        .filter((def): def is SidePaneTabDefinition => def !== undefined),
+    // allTabs keys the registry version: a (un)registration re-resolves.
+    [state.open, allTabs],
   );
   useEffect(() => {
-    const surface = state.surface;
-    if (!surface || compact || !RETAINED_SURFACES.has(surface)) return;
-    setEverRetained(current => (current.has(surface) ? current : new Set(current).add(surface)));
-  }, [compact, state.surface]);
-
-  const commit = useCallback(
-    (next: SidePaneSnapshot) => {
-      writeSidePaneState(sessionId, next);
-      setState(next);
-    },
-    [sessionId],
-  );
+    const active = state.active;
+    if (!active || compact || getSidePaneTabDefinition(active)?.retain !== true) return;
+    setEverRetained(current => (current.has(active) ? current : new Set(current).add(active)));
+  }, [compact, state.active]);
 
   const open = useCallback(
-    (surface: SidePaneSurface, opener?: HTMLElement | null) => {
+    (surface: SidePaneTabId, opener?: HTMLElement | null) => {
       if (opener) openerRef.current = opener;
-      commit({ ...readSidePaneState(sessionId), surface });
+      openSidePaneTab(sessionId, surface);
     },
-    [commit, sessionId],
+    [sessionId],
   );
 
   // Close NEVER touches focus unless the opener is still in the document —
   // the same restraint InAppBrowser shipped with. Restoring focus on close is
   // the counterpart of never stealing it on open.
   const close = useCallback(() => {
-    commit({ ...readSidePaneState(sessionId), surface: null });
+    deactivateSidePane(sessionId);
     const opener = openerRef.current;
     openerRef.current = null;
     if (opener && typeof window !== 'undefined' && document.contains(opener)) {
       window.requestAnimationFrame(() => opener.focus());
     }
-  }, [commit, sessionId]);
+  }, [sessionId]);
 
   const toggle = useCallback(
-    (surface: SidePaneSurface, opener?: HTMLElement | null) => {
-      if (readSidePaneState(sessionId).surface === surface) close();
+    (surface: SidePaneTabId, opener?: HTMLElement | null) => {
+      if (readSidePaneTabsState(sessionId).active === surface) close();
       else open(surface, opener);
     },
     [close, open, sessionId],
@@ -1004,14 +1043,20 @@ export function SidePaneWorkspace({
     [open, sessionId],
   );
 
-  // The browser surface's payload rides in the same per-session snapshot, so a
-  // revisited session restores the page it was reading.
+  // The browser surface's payload rides in the same per-session state, so a
+  // revisited session restores the page it was reading. One write: the
+  // browser tab joins the strip, activates, and carries its destination.
   const openDestination = useCallback(
     (destination: BrowserDestination, opener: HTMLElement) => {
       openerRef.current = opener;
-      commit({ surface: 'browser', browser: destination });
+      const current = readSidePaneTabsState(sessionId);
+      writeSidePaneTabsState(sessionId, {
+        open: current.open.includes('browser') ? current.open : [...current.open, 'browser'],
+        active: 'browser',
+        browser: destination,
+      });
     },
-    [commit],
+    [sessionId],
   );
 
   // A hidden retained pane keeping an OPEN focus-trapped sheet alive would own
@@ -1021,9 +1066,8 @@ export function SidePaneWorkspace({
   // for. Deliberately not reopened on return — an unprompted modal is worse
   // than a lost sheet.
   useEffect(() => {
-    if (compact && !active && readSidePaneState(sessionId).surface)
-      commit({ ...readSidePaneState(sessionId), surface: null });
-  }, [active, commit, compact, sessionId]);
+    if (compact && !active && readSidePaneTabsState(sessionId).active) deactivateSidePane(sessionId);
+  }, [active, compact, sessionId]);
 
   // Stable while the pane opens/closes, so hundreds of transcript links do not
   // re-render because a sibling surface changed.
@@ -1035,7 +1079,7 @@ export function SidePaneWorkspace({
     () => ({
       paneId,
       presentation,
-      surface: state.surface,
+      surface: state.active,
       cwd,
       open,
       close,
@@ -1045,35 +1089,26 @@ export function SidePaneWorkspace({
       openAttention,
       openPin,
     }),
-    [
-      paneId,
-      presentation,
-      state.surface,
-      cwd,
-      open,
-      close,
-      toggle,
-      openTask,
-      openCodeReference,
-      openAttention,
-      openPin,
-    ],
+    [paneId, presentation, state.active, cwd, open, close, toggle, openTask, openCodeReference, openAttention, openPin],
   );
 
-  const surfaceOpen = state.surface !== null;
+  const surfaceOpen = state.active !== null;
   // The sheet's slide-out needs its content for one more transition frame
   // after close, so the LAST surface lingers for the sheet path only (the same
   // reason InAppBrowser never cleared its destination on close). The desktop
   // pane unmounts immediately — it has no exit animation.
-  const lastSurfaceRef = useRef<SidePaneSurface | null>(null);
-  if (state.surface) lastSurfaceRef.current = state.surface;
-  const sheetSurface = state.surface ?? lastSurfaceRef.current;
-  const displaySurface = compact ? sheetSurface : state.surface;
-  const body = displaySurface && !(RETAINED_SURFACES.has(displaySurface) && !compact) && (
+  const lastSurfaceRef = useRef<SidePaneTabId | null>(null);
+  if (state.active) lastSurfaceRef.current = state.active;
+  const sheetSurface = state.active ?? lastSurfaceRef.current;
+  const displaySurface = compact ? sheetSurface : state.active;
+  // `role=tabpanel` wiring is desktop-only: the mobile presentation has no
+  // tablist (the switcher modal replaced the strip), so there is no tab
+  // element for the panel to be labelled by — the sheet dialog labels itself.
+  const body = displaySurface && !(getSidePaneTabDefinition(displaySurface)?.retain === true && !compact) && (
     <div
       id={sidePanePanelId(paneId, displaySurface)}
-      role="tabpanel"
-      aria-labelledby={sidePaneTabId(paneId, displaySurface)}
+      role={compact ? undefined : 'tabpanel'}
+      aria-labelledby={compact ? undefined : sidePaneTabId(paneId, displaySurface)}
       className="flex min-h-0 flex-1 flex-col"
     >
       <SurfaceBody
@@ -1085,7 +1120,7 @@ export function SidePaneWorkspace({
         titleId={titleId}
         onClose={close}
         onInsertSkill={onInsertSkill}
-        isActive={active && state.surface === displaySurface}
+        isActive={active && state.active === displaySurface}
         requestedTask={requestedTask}
         onRequestedTaskHandled={() => setRequestedTask(null)}
         requestedCodeReference={requestedCodeReference}
@@ -1114,8 +1149,11 @@ export function SidePaneWorkspace({
   // surface joins the list synchronously — the everRetained effect lands a
   // render later, and a first open must not paint blank for that frame.
   const retainedList =
-    !compact && state.surface && RETAINED_SURFACES.has(state.surface) && !everRetained.has(state.surface)
-      ? [...everRetained, state.surface]
+    !compact &&
+    state.active &&
+    getSidePaneTabDefinition(state.active)?.retain === true &&
+    !everRetained.has(state.active)
+      ? [...everRetained, state.active]
       : [...everRetained];
   const retainedBodies = !compact
     ? retainedList.map(surface => (
@@ -1124,9 +1162,9 @@ export function SidePaneWorkspace({
           id={sidePanePanelId(paneId, surface)}
           role="tabpanel"
           aria-labelledby={sidePaneTabId(paneId, surface)}
-          aria-hidden={state.surface === surface ? undefined : true}
+          aria-hidden={state.active === surface ? undefined : true}
           className={
-            state.surface === surface
+            state.active === surface
               ? 'flex min-h-0 flex-1 flex-col'
               : 'pointer-events-none invisible absolute h-0 overflow-hidden'
           }
@@ -1137,10 +1175,10 @@ export function SidePaneWorkspace({
             cwd={cwd}
             browser={state.browser}
             presentation={presentation}
-            titleId={state.surface === surface ? titleId : `${titleId}-retained-${surface}`}
+            titleId={state.active === surface ? titleId : `${titleId}-retained-${surface}`}
             onClose={close}
             onInsertSkill={onInsertSkill}
-            isActive={active && state.surface === surface}
+            isActive={active && state.active === surface}
             requestedTask={requestedTask}
             onRequestedTaskHandled={() => setRequestedTask(null)}
             requestedCodeReference={requestedCodeReference}
@@ -1180,8 +1218,17 @@ export function SidePaneWorkspace({
               onWidthCommit={commitPaneWidth}
               hidden={!surfaceOpen}
             >
-              {state.surface && (
-                <SidePaneTabs paneId={paneId} tabs={tabSpecs} current={state.surface} onSelect={open} />
+              {state.active && (
+                <SidePaneTabs
+                  paneId={paneId}
+                  presentation="pane"
+                  tabs={openTabDefs}
+                  all={allTabs}
+                  current={state.active}
+                  onSelect={id => activateSidePaneTab(sessionId, id)}
+                  onAdd={open}
+                  onRemove={id => removeSidePaneTab(sessionId, id)}
+                />
               )}
               {body}
               {retainedBodies}
@@ -1189,7 +1236,7 @@ export function SidePaneWorkspace({
           )}
         </div>
         <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          {state.surface ? sidePaneAnnouncement(state.surface, presentation, state.browser) : ''}
+          {state.active ? sidePaneAnnouncement(state.active, presentation, state.browser) : ''}
         </div>
         {compact && sheetSurface && (
           <BottomSheet
@@ -1197,12 +1244,21 @@ export function SidePaneWorkspace({
             open={surfaceOpen}
             onClose={close}
             labelledBy={titleId}
-            closeLabel={SIDE_PANE_SURFACES[sheetSurface].closeLabel}
+            closeLabel={getSidePaneTabDefinition(sheetSurface)?.closeLabel ?? 'Close'}
             panelClassName="h-full overflow-hidden bg-surface"
             maxHeight="calc(var(--app-h, 100dvh) - var(--gap-xs))"
             zIndexClass="z-[70]"
           >
-            <SidePaneTabs paneId={paneId} tabs={tabSpecs} current={sheetSurface} onSelect={open} />
+            <SidePaneTabs
+              paneId={paneId}
+              presentation="sheet"
+              tabs={openTabDefs}
+              all={allTabs}
+              current={sheetSurface}
+              onSelect={id => activateSidePaneTab(sessionId, id)}
+              onAdd={open}
+              onRemove={id => removeSidePaneTab(sessionId, id)}
+            />
             {body}
           </BottomSheet>
         )}
