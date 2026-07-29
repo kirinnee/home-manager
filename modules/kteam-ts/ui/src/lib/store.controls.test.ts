@@ -37,9 +37,10 @@ describe('controls-v1 additive density parsing', () => {
     expect(parseUiControls(JSON.stringify({ projectScope: 42 })).projectScope).toBeNull();
   });
 
-  test('accepts a persisted chatWidth and rejects anything else', () => {
+  test('preserves both existing chatWidth values, accepts balanced, and rejects anything else', () => {
     expect(parseUiControls(JSON.stringify({ chatWidth: 'readable' })).chatWidth).toBe('readable');
     expect(parseUiControls(JSON.stringify({ chatWidth: 'full' })).chatWidth).toBe('full');
+    expect(parseUiControls(JSON.stringify({ chatWidth: 'balanced' })).chatWidth).toBe('balanced');
     expect(parseUiControls(JSON.stringify({ chatWidth: 'wide' })).chatWidth).toBe('full');
   });
 

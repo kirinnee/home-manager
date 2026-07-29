@@ -86,7 +86,7 @@ const CONTROLS_KEY = 'kteam-ui-controls-v1';
 export type ModeFilter = 'all' | InteractionMode;
 export type DashboardView = 'cards' | 'table';
 export type Density = 'full' | 'compact' | 'minimal';
-export type ChatWidth = 'full' | 'readable';
+export type ChatWidth = 'full' | 'balanced' | 'readable';
 
 /** Global, persisted UI controls. They live in the store rather than in the
  *  dashboard so the sidebar slice can render the same controls without either
@@ -102,11 +102,11 @@ export interface UiControls {
   dashboardView: DashboardView | null;
   /** null = use the first-load device default without persisting it. */
   density: Density | null;
-  /** Chat pane horizontal measure. 'full' = full-bleed (today's behaviour);
-   *  'readable' caps the column at a reading measure and centres it. Mostly a
-   *  desktop control — a phone is already narrower than the cap, so it is inert
-   *  there. Non-null default because there is no device-derived answer to defer
-   *  to, unlike `density`. */
+  /** Chat pane horizontal measure. 'full' = full-bleed (today's behaviour),
+   *  'balanced' caps the column at 900px, and 'readable' caps it at 768px.
+   *  Mostly a desktop control — a phone is already narrower than every cap, so
+   *  it is inert there. Non-null default because there is no device-derived
+   *  answer to defer to, unlike `density`. */
   chatWidth: ChatWidth;
   /** Folder mode: focus one project group. The group KEY (a normalised project
    *  path, or a raw cwd for fallback groups) — never the display name, which can
@@ -198,7 +198,10 @@ export function parseUiControls(raw: string | null): UiControls {
       // Optional on read: an older blob has no `chatWidth`, so it degrades to
       // 'full' — which IS today's behaviour, so the field can never poison a
       // set it predates. No key/version bump needed for the same reason.
-      chatWidth: parsed.chatWidth === 'readable' ? 'readable' : 'full',
+      chatWidth:
+        parsed.chatWidth === 'full' || parsed.chatWidth === 'balanced' || parsed.chatWidth === 'readable'
+          ? parsed.chatWidth
+          : DEFAULT_CONTROLS.chatWidth,
       // Additive, like density: absent/invalid/empty → null (the whole fleet),
       // which IS today's behaviour, so an older blob can never mean something
       // else. Stores the group KEY, never the display name.
