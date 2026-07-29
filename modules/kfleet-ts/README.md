@@ -17,8 +17,8 @@ Everything lives under `~/.kfleet/`:
 
 Per agent, `apply` writes a wrapper to `~/.kfleet/bin/<kind>-<name>` and
 materializes its config dir: `~/.claude-<name>`, `~/.codex-<name>`. It only
-touches the files it owns — sessions, auth, sqlite, etc. inside those dirs are
-never removed.
+touches the files it owns — auth and legacy per-home SQLite databases inside
+those dirs are never removed.
 
 If `defaultHomes` is configured, `apply` also materializes the selected resolved
 agents into the bare CLI homes (`~/.claude`, `~/.codex`) so running `claude` or
@@ -36,11 +36,62 @@ kfleet prune    # remove managed wrappers no longer in config.yaml
 kfleet doctor   # check PATH, config validity, agent binaries
 kfleet health   # launch every auto-* agent with a sentinel prompt; report up/down
 kfleet usage    # probe each subscription account (claude/codex/z.ai/minimax) for 5h + weekly usage + login
+kfleet prewarm codex   # reconcile shared Codex rollouts into SQLite without an LLM call
 kfleet serve    # expose Prometheus metrics on /metrics + usage JSON on /usage (background re-probe)
 kfleet service install|uninstall|status|restart   # run `serve` as a launchd/systemd service
 ```
 
 Edit `~/.kfleet/config.yaml`, then run `kfleet apply`. That's the whole loop.
+
+### Shared Codex history and SQLite
+
+With `sharedHistory.codex: true`, kfleet keeps both active `sessions` and
+`archived_sessions` rollout roots (plus `history.jsonl`) under
+`~/.kfleet/shared/codex`. Every generated Codex wrapper then uses the single
+absolute SQLite directory `~/.kfleet/shared/codex/sqlite`. Authentication and
+the rest of each identity's config remain in its own `CODEX_HOME`.
+
+Enabling this is a deliberate same-human trust decision. SQLite-backed runtime
+metadata can include threads, goals, memories, logs, remote-control metadata,
+and possible paginated history/items, so those become visible across the Codex
+fleet. Do not use the pool for mutually untrusted identities. Shared history
+also does not make it safe for two processes to write concurrently to the same
+resumed rollout; use separate threads/worktrees for parallel work.
+
+Use this migration sequence once:
+
+```bash
+# 1. Set sharedHistory.codex: true in config.yaml.
+kfleet apply
+
+# 2. Build/reconcile the fresh shared state database from active + archived rollouts.
+kfleet prewarm codex
+```
+
+`apply` creates a **fresh** shared SQLite directory. It intentionally does not
+copy, merge, rename, or delete any existing per-home databases; they remain as
+rollback artifacts. `prewarm` is the migration boundary. It holds an exclusive
+transaction in a dedicated persistent SQLite lock database under the shared
+pool. SQLite provides atomic cross-process ownership and automatically releases
+the transaction if the owner exits or crashes; concurrent attempts fail with an
+actionable already-running error. Prewarm then starts `codex app-server` and performs the documented
+`initialize` handshake, and calls repair-enabled `thread/list` for all source
+kinds in both active and archived roots. It never starts, resumes, or forks a
+thread and never starts a turn, so it makes no model/LLM request. Use
+`--timeout <seconds>` to override its two-minute protocol timeout.
+
+If `defaultHomes.codex` is configured, the bare `~/.codex` home already joins
+the shared rollout roots, so kfleet also writes the same managed `sqlite_home`
+there. The per-home `.kfleet-sqlite-home.json` sidecar records ownership of that
+single injected key. When no settings source is configured, kfleet parses the
+existing `config.toml` as the base so unrelated user settings survive. On a
+later disable, kfleet restores the original `sqlite_home` value (including its
+original absence) only while the current value still equals the sidecar's
+marked value, preserves every other current key, and then removes the sidecar;
+a user-changed `sqlite_home` is preserved. The marker is atomically replaced
+before config mutation, so an interrupted enable remains safely reconcilable.
+Without a configured Codex default home, kfleet leaves bare `~/.codex`
+untouched.
 
 `health`/`serve` probe the **`auto-*`** wrappers (the non-interactive ones automation
 drives) by actually launching each with a tiny "echo a sentinel" prompt — a real
@@ -212,7 +263,12 @@ Each target may be a resolved agent name (`kirin`, `personal`) or a full wrapper
 name (`claude-kirin`, `codex-personal`). `kfleet apply` writes that agent's owned
 assets into the bare CLI home (`~/.claude` / `~/.codex`) in addition to the normal
 per-agent home. It does not delete auth, sessions, sqlite databases, or other
-unmanaged files already in those homes.
+unmanaged files already in those homes. When Codex shared history is enabled,
+the configured bare Codex home receives the same shared `sqlite_home` as the
+generated wrappers; an unconfigured bare home remains untouched.
+The owned SQLite override is tracked in `.kfleet-sqlite-home.json`, so disabling
+sharing reconciles only that key and preserves unrelated or subsequently edited
+Codex settings.
 
 **Alias** — `name` → `{ <kind>: flags }`. Fans out into one command per agent of
 each listed kind: the alias **replaces the kind prefix** (keeping any variant
