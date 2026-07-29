@@ -19,9 +19,11 @@ yaml=$(sops -d "${SECRETS_FILE}")
 [ -f "$HOME/.secrets" ] && rm "$HOME/.secrets"
 # Create provider credentials as 0600 from the first byte; chmod-after-write
 # would leave a world-readable window under a permissive activation umask.
+# @sh shell-quotes the value, so secrets containing spaces or shell
+# metacharacters (passwords, not just API tokens) survive being sourced.
 (
   umask 077
-  yq -r '.env | to_entries[] | "export \(.key)=\(.value)"' <<<"$yaml" >>"$HOME/.secrets"
+  yq -r '.env | to_entries[] | "export \(.key)=\(.value|@sh)"' <<<"$yaml" >>"$HOME/.secrets"
 )
 
 # nix secrets

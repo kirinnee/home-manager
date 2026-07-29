@@ -2870,3 +2870,83 @@ escalation. Pin one test where a single sweep has both anomaly classes and cap
 
 _(Linda, session `ms3wfazx-e3f00d06`; traced independently by Dakota
 `ms3wkmyk-111d22de`; append-only diagnosis, no daemon fix.)_
+---
+
+## 2026-07-27 — `running` status hides credential-429 dead shells (liveness blind spot)
+
+**Problem.** When an account's credentials enter provider cooldown, the harness starts, prints the
+banner, accepts the injected turn prompt, and then loops on `API Error: Request rejected (429) ·
+All credentials for model <model> are cooling down via provider claude` (observed at
+`attempt 8/10`). `kteam ps` / `kteam status` report the session as **`running`** the whole time.
+The session never makes a single successful API call and produces no work.
+
+**Evidence** (claude-auto-loge, `claude-fable-5`, 2026-07-27):
+
+- `tatiana` (`ms3s62vm-b5a7cb60`) — `running`, `context 0% used`, `liveness: transcript 2455s`,
+  pane shows `429 ... Retrying in 25s · attempt 8/10` with two turn prompts queued behind it.
+- `sherry` (`ms3uln4c-8f53cedf`) — `running`, `context 0% used`, `liveness: transcript -`,
+  same 429 retry loop on turn 1.
+
+Both were spawned by other leads (`parent=ms3s22me-4898d4a8` and `parent=ms3tyx0m-6dadf936`) and
+were still counted as live teammates. Peer `juan` (`ms3pp1xf-b6b15180`) independently reported the
+same account-wide failure and that "several already have" died this way.
+
+**Why the existing signals don't catch it.** `subprocess`/`pane` liveness stay fresh (the harness
+is genuinely alive and repainting its retry countdown), so the stall monitor sees a healthy
+process. The two signals that *do* discriminate — `context 0% used` after N turns, and a
+`transcript` age far exceeding turn age — are surfaced in `status` but not acted on.
+
+**Suspected code path** (`modules/kteam-ts`): the liveness/stall evaluation that feeds the
+`running` verdict weights subprocess+pane freshness and does not treat "harness alive but zero
+tokens consumed / zero transcript growth since launch" as a distinct failure class. There is no
+recognizer for the provider-level 429 cooldown string in pane output, so an account-wide
+credential outage is indistinguishable from normal work.
+
+**Suggested fix.** Add a `credentials_cooling` / `no_progress` verdict: if `context == 0%` AND
+transcript age > launch age AND the pane matches the cooldown/429 signature, mark the session
+failed (or at minimum surface a loud warning in `ps`) instead of `running`, and skip the account
+for subsequent `start` calls until a probe succeeds.
+
+**Workaround.** Before trusting a fresh teammate, check `kteam status <name>` for `context 0% used`
+plus a stale/absent `transcript` age, and `kteam snapshot <name>` for the 429 string. Kill and
+respawn on a healthy account (`codex-auto-loge` / `gpt-5.6-sol` was verified healthy at the time).
+
+---
+
+## 2026-07-28 — bootstrap queue accepts unbounded launches; fleet wedges at load 245
+
+**Problem.** `kteam start` keeps accepting new sessions with no admission control against host
+capacity. With 94 sessions already `running`, five further `start` calls were accepted, created
+their session dirs and `turn-001.md`, then stalled in the bootstrap queue and **never spawned a tmux
+pane**. They sit in `starting` indefinitely and do zero work, while still counting as fleet load.
+
+**Evidence** (2026-07-28, label `pe-zerobox`, sessions `ms50ixx1-4da4db1f`, `ms50kkkp-f9df7ee2`,
+`ms50memc-60fd173b`, `ms50ogy4-3531cf89`, `ms50s6wu-36444fe4`):
+
+- `events.jsonl` seq 3: `session.launch_backgrounded` — `"launch still in progress after 45s
+  (bootstrap queue); it continues in the background"`. No subsequent event.
+- `logs/turn-001.txt` is **0 bytes** for every one of the five.
+- `tmux has-session -t kteam-<id>-agent` → no pane for any of the five. `tmux ls` listed only two
+  panes fleet-wide, neither of them these.
+- `kteam daemon status`: `ok: false`, `eventLoopLagMs: 5089`, `running: 94`, `monitors: 58`,
+  `unmonitoredRunning: 36`.
+- Host: **`load average: 245.54, 241.55, 198.78`** on a 9-day-up Mac.
+- Degradation is severe enough that `kteam status <name>` and even `tmux has-session` **exceed a
+  120s timeout**, so the CLI cannot be used to triage the very condition it created.
+
+**Suspected code path** (`modules/kteam-ts`): the start/bootstrap path has a per-launch timeout
+(45s → background) but **no global admission gate**. Nothing consults host load, CPU count, or the
+count of already-`running` sessions before accepting another launch. `unmonitoredRunning: 36`
+suggests the monitor-arming path is also starved and cannot keep up with the sessions that did
+launch.
+
+**Suggested fix.** Add admission control to `start`: refuse (or queue with a visible, reported
+depth) when `running` exceeds a configurable cap or when 1-min load exceeds ~N×cores. Surface
+queue depth in `ps`/`daemon status`. A session that has been `starting` past the launch timeout
+with a 0-byte turn log and no pane should be marked `failed`, not left as `starting` forever —
+this is the same "status lies about liveness" family as the 429 dead-shell entry above.
+
+**Workaround.** Before a wide fan-out, check `kteam daemon status` for `running`/`eventLoopLagMs`
+and check host `uptime`. If load is already high, do the work inline instead of spawning. To triage
+when the CLI is wedged, read `~/.kteam/<id>/events.jsonl` and `logs/turn-*.txt` directly and check
+`tmux has-session -t kteam-<id>-agent` — do not rely on `kteam ps` status.

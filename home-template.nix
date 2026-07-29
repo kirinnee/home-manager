@@ -863,6 +863,19 @@ rec {
         pack = "tar -zcvf archive.tar.gz";
         glog = "git log --oneline --decorate --graph";
         devbox = "ssh kirin@$DEVBOX";
+        # PE dev box (kirin-devbox, vpc-qa-us-east-1). Shell over SSM - the box
+        # has zero SG ingress and no public IP, so there is nothing to ssh to
+        # directly. Resolves the instance BY TAG so it survives a replace.
+        # `ssh pebox` also works (see ~/.ssh/config.d/pebox.conf) and is what
+        # rsync-based tooling (kloge push, scripts/box/replicate.sh) needs.
+        pebox = "aws ssm start-session --region us-east-1 --target \"$(aws ec2 describe-instances --region us-east-1 --filters 'Name=tag:Name,Values=kirin-devbox' 'Name=instance-state-name,Values=running' --query 'Reservations[0].Instances[0].InstanceId' --output text)\"";
+        # Codex/kfleet OAuth on the PE box: `codex login` there listens on ITS
+        # localhost:1455 and prints a URL; this forward lets the redirect on THIS
+        # machine reach it. Kept OUT of ~/.ssh/config.d/pebox.conf on purpose — a
+        # Host-level LocalForward binds on every session and collides with `ssh
+        # box` (same port) and with a second pebox session. Opt in only when
+        # logging in; use plain `ssh pebox` the rest of the time.
+        pebox-login = "ssh -L 1455:localhost:1455 pebox";
         wr = "wrangler";
         rc = "open \"/nix/store/$(ls /nix/store | grep raycast | grep -v '.drv')\"";
         cyan = "cyanprint";
