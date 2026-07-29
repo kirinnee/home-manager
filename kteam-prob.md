@@ -3422,3 +3422,73 @@ version recreates the trigger and the in-memory bootstrap state resets; duplicat
 not required because the primary key rejected the duplicate.
 
 _(B44, session `ms5ep4kg-b9d5a0a8`; live database inspected read-only, never mutated; daemon never restarted.)_
+
+## Live-source CLI: one teammate's mid-refactor breaks every kteam invocation on the machine (2026-07-29)
+
+**Problem.** The installed `kteam` wrapper (`/nix/store/…-kteam/bin/kteam`) is
+`exec bun run ~/.config/home-manager/modules/kteam-ts/src/index.ts "$@"` — it executes the LIVE
+working-tree source, not a built artifact. While a teammate was mid-refactor on the tasks module
+(#F126/#F127), `tasks-workflow.ts` had an export removed before its importers were updated, and for
+that whole window EVERY `kteam` command on the machine died at module load
+(`SyntaxError: Export named 'assertTaskPhaseInWorkflow' not found`). A teammate finishing its task
+could not `kteam signal done` — nor even `kteam signal waiting` to declare the wait, because the
+signaling channel itself was the broken CLI.
+
+**Evidence.** `kteam signal done` from session `ms5o6g2d-5fab7882` at ~06:05Z failed with the error
+above while `git status` showed `modules/kteam-ts/src/tasks-workflow.ts` (+85/−73, uncommitted) with
+`tasks.ts`/`tasks-store.ts` still importing the deleted `assertTaskPhaseInWorkflow`. A `kteam send`
+30 s earlier had succeeded — the breakage tracked the teammate's save order exactly.
+
+**Suspected code path.** Not a code bug in kteam-ts itself: the packaging choice in the nix wrapper
+(`bun run <repo>/src/index.ts`) plus the shared-worktree house pattern. Any multi-file refactor of
+kteam-ts makes the CLI unavailable fleet-wide between the first save and the last.
+
+**Workaround.** Run the committed version of the CLI from an export of HEAD with node_modules
+symlinked in: `git archive HEAD modules/kteam-ts | tar -x -C $tmp` then
+`bun run $tmp/modules/kteam-ts/src/index.ts …` (daemon is a separate long-lived process and is
+unaffected). Longer term: point the wrapper at a built `dist/` artifact or a store-copied source
+snapshot so editing the repo cannot take down the live CLI.
+
+_(#F129, session `ms5o6g2d-5fab7882`; worked around read-only, no teammate files touched, daemon untouched.)_
+
+## kteam's own source is live-executed from the working tree, so a half-finished refactor is a fleet-wide outage (2026-07-29)
+
+**Problem.** An agent refactoring `modules/kteam-ts/src/tasks-workflow.ts` removed
+an export while `tasks.ts` still imported it. The `kteam` CLI runs _directly from
+the working tree_ (`bun run .../src/index.ts`), not from a built artifact, so the
+instant that import dangled **every `kteam` invocation fleet-wide died**:
+
+```
+SyntaxError: Export named 'assertTaskPhaseInWorkflow' not found in module
+  .../src/tasks-workflow.ts
+```
+
+**Why it is severe.** This is not a broken build that fails a gate — it is a live
+outage. 30+ running agents use `kteam` for task updates, peer messaging and
+status. Critically, **`kteam send` is also down**, so the lead cannot warn the
+agent causing it, nor coordinate recovery. Diagnosis and repair have to happen
+entirely outside the tool.
+
+The daemon process survives (it loaded its code at boot), which makes the outage
+_less_ visible: `ps` shows a healthy daemon while every client call fails.
+
+**Second-order trap.** Reverting only the file named in the error is not enough
+and makes it fail _differently_ — the refactor spanned `tasks-types.ts`,
+`tasks-workflow.ts` and `tasks-store.ts`, so a partial revert produced a new
+dangling export (`TASK_PRIORITIES`). Only reverting the whole in-flight set back
+to HEAD restores service.
+
+**Recovery that worked.**
+
+1. Copy every dirty file of the offending set somewhere safe (do NOT discard —
+   it is hours of an agent's work).
+2. `git checkout HEAD --` the _entire_ set, not just the file in the error.
+3. Verify with any `kteam` command.
+4. Only then message the agent, since messaging requires the CLI.
+
+**Structural fix needed.** Any agent refactoring `modules/kteam-ts/src/**` must
+work in its own git worktree and hand the lead a complete set to land atomically.
+The house rules did not say this — they warn about per-file ownership in the
+shared tree but never that kteam's own source is live-executed. That omission is
+the real defect here, not the agent's edit. Consider also running the CLI/daemon
+from a built artifact so the working tree is not the live runtime.
