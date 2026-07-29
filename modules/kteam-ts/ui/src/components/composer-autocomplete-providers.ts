@@ -41,11 +41,6 @@ export const COMPOSER_BUILTIN_COMMANDS: readonly ComposerBuiltinCommand[] = [
     description: 'Summarise the conversation so far and free up context',
     harnesses: ['claude', 'codex'],
   },
-  {
-    name: 'clear',
-    description: "Clear the model's conversation context",
-    harnesses: ['claude', 'codex'],
-  },
 ];
 
 export type ComposerTaskSummary = Pick<TaskSummary, 'id' | 'title' | 'status'>;

@@ -646,13 +646,14 @@ describe('inject() consumption outcomes are exactly-once', () => {
     expect(controller.submitCount).toBe(3);
   });
 
-  // /clear and /compact use this same exactly-once injection path.
-  test('/clear consumed as a local wipe is handled once, never retyped', async () => {
-    const clearFilled = ['› /clear', '', '  gpt-5.6-sol high · Context 0% used'].join('\n');
-    const cleared = ['  Welcome back', '', '› ', '', '  Context 0% used'].join('\n');
-    const controller = new InjectionController([idle, clearFilled], [{ pane: cleared, promptReady: true }]);
+  // /compact uses the same exactly-once injection path as /model. Codex
+  // compacts locally (handled-local); Claude runs a model turn (turn-started).
+  test('/compact consumed as a local completion is handled once, never retyped', async () => {
+    const compactFilled = ['› /compact', '', '  gpt-5.6-sol high · Context 0% used'].join('\n');
+    const compacted = ['  Welcome back', '', '› ', '', '  Context 0% used'].join('\n');
+    const controller = new InjectionController([idle, compactFilled], [{ pane: compacted, promptReady: true }]);
 
-    expect(await controller.inject('kteam-x-agent', '/clear')).toBe('handled-local');
+    expect(await controller.inject('kteam-x-agent', '/compact')).toBe('handled-local');
     expect(controller.injectionCount).toBe(1);
     expect(controller.submitCount).toBe(1);
   });

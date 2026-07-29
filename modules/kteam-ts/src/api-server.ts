@@ -993,7 +993,7 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             });
           }
           if (action === 'runtime' && request.method === 'POST') {
-            // Model/effort changes alter cost and behaviour; clear/compact alter
+            // Model/effort changes alter cost and behaviour; compact alters
             // live context. Refuse an honestly self-identifying peer before
             // body parsing, dedupe bookkeeping, or any service mutation.
             if (!isHumanAdminActor(actor))
@@ -1002,13 +1002,8 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
                 403,
               );
             const input = await body<RuntimeControlRequest>(request);
-            if (
-              input.action !== 'model' &&
-              input.action !== 'effort' &&
-              input.action !== 'clear' &&
-              input.action !== 'compact'
-            )
-              throw new HttpError(400, 'runtime action must be "model", "effort", "clear", or "compact"');
+            if (input.action !== 'model' && input.action !== 'effort' && input.action !== 'compact')
+              throw new HttpError(400, 'runtime action must be "model", "effort", or "compact"');
             return await applyOnce(() => options.service.runtime(id, input));
           }
           if (action === 'answer' && request.method === 'POST') {

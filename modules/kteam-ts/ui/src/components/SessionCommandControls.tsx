@@ -1,12 +1,12 @@
-// Harness-native /clear and /compact context commands.
+// Harness-native /compact context command.
 //
-// /clear immediately wipes the model's conversation context, so the UI gates
-// it behind a two-step confirmation. kteam keeps its transcript; only the
-// running model forgets. /compact summarises context and may run a short model
-// turn on Claude. Both commands are idle-only and never queue.
+// /compact summarises the model's conversation context and may run a short
+// model turn on Claude (Codex compacts locally). The command is idle-only and
+// never queues. kteam keeps its transcript; only the running model's context
+// is affected.
 
 import { useEffect, useState } from 'react';
-import { AlertTriangle, LoaderCircle, Minimize2, Trash2 } from 'lucide-react';
+import { LoaderCircle, Minimize2 } from 'lucide-react';
 import type { SessionView } from '../types';
 import { api, ApiError } from '../lib/api';
 import { TERMINAL_STATUSES } from '../lib/utils';
@@ -30,15 +30,13 @@ export function SessionCommandControls({ view, open, canControl }: SessionComman
   const { config, state } = view;
   const terminal = TERMINAL_STATUSES.has(state.status);
   const promptReady = state.promptReady === true;
-  const [busyCommand, setBusyCommand] = useState<'clear' | 'compact' | null>(null);
-  const [confirmingClear, setConfirmingClear] = useState(false);
+  const [busyCommand, setBusyCommand] = useState<'compact' | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [restartRequired, setRestartRequired] = useState(false);
 
   useEffect(() => {
     setBusyCommand(null);
-    setConfirmingClear(false);
     setFailure(null);
     setNotice(null);
     setRestartRequired(false);
@@ -46,29 +44,24 @@ export function SessionCommandControls({ view, open, canControl }: SessionComman
   useEffect(() => {
     if (open) {
       setRestartRequired(false);
-      setConfirmingClear(false);
     }
   }, [open]);
 
   const ready = canControl && !terminal && promptReady && !restartRequired;
 
-  async function run(action: 'clear' | 'compact') {
+  async function run() {
     if (!ready || busyCommand) return;
-    setBusyCommand(action);
+    setBusyCommand('compact');
     setFailure(null);
     setNotice(null);
     try {
-      await api.runtime(config.id, { action }, crypto.randomUUID());
-      setConfirmingClear(false);
+      await api.runtime(config.id, { action: 'compact' }, crypto.randomUUID());
       setNotice(
-        action === 'clear'
-          ? 'Cleared the model’s context. This kteam transcript still shows the prior history — only the model forgot it.'
-          : 'Compacting context. Claude runs a short turn to summarise (watch the transcript for completion); Codex compacts immediately.',
+        'Compacting context. Claude runs a short turn to summarise (watch the transcript for completion); Codex compacts immediately.',
       );
     } catch (error) {
       if (isSessionCommandUnsupported(error)) {
         setRestartRequired(true);
-        setConfirmingClear(false);
         return;
       }
       setFailure(error instanceof ApiError ? error.message : String(error));
@@ -83,7 +76,7 @@ export function SessionCommandControls({ view, open, canControl }: SessionComman
       <div className="mt-4 border-t border-border-soft pt-3">
         <h3 className="m-0 text-ui font-semibold text-fg">{title}</h3>
         <p className="mt-1 text-meta leading-base text-muted">
-          Clearing and compacting context need a running session. Resume or relaunch this session first.
+          Compacting context needs a running session. Resume or relaunch this session first.
         </p>
       </div>
     );
@@ -93,7 +86,7 @@ export function SessionCommandControls({ view, open, canControl }: SessionComman
       <div className="mt-4 border-t border-border-soft pt-3">
         <h3 className="m-0 text-ui font-semibold text-fg">{title}</h3>
         <p className="mt-1 text-meta leading-base text-muted">
-          This origin is read-only, so it cannot clear or compact the running session.
+          This origin is read-only, so it cannot compact the running session.
         </p>
       </div>
     );
@@ -103,7 +96,7 @@ export function SessionCommandControls({ view, open, canControl }: SessionComman
     <div className="mt-4 border-t border-border-soft pt-3">
       <h3 className="m-0 text-ui font-semibold text-fg">{title}</h3>
       <p className="mt-1 text-meta leading-base text-muted">
-        Clear or compact the running model’s context in place. These do not move accounts or relaunch the pane.
+        Compact the running model’s context in place. This does not move accounts or relaunch the pane.
       </p>
       {!promptReady && (
         <p className="mt-2 text-meta leading-base text-warn">
@@ -113,14 +106,14 @@ export function SessionCommandControls({ view, open, canControl }: SessionComman
 
       {restartRequired ? (
         <p role="alert" className="mt-2 rounded-control border border-warn-border bg-surface-2 p-3 text-ui text-warn">
-          Daemon restart required to enable /clear and /compact from the web UI. Nothing was changed.
+          Daemon restart required to enable /compact from the web UI. Nothing was changed.
         </p>
       ) : (
         <div className="mt-3 grid gap-2">
           <button
             type="button"
             disabled={!ready || busyCommand !== null}
-            onClick={() => void run('compact')}
+            onClick={() => void run()}
             aria-label="Compact this session’s context"
             className="kt-btn flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
           >
@@ -138,63 +131,6 @@ export function SessionCommandControls({ view, open, canControl }: SessionComman
               <Minimize2 size={15} aria-hidden="true" className="shrink-0" />
             )}
           </button>
-
-          {confirmingClear ? (
-            <div className="rounded-control border border-err-border bg-surface-2 p-3">
-              <p className="m-0 flex items-start gap-xs text-ui leading-base text-err">
-                <AlertTriangle size={15} aria-hidden="true" className="mt-0.5 shrink-0" />
-                <span>
-                  Clear the model’s context? This is not undoable — the model forgets the conversation. (This kteam
-                  transcript is kept and still shows the history.)
-                </span>
-              </p>
-              <div className="mt-3 flex flex-wrap gap-sm">
-                <button
-                  type="button"
-                  disabled={busyCommand !== null}
-                  onClick={() => void run('clear')}
-                  aria-label="Confirm: clear the model’s context"
-                  data-variant="danger"
-                  className="kt-btn flex min-h-[44px] flex-1 items-center justify-center gap-sm"
-                >
-                  {busyCommand === 'clear' ? (
-                    <LoaderCircle size={15} aria-hidden="true" className="animate-spin" />
-                  ) : (
-                    <Trash2 size={15} aria-hidden="true" />
-                  )}
-                  <span>Yes, clear context</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={busyCommand !== null}
-                  onClick={() => setConfirmingClear(false)}
-                  className="kt-btn flex min-h-[44px] flex-1 items-center justify-center"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              type="button"
-              disabled={!ready || busyCommand !== null}
-              onClick={() => {
-                setFailure(null);
-                setNotice(null);
-                setConfirmingClear(true);
-              }}
-              aria-label="Clear this session’s context (asks for confirmation)"
-              className="kt-btn flex min-h-[44px] w-full items-center justify-between gap-sm text-left"
-            >
-              <span className="min-w-0">
-                <span className="block truncate text-ui font-semibold text-err">Clear context…</span>
-                <span className="block truncate text-meta text-muted">
-                  Wipe the model’s memory. Destructive — asks first.
-                </span>
-              </span>
-              <Trash2 size={15} aria-hidden="true" className="shrink-0 text-err" />
-            </button>
-          )}
         </div>
       )}
 

@@ -187,7 +187,7 @@ describe('/ skills provider', () => {
       } satisfies ComposerSkillsResponse);
 
     const result = await createSkillsProvider('one').candidates(context('/', 'compact'));
-    expect(result.candidates.slice(0, 2)).toEqual([
+    expect(result.candidates).toEqual([
       expect.objectContaining({
         kind: 'command',
         label: 'compact',
@@ -195,15 +195,14 @@ describe('/ skills provider', () => {
         group: 'Commands',
         replacement: '/compact',
       }),
-      expect.objectContaining({ kind: 'command', label: 'clear', group: 'Commands', replacement: '/clear' }),
+      expect.objectContaining({ kind: 'skill', label: 'compact', group: 'Skills' }),
     ]);
-    expect(result.candidates.at(-1)).toMatchObject({ kind: 'skill', label: 'compact', group: 'Skills' });
     expect(rankComposerCandidates(result.candidates, 'compact').map(candidate => candidate.id)).toEqual([
       'command:compact',
       'skill:compact',
     ]);
-    expect(builtinCommandsForHarness('claude').map(command => command.name)).toEqual(['compact', 'clear']);
-    expect(builtinCommandsForHarness('codex').map(command => command.name)).toEqual(['compact', 'clear']);
+    expect(builtinCommandsForHarness('claude').map(command => command.name)).toEqual(['compact']);
+    expect(builtinCommandsForHarness('codex').map(command => command.name)).toEqual(['compact']);
   });
 
   test('shows harness-valid commands synchronously while the skills catalog warms', async () => {
@@ -215,10 +214,7 @@ describe('/ skills provider', () => {
     const provider = createSkillsProvider('slow', 'codex');
 
     expect(provider.initialCandidates?.(context('/', ''))).toMatchObject({
-      candidates: [
-        expect.objectContaining({ id: 'command:compact', replacement: '/compact' }),
-        expect.objectContaining({ id: 'command:clear', replacement: '/clear' }),
-      ],
+      candidates: [expect.objectContaining({ id: 'command:compact', replacement: '/compact' })],
       notice: 'Loading installed skills…',
     });
     expect(requests).toHaveLength(0);
@@ -229,7 +225,6 @@ describe('/ skills provider', () => {
     await expect(pending).resolves.toMatchObject({
       candidates: [
         expect.objectContaining({ id: 'command:compact' }),
-        expect.objectContaining({ id: 'command:clear' }),
         expect.objectContaining({ id: 'skill:summary', replacement: '$summary' }),
       ],
     });
@@ -238,7 +233,7 @@ describe('/ skills provider', () => {
   test('keeps built-ins available when skills discovery fails', async () => {
     responder = () => Response.json({ error: 'no route GET /skills', code: 'unknown_route' }, { status: 404 });
     const result = await createSkillsProvider('old', 'claude').candidates(context('/', ''));
-    expect(result.candidates.map(candidate => candidate.id)).toEqual(['command:compact', 'command:clear']);
+    expect(result.candidates.map(candidate => candidate.id)).toEqual(['command:compact']);
     expect(result.notice).toContain('no route GET /skills');
     expect(result.notice).toContain('Built-in commands still work');
   });

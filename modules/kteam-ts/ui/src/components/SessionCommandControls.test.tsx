@@ -43,12 +43,11 @@ function view(
 }
 
 describe('SessionCommandControls', () => {
-  test('an idle, controllable session offers Compact and a confirm-gated Clear', () => {
+  test('an idle, controllable session offers Compact', () => {
     const html = renderToStaticMarkup(<SessionCommandControls view={view()} open canControl />);
     expect(html).toContain('Session context');
     expect(html).toContain('Compact context');
-    expect(html).toContain('Clear context…');
-    expect(html).not.toContain('Yes, clear context');
+    expect(html).not.toContain('Clear context');
     expect(html).not.toContain('disabled=""');
   });
 
@@ -60,20 +59,20 @@ describe('SessionCommandControls', () => {
 
   test('a terminal session explains it needs a running session and shows no controls', () => {
     const html = renderToStaticMarkup(<SessionCommandControls view={view({ status: 'completed' })} open canControl />);
-    expect(html).toContain('need a running session');
+    expect(html).toContain('needs a running session');
     expect(html).not.toContain('Compact context');
-    expect(html).not.toContain('Clear context…');
+    expect(html).not.toContain('Clear context');
   });
 
-  test('a read-only origin cannot clear or compact', () => {
+  test('a read-only origin cannot compact', () => {
     const html = renderToStaticMarkup(<SessionCommandControls view={view()} open canControl={false} />);
     expect(html).toContain('read-only');
     expect(html).not.toContain('Compact context');
   });
 
-  test('the same controls are offered for a Codex session', () => {
+  test('the compact control is offered for a Codex session', () => {
     const html = renderToStaticMarkup(<SessionCommandControls view={view({}, 'codex')} open canControl />);
     expect(html).toContain('Compact context');
-    expect(html).toContain('Clear context…');
+    expect(html).not.toContain('Clear context');
   });
 });
