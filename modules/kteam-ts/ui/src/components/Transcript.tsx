@@ -177,6 +177,7 @@ import { registerJumpController, type JumpOutcome } from '../lib/pin-bridge';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { insertQuoteIntoComposer } from '../lib/quote';
 import { blockIdOfSelection, pinSelection } from '../lib/pin-selection';
+import { textContextMenuEventAllowed, type ContextMenuEventLike } from '../lib/context-menu-policy';
 
 interface Props {
   blocks: TranscriptBlock[];
@@ -505,6 +506,12 @@ function Inner(props: Props) {
    *  Latched for the WHOLE gesture, which is the part a timestamp cannot express
    *  — a drag emits one `pointerdown` and then scrolls for as long as it lasts. */
   const pointerHeld = useRef(false);
+  /** Pointer type of the most recent press on the viewport ('mouse' | 'touch' |
+   *  'pen' | null before the first press). A long-press `contextmenu` is
+   *  dispatched as a bare MouseEvent by some engines, so the press that STARTED
+   *  the long press is the only thing that can name the device — see
+   *  lib/context-menu-policy. */
+  const lastPointerType = useRef<string | null>(null);
   /** Pending deferred re-pin after a gesture ends (see SELECTION_RELEASE_SETTLE_MS). */
   const repinTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -552,7 +559,13 @@ function Inner(props: Props) {
     const mark = () => {
       intentAt.current = performance.now();
     };
-    const down = () => {
+    // Also the ONE place the viewport learns which device is pressing it. Both
+    // listeners land here: `pointerdown` names itself, and a `touchstart` on an
+    // engine without pointer events can only be a finger.
+    const down = (event: Event) => {
+      const named = (event as Partial<PointerEvent>).pointerType;
+      if (typeof named === 'string' && named) lastPointerType.current = named;
+      else if (event.type === 'touchstart') lastPointerType.current = 'touch';
       pointerHeld.current = true;
       mark();
     };
@@ -978,21 +991,36 @@ function Inner(props: Props) {
     pinSelection(text, blockId);
   }, []);
 
-  // DESKTOP: right-click over a selection opens the shared menu. With NO
+  // MOUSE ONLY: right-click over a selection opens the shared menu. With NO
   // selection we do nothing — the browser's own menu is left completely alone
   // (right-click a link, an image), which is the "do not globally suppress"
-  // rule. Never attached to pointerdown/touchstart, so it cannot break making a
-  // selection in the first place.
+  // rule.
+  //
+  // "Never attached to pointerdown/touchstart, so it cannot break making a
+  // selection" was the old claim here, and it was FALSE on a phone: Android
+  // Chrome and iOS Safari synthesise `contextmenu` from a long press, and they
+  // fire it AFTER selecting the word — so this handler saw a real selection,
+  // preventDefault'd away the native copy bar, and dropped ContextMenu's
+  // full-screen dismissal surface on top of the selection handles. That is the
+  // "context menu blocks everything" report. The provenance check below is the
+  // fix; the reasoning lives in lib/context-menu-policy.
   const onQuoteContextMenu = useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
       const found = readTranscriptSelection();
-      if (!found) return;
+      const allowed = textContextMenuEventAllowed(event.nativeEvent as ContextMenuEventLike | null, {
+        lastPointerType: lastPointerType.current,
+        touchAffected,
+        hasSelection: !!found,
+      });
+      // Not ours: return WITHOUT preventDefault so the browser keeps the native
+      // handles and its own copy menu intact.
+      if (!allowed || !found) return;
       event.preventDefault();
       quoteTriggerRef.current = event.currentTarget;
       setTouchQuote(null);
       setQuoteMenu({ x: event.clientX, y: event.clientY, text: found.text, blockId: found.blockId });
     },
-    [readTranscriptSelection],
+    [readTranscriptSelection, touchAffected],
   );
 
   // TOUCH: the OS long-press IS the selection gesture, so the affordance must
