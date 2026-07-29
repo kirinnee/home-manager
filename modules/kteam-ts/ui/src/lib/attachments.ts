@@ -26,7 +26,35 @@ export type AttachmentErrorCode =
   | 'unsupported_mime'
   | 'mime_mismatch'
   | 'attachment_not_found'
-  | 'corrupt_attachment';
+  | 'corrupt_attachment'
+  | 'wrong_password'
+  | 'attachment_not_locked'
+  | 'decryption_unavailable'
+  | 'decryption_timeout'
+  | 'decryption_failed';
+
+/** The only unlock failure worth another password. Everything else means this
+ * document will not open here no matter what the reader types. */
+export const RETRYABLE_UNLOCK_ERROR_CODES: readonly AttachmentErrorCode[] = ['wrong_password'];
+
+export function isRetryableUnlockError(code: string | undefined): boolean {
+  return code !== undefined && (RETRYABLE_UNLOCK_ERROR_CODES as readonly string[]).includes(code);
+}
+
+export interface UnlockFailure {
+  message: string;
+  /** True only when ANOTHER password could succeed. Offering "try again" for a
+   * failure no password fixes renders a dead end as an invitation. */
+  retryable: boolean;
+}
+
+export function unlockFailure(error: unknown): UnlockFailure {
+  const code =
+    error && typeof error === 'object' && typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : undefined;
+  return { message: attachmentErrorMessage(error), retryable: isRetryableUnlockError(code) };
+}
 
 export interface TextExtraction {
   method: 'pdfjs' | 'docx-xml';
@@ -56,6 +84,24 @@ export interface TextExtractionFailure {
   message: string;
 }
 
+/**
+ * An encrypted original. `locked` is a state the reader can RESOLVE by supplying
+ * the password — not a failure — so it is never rendered with the terminal
+ * extraction-failure copy.
+ *
+ * Unlocking is process-local to the daemon: the decrypted copy lives in RAM and
+ * a daemon restart puts this back to `locked: true`. The UI therefore trusts the
+ * daemon's latest view and never caches "unlocked" past a reload.
+ */
+export interface AttachmentEncryption {
+  kind: 'pdf';
+  locked: boolean;
+  /** Only while unlocked: when the daemon drops the decrypted copy. */
+  expiresAt?: string;
+  /** Only while unlocked: size of the decrypted copy, which differs from `size`. */
+  decryptedSize?: number;
+}
+
 export interface AttachmentView {
   id: string;
   filename: string;
@@ -68,6 +114,7 @@ export interface AttachmentView {
   textExtraction?: TextExtraction;
   /** Mutually exclusive with textExtraction when the daemon could retain the original but not its text. */
   textExtractionFailure?: TextExtractionFailure;
+  encrypted?: AttachmentEncryption;
 }
 
 export interface StoredTranscriptAttachment {
@@ -81,6 +128,7 @@ export interface StoredTranscriptAttachment {
   alt?: string;
   textExtraction?: TextExtraction;
   textExtractionFailure?: TextExtractionFailure;
+  encrypted?: AttachmentEncryption;
 }
 
 /** Compatibility name while callers migrate from image-only presentation. */
@@ -113,6 +161,12 @@ const ERROR_COPY: Record<AttachmentErrorCode, string> = {
   invalid_identifier: "That file can't be attached",
   attachment_not_found: 'Attachment is no longer available — re-add it',
   corrupt_attachment: 'Attachment is no longer available — re-add it',
+  wrong_password: 'That password did not open this PDF — try again',
+  attachment_not_locked: 'That file is not encrypted; no password is needed',
+  decryption_unavailable:
+    'This machine cannot hold a decrypted copy in memory, and kteam will not write one to disk. Decrypt the PDF yourself and re-attach it.',
+  decryption_timeout: 'Decrypting that PDF took too long — try again',
+  decryption_failed: 'That PDF could not be decrypted; it may be corrupt or use an unsupported scheme',
 };
 
 const MAX_TEXT_EXTRACTION_FAILURE_CODE_LENGTH = 64;
@@ -163,6 +217,27 @@ export function isTextExtractionFailure(value: unknown): value is TextExtraction
     failure['message'] === failure['message'].trim() &&
     !/[\u0000-\u001f\u007f]/.test(failure['message'])
   );
+}
+
+export function isAttachmentEncryption(value: unknown): value is AttachmentEncryption {
+  if (!value || typeof value !== 'object') return false;
+  const encryption = value as Record<string, unknown>;
+  return (
+    encryption['kind'] === 'pdf' &&
+    typeof encryption['locked'] === 'boolean' &&
+    (encryption['expiresAt'] === undefined ||
+      (typeof encryption['expiresAt'] === 'string' && !Number.isNaN(Date.parse(encryption['expiresAt'])))) &&
+    (encryption['decryptedSize'] === undefined ||
+      (typeof encryption['decryptedSize'] === 'number' && Number.isFinite(encryption['decryptedSize'])))
+  );
+}
+
+/** What the reader is told about an encrypted attachment. Locked is an invitation
+ * to act, not a report of failure, so it never borrows the extraction-failure copy. */
+export function attachmentLockCopy(encryption: AttachmentEncryption): string {
+  return encryption.locked
+    ? 'Encrypted PDF — enter its password and kteam will decrypt it in memory for the agent. The decrypted copy is never written to disk.'
+    : 'Unlocked — the agent gets a decrypted copy that exists only in memory. Nothing was written to disk and the stored original stays encrypted.';
 }
 
 /** Curated UI copy deliberately omits the daemon's opaque raw message. */
@@ -245,6 +320,7 @@ export function attachmentFromView(sessionId: string, view: AttachmentView): Sto
   const textExtractionFailure = isTextExtractionFailure(view.textExtractionFailure)
     ? view.textExtractionFailure
     : undefined;
+  const encrypted = isAttachmentEncryption(view.encrypted) ? view.encrypted : undefined;
   return {
     kind: 'attachment',
     sessionId,
@@ -254,6 +330,7 @@ export function attachmentFromView(sessionId: string, view: AttachmentView): Sto
     size: view.size,
     ...(textExtraction && !textExtractionFailure ? { textExtraction } : {}),
     ...(textExtractionFailure && !textExtraction ? { textExtractionFailure } : {}),
+    ...(encrypted ? { encrypted } : {}),
   };
 }
 

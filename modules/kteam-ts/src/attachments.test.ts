@@ -198,12 +198,12 @@ describe('AttachmentStore', () => {
   });
 
   test('retains original documents with typed, agent-visible reasons when text extraction fails', async () => {
+    // `password_protected_document` is deliberately absent: for a PDF it is no
+    // longer a terminal failure but the retryable LOCKED state, which has its own
+    // coverage in attachments-encrypted.test.ts. The DOCX form of it is still
+    // terminal and is asserted by the encrypted-DOCX test below.
     const failures: [DocumentExtractionErrorCode, string][] = [
       ['no_extractable_text', 'PDF has no extractable text; it looks like a scan'],
-      [
-        'password_protected_document',
-        'This PDF needs a password to open; kteam could not read its text. Decrypt it locally and re-attach it if you want the agent to read it',
-      ],
       ['unreadable_document', 'file is not a readable PDF'],
       ['document_extraction_timeout', 'PDF text extraction exceeded the processing time limit'],
       ['document_too_complex', 'PDF exceeded the text-extraction complexity limit'],

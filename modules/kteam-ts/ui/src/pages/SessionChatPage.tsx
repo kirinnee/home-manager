@@ -17,7 +17,17 @@
 // neighbours — all three ran per open session, forever.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FileText, ImageOff, Loader2, MessageSquare, RotateCcw, Terminal, X } from 'lucide-react';
+import {
+  FileText,
+  ImageOff,
+  Loader2,
+  LockKeyhole,
+  LockKeyholeOpen,
+  MessageSquare,
+  RotateCcw,
+  Terminal,
+  X,
+} from 'lucide-react';
 import { api, ApiError, HAS_TOKEN } from '../lib/api';
 import { useFleet, useSession, useSessionEvents, useStore, useUiControls } from '../lib/store';
 import type { ChatRecord, KTeamEvent, SendRecord, SessionView } from '../types';
@@ -59,8 +69,10 @@ import {
   attachmentErrorCopy,
   attachmentErrorMessage,
   attachmentFromView,
+  attachmentLockCopy,
   attachmentTypeLabel,
   formatAttachmentSize,
+  isAttachmentEncryption,
   isImageMime,
   sameAttachmentIds,
   textExtractionFailureCopy,
@@ -69,6 +81,7 @@ import {
   type StoredTranscriptImage,
 } from '../lib/attachments';
 import { AttachmentImageProvider, TranscriptImageGallery } from '../components/AttachmentImage';
+import { AttachmentUnlockPrompt } from '../components/AttachmentUnlockPrompt';
 import { useUsage } from '../hooks/useUsage';
 import { useDebouncedEffect } from '../hooks/useDebounce';
 import { useLayoutMode } from '../hooks/useLayoutMode';
@@ -709,12 +722,59 @@ export function SessionChatPage({
     [uploadAttachment],
   );
 
+  // Unlocking an encrypted attachment is per-daemon and in-memory: the decrypted
+  // copy never touches disk and a daemon restart re-locks it. The prompt is a
+  // sheet rather than an inline field because the pending strip is a 230px-wide
+  // chip in a horizontally scrolling row on a phone.
+  const [unlockTarget, setUnlockTarget] = useState<string | null>(null);
+  const unlockEntry = useMemo(
+    () => pendingAttachments.find(entry => entry.localId === unlockTarget) ?? null,
+    [pendingAttachments, unlockTarget],
+  );
+
+  const unlockAttachment = useCallback(
+    async (localId: string, password: string) => {
+      const entry = pendingAttachments.find(item => item.localId === localId);
+      if (!entry?.view) throw new ApiError(409, 'That file is no longer attached — re-add it');
+      const updated = await api.unlockAttachment(sessionId, entry.view.id, password);
+      setPendingAttachments(entries =>
+        entries.map(item => (item.localId === localId ? { ...item, view: updated } : item)),
+      );
+      setUnlockTarget(null);
+    },
+    [pendingAttachments, sessionId],
+  );
+
+  const forgetAttachmentPassword = useCallback(
+    async (localId: string) => {
+      const entry = pendingAttachments.find(item => item.localId === localId);
+      if (!entry?.view) return;
+      try {
+        const updated = await api.lockAttachment(sessionId, entry.view.id);
+        setPendingAttachments(entries =>
+          entries.map(item => (item.localId === localId ? { ...item, view: updated } : item)),
+        );
+      } catch {
+        // Best effort. The daemon expires the decrypted copy on its own TTL, so
+        // a failed relock delays cleanup rather than leaking it indefinitely.
+      }
+    },
+    [pendingAttachments, sessionId],
+  );
+
   const removeAttachment = useCallback(
     (localId: string) => {
-      revokeObjectUrl(pendingAttachments.find(entry => entry.localId === localId)?.objectUrl);
-      setPendingAttachments(current => current.filter(entry => entry.localId !== localId));
+      const entry = pendingAttachments.find(item => item.localId === localId);
+      revokeObjectUrl(entry?.objectUrl);
+      // Removing the chip is one of the moments the decrypted copy must go: the
+      // reader has decided the agent is not getting this file.
+      if (entry?.view && isAttachmentEncryption(entry.view.encrypted) && !entry.view.encrypted.locked) {
+        void api.lockAttachment(sessionId, entry.view.id).catch(() => undefined);
+      }
+      if (unlockTarget === localId) setUnlockTarget(null);
+      setPendingAttachments(current => current.filter(item => item.localId !== localId));
     },
-    [pendingAttachments, revokeObjectUrl],
+    [pendingAttachments, revokeObjectUrl, sessionId, unlockTarget],
   );
 
   const clearAttachments = useCallback(
@@ -1140,11 +1200,25 @@ export function SessionChatPage({
 
   // ---- transcript header / footer slots ------------------------------------
   const attachmentSlot = pendingAttachments.length ? (
-    <PendingAttachmentStrip
-      entries={pendingAttachments}
-      onRetry={entry => void uploadAttachment(entry.localId, entry.file)}
-      onRemove={entry => removeAttachment(entry.localId)}
-    />
+    <>
+      <PendingAttachmentStrip
+        entries={pendingAttachments}
+        onRetry={entry => void uploadAttachment(entry.localId, entry.file)}
+        onRemove={entry => removeAttachment(entry.localId)}
+        onUnlock={entry => setUnlockTarget(entry.localId)}
+        onForget={entry => void forgetAttachmentPassword(entry.localId)}
+      />
+      <AttachmentUnlockPrompt
+        filename={unlockEntry?.file.name ?? ''}
+        open={unlockEntry !== null}
+        onUnlock={password =>
+          unlockEntry
+            ? unlockAttachment(unlockEntry.localId, password)
+            : Promise.reject(new ApiError(409, 'That file is no longer attached — re-add it'))
+        }
+        onCancel={() => setUnlockTarget(null)}
+      />
+    </>
   ) : undefined;
 
   const transcriptHeader = (
@@ -1388,10 +1462,15 @@ export function PendingAttachmentStrip({
   entries,
   onRetry,
   onRemove,
+  onUnlock,
+  onForget,
 }: {
   entries: PendingAttachment[];
   onRetry(entry: PendingAttachment): void;
   onRemove(entry: PendingAttachment): void;
+  /** Optional so the strip still renders where no unlock flow is wired. */
+  onUnlock?(entry: PendingAttachment): void;
+  onForget?(entry: PendingAttachment): void;
 }) {
   // Alignment is the flex default `stretch`, deliberately NOT `items-start`: the
   // failed chip is the tallest and already sets the strip's height, so letting the
@@ -1401,38 +1480,42 @@ export function PendingAttachmentStrip({
       className="flex min-w-0 gap-1.5 overflow-x-auto border-b border-border-soft pb-1 scroll-thin"
       aria-label="Attached files"
     >
-      {entries.map(entry => (
-        <div
-          key={entry.localId}
-          className={cn(
-            'flex items-center gap-1.5 rounded-control border bg-surface-2 p-1',
-            // Failure is the only state that needs a SECOND 44px control AND the
-            // only one whose second row carries a sentence rather than a token,
-            // so it gets the wider box: 88px of buttons plus a wrapping error out
-            // of the same 230px would have forced the error to truncate, and that
-            // is the one string here the reader cannot do without.
-            entry.status === 'failed'
-              ? 'min-w-[252px] max-w-[320px] border-err-border'
-              : 'min-w-[230px] max-w-[320px] border-border-soft',
-          )}
-          role={entry.status === 'failed' ? 'alert' : 'status'}
-        >
-          {entry.objectUrl ? (
-            <img
-              src={entry.objectUrl}
-              alt=""
-              className="h-9 w-9 shrink-0 rounded-sm border border-border-soft object-cover"
-            />
-          ) : (
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border border-border-soft bg-surface">
-              {isImageMime(entry.view?.mime ?? entry.file.type) ? (
-                <ImageOff size={16} className="text-muted" aria-hidden="true" />
-              ) : (
-                <FileText size={16} className="text-muted" aria-hidden="true" />
-              )}
-            </span>
-          )}
-          {/* TWO ROWS, TIGHT LEADING. This was three rows at body leading — name,
+      {entries.map(entry => {
+        // Locked is a state the reader can resolve, so it is never rendered with
+        // the terminal extraction-failure copy — it gets its own action instead.
+        const encryption = isAttachmentEncryption(entry.view?.encrypted) ? entry.view.encrypted : undefined;
+        return (
+          <div
+            key={entry.localId}
+            className={cn(
+              'flex items-center gap-1.5 rounded-control border bg-surface-2 p-1',
+              // Failure is the only state that needs a SECOND 44px control AND the
+              // only one whose second row carries a sentence rather than a token,
+              // so it gets the wider box: 88px of buttons plus a wrapping error out
+              // of the same 230px would have forced the error to truncate, and that
+              // is the one string here the reader cannot do without.
+              entry.status === 'failed'
+                ? 'min-w-[252px] max-w-[320px] border-err-border'
+                : 'min-w-[230px] max-w-[320px] border-border-soft',
+            )}
+            role={entry.status === 'failed' ? 'alert' : 'status'}
+          >
+            {entry.objectUrl ? (
+              <img
+                src={entry.objectUrl}
+                alt=""
+                className="h-9 w-9 shrink-0 rounded-sm border border-border-soft object-cover"
+              />
+            ) : (
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border border-border-soft bg-surface">
+                {isImageMime(entry.view?.mime ?? entry.file.type) ? (
+                  <ImageOff size={16} className="text-muted" aria-hidden="true" />
+                ) : (
+                  <FileText size={16} className="text-muted" aria-hidden="true" />
+                )}
+              </span>
+            )}
+            {/* TWO ROWS, TIGHT LEADING. This was three rows at body leading — name,
               size, state — which put 60px of type beside a 44px button and made
               the chip 74px tall before a pixel of it said anything the reader did
               not already know. Size and state now share row two: both are one
@@ -1445,66 +1528,94 @@ export function PendingAttachmentStrip({
               the whole second row so it can wrap instead of truncate. That is why
               a failed chip is a few px taller than a ready one; it is still less
               than half of what every chip used to cost. */}
-          <span className="min-w-0 flex-1 text-meta leading-tight">
-            <span className="block truncate text-fg" title={entry.file.name}>
-              {entry.file.name}
-            </span>
-            {entry.status === 'failed' ? (
-              <span className="block text-err">{entry.error}</span>
-            ) : (
-              <span className="flex min-w-0 items-center gap-1">
-                <span className="shrink-0 text-faint">{formatAttachmentSize(entry.file.size)}</span>
-                <span className="shrink-0 text-faint" aria-hidden="true">
-                  ·
-                </span>
-                {entry.status === 'uploading' ? (
-                  <span className="inline-flex shrink-0 items-center gap-1 text-muted">
-                    <Loader2 size={11} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />{' '}
-                    uploading
+            <span className="min-w-0 flex-1 text-meta leading-tight">
+              <span className="block truncate text-fg" title={entry.file.name}>
+                {entry.file.name}
+              </span>
+              {entry.status === 'failed' ? (
+                <span className="block text-err">{entry.error}</span>
+              ) : (
+                <span className="flex min-w-0 items-center gap-1">
+                  <span className="shrink-0 text-faint">{formatAttachmentSize(entry.file.size)}</span>
+                  <span className="shrink-0 text-faint" aria-hidden="true">
+                    ·
                   </span>
-                ) : (
-                  <span className="shrink-0 text-ok">ready</span>
-                )}
-              </span>
+                  {entry.status === 'uploading' ? (
+                    <span className="inline-flex shrink-0 items-center gap-1 text-muted">
+                      <Loader2 size={11} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />{' '}
+                      uploading
+                    </span>
+                  ) : (
+                    <span className="shrink-0 text-ok">ready</span>
+                  )}
+                </span>
+              )}
+              {!isImageMime(entry.view?.mime ?? entry.file.type) && (
+                <span className="block truncate text-faint">
+                  {attachmentTypeLabel(entry.view?.mime ?? entry.file.type)}
+                </span>
+              )}
+              {entry.view?.textExtraction && (
+                <span className="block text-faint">
+                  text extracted for agent{entry.view.textExtraction.truncated ? ' · truncated' : ''}
+                </span>
+              )}
+              {entry.status === 'ready' && entry.view?.textExtractionFailure && (
+                <span className="block text-warn">
+                  {textExtractionFailureCopy(entry.view.textExtractionFailure.code)}
+                </span>
+              )}
+              {entry.status === 'ready' && encryption && (
+                <span className={cn('block', encryption.locked ? 'text-warn' : 'text-ok')}>
+                  {attachmentLockCopy(encryption)}
+                </span>
+              )}
+            </span>
+            {entry.status === 'ready' && encryption?.locked && onUnlock && (
+              <button
+                type="button"
+                className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-control text-warn hover:bg-surface hover:text-fg"
+                onClick={() => onUnlock(entry)}
+                aria-label={`Unlock ${entry.file.name}`}
+                title="Enter the PDF password"
+              >
+                <LockKeyhole size={15} aria-hidden="true" />
+              </button>
             )}
-            {!isImageMime(entry.view?.mime ?? entry.file.type) && (
-              <span className="block truncate text-faint">
-                {attachmentTypeLabel(entry.view?.mime ?? entry.file.type)}
-              </span>
+            {entry.status === 'ready' && encryption && !encryption.locked && onForget && (
+              <button
+                type="button"
+                className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-control text-ok hover:bg-surface hover:text-fg"
+                onClick={() => onForget(entry)}
+                aria-label={`Forget the decrypted copy of ${entry.file.name}`}
+                title="Forget the decrypted copy"
+              >
+                <LockKeyholeOpen size={15} aria-hidden="true" />
+              </button>
             )}
-            {entry.view?.textExtraction && (
-              <span className="block text-faint">
-                text extracted for agent{entry.view.textExtraction.truncated ? ' · truncated' : ''}
-              </span>
+            {entry.status === 'failed' && (
+              <button
+                type="button"
+                className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-control text-muted hover:bg-surface hover:text-fg"
+                onClick={() => onRetry(entry)}
+                aria-label={`Retry ${entry.file.name}`}
+                title="Retry upload"
+              >
+                <RotateCcw size={15} aria-hidden="true" />
+              </button>
             )}
-            {entry.status === 'ready' && entry.view?.textExtractionFailure && (
-              <span className="block text-warn">
-                {textExtractionFailureCopy(entry.view.textExtractionFailure.code)}
-              </span>
-            )}
-          </span>
-          {entry.status === 'failed' && (
             <button
               type="button"
               className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-control text-muted hover:bg-surface hover:text-fg"
-              onClick={() => onRetry(entry)}
-              aria-label={`Retry ${entry.file.name}`}
-              title="Retry upload"
+              onClick={() => onRemove(entry)}
+              aria-label={`Remove ${entry.file.name}`}
+              title="Remove file"
             >
-              <RotateCcw size={15} aria-hidden="true" />
+              <X size={16} aria-hidden="true" />
             </button>
-          )}
-          <button
-            type="button"
-            className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-control text-muted hover:bg-surface hover:text-fg"
-            onClick={() => onRemove(entry)}
-            aria-label={`Remove ${entry.file.name}`}
-            title="Remove file"
-          >
-            <X size={16} aria-hidden="true" />
-          </button>
-        </div>
-      ))}
+          </div>
+        );
+      })}
     </div>
   );
 }

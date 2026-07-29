@@ -386,7 +386,16 @@ function attachmentErrorStatus(code: AttachmentErrorCode): number {
     case 'attachment_not_found':
       return 404;
     case 'corrupt_attachment':
+    case 'attachment_not_locked':
       return 409;
+    case 'decryption_unavailable':
+      return 503;
+    case 'decryption_timeout':
+      return 504;
+    case 'decryption_failed':
+      return 422;
+    // A wrong password is a 400 the client is meant to retry, not a 401: the
+    // request was authenticated, the document's password was simply not right.
     default:
       return 400;
   }
@@ -1156,6 +1165,21 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               await options.service.addAttachment(id, file.name, file.type, new Uint8Array(await file.arrayBuffer())),
               201,
             );
+          }
+          // Unlock an encrypted attachment. POST supplies the password and gets
+          // back the attachment's new state; DELETE forgets the decrypted copy.
+          // The password is read from the JSON body, never the URL: a query
+          // string would land in logs, history and referrers.
+          const unlock = action?.match(/^attachments\/([^/]+)\/unlock$/);
+          if (unlock && request.method === 'POST') {
+            const input = await body<{ password?: unknown }>(request);
+            if (typeof input.password !== 'string' || input.password.length === 0) {
+              throw new HttpError(400, 'field "password" is required');
+            }
+            return json(await options.service.unlockAttachment(id, decodeURIComponent(unlock[1]!), input.password));
+          }
+          if (unlock && request.method === 'DELETE') {
+            return json(await options.service.lockAttachment(id, decodeURIComponent(unlock[1]!)));
           }
           const attachment = action?.match(/^attachments\/([^/]+)$/);
           if (attachment && request.method === 'GET') {

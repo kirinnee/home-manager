@@ -175,6 +175,19 @@ export const api = {
     });
   },
   attachment: (id: string, attachmentId: string) => requestBlob(attachmentApiPath(id, attachmentId)),
+  // The password travels in the body, never in the path: a query string ends up
+  // in logs and history. No request id either — an unlock is not deduped, and a
+  // retry after a wrong password is the whole point of the flow.
+  unlockAttachment: (id: string, attachmentId: string, password: string) =>
+    request<AttachmentView>(
+      `/v1/sessions/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}/unlock`,
+      { method: 'POST', body: JSON.stringify({ password }) },
+    ),
+  lockAttachment: (id: string, attachmentId: string) =>
+    request<AttachmentView>(
+      `/v1/sessions/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}/unlock`,
+      { method: 'DELETE' },
+    ),
   answer: (
     id: string,
     payload: { toolUseId: string; labels?: string[]; other?: string; responses?: string[] },

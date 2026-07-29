@@ -13,6 +13,7 @@
     "check": "tsc --noEmit && bun test"
   },
   "dependencies": {
+    "@neslinesli93/qpdf-wasm": "0.3.0",
     "commander": "^12.0.0",
     "playwright-core": "^1.62.0",
     "unpdf": "1.8.0",

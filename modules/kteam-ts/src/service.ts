@@ -186,6 +186,20 @@ export interface AttachmentView {
       | 'document_too_complex';
     message: string;
   };
+  /**
+   * Present when the stored original is encrypted. `locked` is a RESOLVABLE
+   * state, not a failure: supplying the password unlocks it. It is process-local
+   * — a restarted daemon reports `locked: true` again, because the decrypted
+   * copy only ever existed in RAM.
+   */
+  encrypted?: {
+    kind: 'pdf';
+    locked: boolean;
+    /** Only while unlocked: when this daemon will drop the decrypted copy. */
+    expiresAt?: string;
+    /** Only while unlocked: size of the decrypted copy, which differs from `size`. */
+    decryptedSize?: number;
+  };
 }
 
 export interface KTeamService {
@@ -257,6 +271,12 @@ export interface KTeamService {
   subscribe(listener: (event: KTeamEvent) => void): () => void;
   addAttachment(id: string, filename: string, mime: string, bytes: Uint8Array): Promise<AttachmentView>;
   getAttachment(id: string, attachmentId: string): Promise<{ attachment: AttachmentView; bytes: Uint8Array }>;
+  /** Decrypt an encrypted attachment in memory with the human's password. The
+   * decrypted copy is never written to disk and is handed to the agent from a
+   * memory-backed path. */
+  unlockAttachment(id: string, attachmentId: string, password: string): Promise<AttachmentView>;
+  /** Forget a decrypted copy: zero its pages and report the attachment locked. */
+  lockAttachment(id: string, attachmentId: string): Promise<AttachmentView>;
   /** One directory of a session's working tree. `path` omitted = the cwd itself. */
   fsList(id: string, path?: string): Promise<FsListing>;
   /** One file's content or a refusal view. `rev: 'head'` reads the committed copy. */

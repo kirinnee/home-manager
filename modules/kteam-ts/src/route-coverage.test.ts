@@ -568,6 +568,11 @@ describe('UI to daemon route coverage', () => {
     expect(patterns.some(path => path.includes('/browser'))).toBe(true);
     expect(patterns).toContain('/v1/sessions/*/skills');
     expect(patterns).toContain('/v1/sessions/*/runtime-models');
+    // The attachment unlock surface: the reachability test below only protects
+    // patterns the extractor actually saw, so name this one explicitly. A UI
+    // unlock call that stopped being statically resolvable would otherwise
+    // disappear from coverage instead of failing.
+    expect(patterns).toContain('/v1/sessions/*/attachments/*/unlock');
   });
 
   test('the CLI-only direct-notify route is mounted (&F140)', async () => {

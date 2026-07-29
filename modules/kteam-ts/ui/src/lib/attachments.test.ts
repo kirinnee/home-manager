@@ -6,6 +6,7 @@ import {
   attachmentFromView,
   attachmentFromToolPath,
   formatAttachmentSize,
+  isAttachmentEncryption,
   isTextExtractionFailure,
   sameAttachmentIds,
   textExtractionFailureCopy,
@@ -220,5 +221,52 @@ describe('safe stored-image references', () => {
     expect(formatAttachmentSize(1536)).toBe('1.5 KB');
     expect(formatAttachmentSize(2 * 1024 * 1024)).toBe('2.0 MB');
     expect(sameAttachmentIds(['b', 'a'], ['a', 'b'])).toBe(true);
+  });
+});
+
+describe('encrypted attachment metadata', () => {
+  test('accepts the daemon shape and rejects anything it cannot trust', () => {
+    expect(isAttachmentEncryption({ kind: 'pdf', locked: true })).toBe(true);
+    expect(
+      isAttachmentEncryption({ kind: 'pdf', locked: false, expiresAt: '2026-07-29T02:30:00.000Z', decryptedSize: 777 }),
+    ).toBe(true);
+    // A missing or malformed field must render as unknown, not as a confident
+    // "unlocked" — that would show the reader a file the agent cannot read.
+    expect(isAttachmentEncryption({ kind: 'pdf' })).toBe(false);
+    expect(isAttachmentEncryption({ kind: 'docx', locked: true })).toBe(false);
+    expect(isAttachmentEncryption({ kind: 'pdf', locked: 'yes' })).toBe(false);
+    expect(isAttachmentEncryption({ kind: 'pdf', locked: false, expiresAt: 'soon' })).toBe(false);
+    expect(isAttachmentEncryption(undefined)).toBe(false);
+    expect(isAttachmentEncryption(null)).toBe(false);
+  });
+
+  test('the transcript record carries the lock state so a locked file never looks ordinary', () => {
+    const record = attachmentFromView('ms1docs-12345678', {
+      id: 'att_' + 'a'.repeat(64),
+      filename: 'statement.pdf',
+      mime: 'application/pdf',
+      size: 1234,
+      sha256: 'a'.repeat(64),
+      path: '/daemon-only/statement.pdf',
+      createdAt: '2026-07-29T02:00:00.000Z',
+      encrypted: { kind: 'pdf', locked: true },
+    });
+    expect(record.encrypted).toEqual({ kind: 'pdf', locked: true });
+    expect(record.textExtraction).toBeUndefined();
+    expect(record.textExtractionFailure).toBeUndefined();
+  });
+
+  test('an untrustworthy lock state is dropped rather than half-rendered', () => {
+    const record = attachmentFromView('ms1docs-12345678', {
+      id: 'att_' + 'b'.repeat(64),
+      filename: 'statement.pdf',
+      mime: 'application/pdf',
+      size: 1234,
+      sha256: 'b'.repeat(64),
+      path: '/daemon-only/statement.pdf',
+      createdAt: '2026-07-29T02:00:00.000Z',
+      encrypted: { kind: 'pdf' } as never,
+    });
+    expect(record.encrypted).toBeUndefined();
   });
 });

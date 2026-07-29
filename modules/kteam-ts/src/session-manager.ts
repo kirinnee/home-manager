@@ -1494,6 +1494,10 @@ export class SessionManager implements KTeamService {
     // generation before closing EventStore or the analytics connection.
     while (this.terminalSendFinalizers.size > 0) await Promise.allSettled([...this.terminalSendFinalizers.values()]);
     await this.flushEmits();
+    // Decrypted attachment copies are RAM-backed but still real files. Release
+    // them on the orderly shutdown path; the store also sweeps them from a
+    // process exit handler for the paths that never reach here.
+    await this.attachments.dispose().catch(() => undefined);
     this.store.close();
   }
 
@@ -4996,10 +5000,27 @@ export class SessionManager implements KTeamService {
     id = this.resolveRef(id);
     await this.get(id);
     const stored = await this.attachments.get(id, attachmentId);
+    // Deliberately the STORED bytes, even when a decrypted copy is live: the
+    // download endpoint serves what kteam actually retains, and the plaintext
+    // stays inside the daemon rather than becoming a second distribution path.
     return {
       attachment: this.attachmentView(stored),
       bytes: new Uint8Array(await Bun.file(stored.path).arrayBuffer()),
     };
+  }
+
+  async unlockAttachment(id: string, attachmentId: string, password: string): Promise<AttachmentView> {
+    id = this.resolveRef(id);
+    await this.get(id);
+    // Not emitted as an event and not journalled: an unlock is a private,
+    // process-local act, and the transcript is durable.
+    return this.attachmentView(await this.attachments.unlock(id, attachmentId, password));
+  }
+
+  async lockAttachment(id: string, attachmentId: string): Promise<AttachmentView> {
+    id = this.resolveRef(id);
+    await this.get(id);
+    return this.attachmentView(await this.attachments.lock(id, attachmentId));
   }
 
   async fsList(id: string, relativePath?: string) {
@@ -7484,6 +7505,27 @@ export class SessionManager implements KTeamService {
   }
 
   private attachmentView(stored: {
+    locked?: boolean;
+    decrypted?: {
+      expiresAt: string;
+      size: number;
+      extraction?: {
+        method: 'pdfjs' | 'docx-xml';
+        characters: number;
+        truncated: boolean;
+        totalPages?: number;
+        pagesRead?: number;
+      };
+      extractionFailure?: {
+        code:
+          | 'password_protected_document'
+          | 'no_extractable_text'
+          | 'unreadable_document'
+          | 'document_extraction_timeout'
+          | 'document_too_complex';
+        message: string;
+      };
+    };
     manifest: {
       id: string;
       filename: string;
@@ -7510,6 +7552,19 @@ export class SessionManager implements KTeamService {
     };
     path: string;
   }): AttachmentView {
+    // `textExtraction` answers one question — "does kteam have bounded text for
+    // the agent?" — so a decrypted attachment's in-memory extraction reports
+    // through the same field. Where it LIVES is the caller's business, and for a
+    // decrypted copy the answer is "the daemon's heap", never a file.
+    const extraction = stored.manifest.textExtraction ?? stored.decrypted?.extraction;
+    // A manifest written before the unlock flow existed records an encrypted PDF
+    // as a terminal `password_protected_document` failure AND now reads as
+    // locked. Reporting both would put "re-attach it decrypted" next to a
+    // password box that works — the encrypted state supersedes it.
+    const legacyLockedFailure =
+      stored.locked !== undefined && stored.manifest.textExtractionFailure?.code === 'password_protected_document';
+    const extractionFailure =
+      stored.decrypted?.extractionFailure ?? (legacyLockedFailure ? undefined : stored.manifest.textExtractionFailure);
     return {
       id: stored.manifest.id,
       filename: stored.manifest.filename,
@@ -7518,29 +7573,33 @@ export class SessionManager implements KTeamService {
       sha256: stored.manifest.hash,
       path: stored.path,
       createdAt: stored.manifest.time,
-      ...(stored.manifest.textExtraction
+      ...(extraction
         ? {
             textExtraction: {
-              method: stored.manifest.textExtraction.method,
-              characters: stored.manifest.textExtraction.characters,
-              truncated: stored.manifest.textExtraction.truncated,
-              ...(stored.manifest.textExtraction.totalPages === undefined
-                ? {}
-                : { totalPages: stored.manifest.textExtraction.totalPages }),
-              ...(stored.manifest.textExtraction.pagesRead === undefined
-                ? {}
-                : { pagesRead: stored.manifest.textExtraction.pagesRead }),
+              method: extraction.method,
+              characters: extraction.characters,
+              truncated: extraction.truncated,
+              ...(extraction.totalPages === undefined ? {} : { totalPages: extraction.totalPages }),
+              ...(extraction.pagesRead === undefined ? {} : { pagesRead: extraction.pagesRead }),
             },
           }
         : {}),
-      ...(stored.manifest.textExtractionFailure
-        ? {
-            textExtractionFailure: {
-              code: stored.manifest.textExtractionFailure.code,
-              message: stored.manifest.textExtractionFailure.message,
-            },
-          }
+      ...(extractionFailure && !extraction
+        ? { textExtractionFailure: { code: extractionFailure.code, message: extractionFailure.message } }
         : {}),
+      // Locked is a state the human can resolve, so it is reported separately
+      // from the terminal extraction failures above. `decrypted` never carries
+      // the RAM-backed path outward: the UI must not fetch or render it.
+      ...(stored.locked === undefined && stored.decrypted === undefined
+        ? {}
+        : {
+            encrypted: {
+              kind: 'pdf' as const,
+              locked: stored.locked !== false,
+              ...(stored.decrypted ? { expiresAt: stored.decrypted.expiresAt } : {}),
+              ...(stored.decrypted ? { decryptedSize: stored.decrypted.size } : {}),
+            },
+          }),
     };
   }
 

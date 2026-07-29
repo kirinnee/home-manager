@@ -129,6 +129,20 @@ class FakeService implements KTeamService {
     attachment: await this.addAttachment('s1', 'x.png', 'image/png', new Uint8Array([1, 2])),
     bytes: new Uint8Array([1, 2]),
   });
+  unlockAttachment = async (_id: string, _attachmentId: string, _password: string): Promise<AttachmentView> => ({
+    ...(await this.addAttachment('s1', 'locked.pdf', 'application/pdf', new Uint8Array([1, 2]))),
+    id: 'att_locked',
+    filename: 'locked.pdf',
+    mime: 'application/pdf',
+    encrypted: { kind: 'pdf', locked: false, expiresAt: '2026-01-01T00:30:00Z', decryptedSize: 777 },
+  });
+  lockAttachment = async (_id: string, _attachmentId: string): Promise<AttachmentView> => ({
+    ...(await this.addAttachment('s1', 'locked.pdf', 'application/pdf', new Uint8Array([1, 2]))),
+    id: 'att_locked',
+    filename: 'locked.pdf',
+    mime: 'application/pdf',
+    encrypted: { kind: 'pdf', locked: true },
+  });
   fsList = async (_id: string, relativePath?: string): Promise<FsListing> => ({
     root: '/tmp',
     path: relativePath ?? '',
@@ -418,6 +432,73 @@ describe('kteam daemon API', () => {
     expect(download.status).toBe(200);
     expect(download.headers.get('content-disposition')).toBe('attachment; filename="scan.pdf"');
     expect(new Uint8Array(await download.arrayBuffer())).toEqual(new TextEncoder().encode('%PDF'));
+  });
+
+  test('unlocks an encrypted attachment and reports a wrong password as a retryable 400', async () => {
+    const service = new FakeService();
+    const locked: AttachmentView = {
+      id: `att_${'d'.repeat(64)}`,
+      filename: 'statement.pdf',
+      mime: 'application/pdf',
+      size: 1234,
+      sha256: 'd'.repeat(64),
+      path: '/daemon-only/statement.pdf',
+      createdAt: '2026-07-29T02:00:00.000Z',
+      encrypted: { kind: 'pdf', locked: true },
+    };
+    const unlocked: AttachmentView = {
+      ...locked,
+      encrypted: { kind: 'pdf', locked: false, expiresAt: '2026-07-29T02:30:00.000Z', decryptedSize: 777 },
+      textExtraction: { method: 'pdfjs', characters: 23, truncated: false, totalPages: 1, pagesRead: 1 },
+    };
+    const seen: { password?: string; attachmentId?: string } = {};
+    service.unlockAttachment = async (_id, attachmentId, password) => {
+      seen.attachmentId = attachmentId;
+      seen.password = password;
+      if (password !== 'secret') throw new AttachmentError('wrong_password', 'that password did not unlock this PDF');
+      return unlocked;
+    };
+    service.lockAttachment = async () => locked;
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const url = `http://127.0.0.1:${server.port}/v1/sessions/s1/attachments/${locked.id}/unlock`;
+    const headers = { authorization: 'Bearer secret', 'content-type': 'application/json' };
+
+    const wrong = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ password: 'nope' }) });
+    expect(wrong.status).toBe(400);
+    expect(await wrong.json()).toEqual({ error: 'that password did not unlock this PDF', code: 'wrong_password' });
+
+    const missing = await fetch(url, { method: 'POST', headers, body: JSON.stringify({}) });
+    expect(missing.status).toBe(400);
+    expect(((await missing.json()) as { error: string }).error).toBe('field "password" is required');
+
+    const ok = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ password: 'secret' }) });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual(unlocked);
+    expect(seen).toEqual({ attachmentId: locked.id, password: 'secret' });
+
+    const relock = await fetch(url, { method: 'DELETE', headers: { authorization: 'Bearer secret' } });
+    expect(relock.status).toBe(200);
+    expect(await relock.json()).toEqual(locked);
+  });
+
+  test('reports a host without a memory filesystem as unavailable rather than unlocking to disk', async () => {
+    const service = new FakeService();
+    service.unlockAttachment = async () => {
+      throw new AttachmentError('decryption_unavailable', 'this host has no memory-backed filesystem');
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/attachments/att_x/unlock`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer secret', 'content-type': 'application/json' },
+      body: JSON.stringify({ password: 'secret' }),
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: 'this host has no memory-backed filesystem',
+      code: 'decryption_unavailable',
+    });
   });
 
   test('keeps the hard attachment-size cap as a typed client error', async () => {

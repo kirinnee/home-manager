@@ -31,6 +31,19 @@ function render(entries: Entry[]): string {
   return renderToStaticMarkup(<PendingAttachmentStrip entries={entries} onRetry={() => {}} onRemove={() => {}} />);
 }
 
+/** The unlock affordances are opt-in props, so they are rendered separately. */
+function renderUnlockable(entries: Entry[]): string {
+  return renderToStaticMarkup(
+    <PendingAttachmentStrip
+      entries={entries}
+      onRetry={() => {}}
+      onRemove={() => {}}
+      onUnlock={() => {}}
+      onForget={() => {}}
+    />,
+  );
+}
+
 const READY = entry({ localId: 'ready', status: 'ready' });
 const UPLOADING = entry({ localId: 'uploading', status: 'uploading' });
 const FAILED = entry({
@@ -63,6 +76,70 @@ const PDF_WITH_FAILED_EXTRACTION = (() => {
     },
   } as Entry;
 })();
+
+const lockedPdf = (locked: boolean): Entry => {
+  const file = new File(['%PDF'], 'statement.pdf', { type: 'application/pdf' });
+  Object.defineProperty(file, 'size', { value: 123_456 });
+  return {
+    localId: locked ? 'locked-pdf' : 'unlocked-pdf',
+    file,
+    status: 'ready' as const,
+    view: {
+      encrypted: locked
+        ? { kind: 'pdf' as const, locked: true }
+        : { kind: 'pdf' as const, locked: false, expiresAt: '2026-07-29T02:30:00.000Z', decryptedSize: 777 },
+    },
+  } as Entry;
+};
+const LOCKED_PDF = lockedPdf(true);
+const UNLOCKED_PDF = lockedPdf(false);
+
+describe('encrypted attachment chips', () => {
+  test('a locked PDF offers an unlock action instead of reading as a failure', () => {
+    const html = renderUnlockable([LOCKED_PDF]);
+    expect(html).toContain('statement.pdf');
+    expect(html).toContain('>ready<');
+    expect(html).toContain('enter its password');
+    expect(html).toContain('never written to disk');
+    expect(html).toContain('aria-label="Unlock statement.pdf"');
+    // Locked is warn-toned (something to do), never err-toned (something broken),
+    // and it never borrows the terminal extraction-failure copy.
+    expect(html).toContain('text-warn');
+    expect(html).not.toContain('Agent text extraction failed');
+    expect(html).not.toContain('re-attach it');
+  });
+
+  test('an unlocked PDF says the decrypted copy is memory-only and offers to forget it', () => {
+    const html = renderUnlockable([UNLOCKED_PDF]);
+    expect(html).toContain('only in memory');
+    expect(html).toContain('stored original stays encrypted');
+    expect(html).toContain('aria-label="Forget the decrypted copy of statement.pdf"');
+    expect(html).not.toContain('aria-label="Unlock statement.pdf"');
+  });
+
+  test('the unlock and forget controls keep the 44px touch floor', () => {
+    for (const one of [LOCKED_PDF, UNLOCKED_PDF]) {
+      const targets = renderUnlockable([one]).match(/min-h-\[44px\] min-w-\[44px\]/g) ?? [];
+      // Remove plus the lock control, both at the floor.
+      expect(targets.length).toBe(2);
+    }
+  });
+
+  test('no unlock control appears where the flow is not wired, and the state is still stated', () => {
+    // The strip must not render a button that cannot do anything, but it must
+    // still tell the reader the file is locked.
+    const html = render([LOCKED_PDF]);
+    expect(html).toContain('enter its password');
+    expect(html).not.toContain('aria-label="Unlock statement.pdf"');
+  });
+
+  test('a decrypted copy never leaks a daemon path into the chip', () => {
+    for (const html of [renderUnlockable([LOCKED_PDF]), renderUnlockable([UNLOCKED_PDF])]) {
+      expect(html).not.toContain('/dev/shm');
+      expect(html).not.toContain('.kteam');
+    }
+  });
+});
 
 describe('pending attachment chip density', () => {
   test('the thumbnail is the compact 36px box, not the old 48px one', () => {

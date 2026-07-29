@@ -10,6 +10,12 @@ import {
   type ExtractedDocumentText,
   type TextExtractionMethod,
 } from './document-extract';
+import {
+  UnlockedAttachmentCache,
+  type UnlockedAttachment,
+  type UnlockedAttachmentCacheOptions,
+} from './attachment-unlock';
+import { decryptPdfInMemory, PdfDecryptionError, type PdfDecryptionOptions } from './pdf-decrypt';
 
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const DEFAULT_MAX_INLINE_EXTRACTED_CHARACTERS = 32_000;
@@ -46,6 +52,22 @@ export interface TextExtractionFailureManifest {
   message: string;
 }
 
+/**
+ * Recorded when the stored original cannot be opened without a password.
+ *
+ * This is deliberately NOT a `textExtractionFailure`: a locked file is a state
+ * the human can resolve by supplying the password, so it has to stay distinct
+ * from the terminal reasons (scan, corrupt, timeout, oversize) that no password
+ * will ever fix.
+ *
+ * Only `pdf` has an unlock flow. A password-protected DOCX is an MS-OFFCRYPTO
+ * package, which the PDF decryptor cannot open, so it keeps its existing
+ * terminal `password_protected_document` extraction failure.
+ */
+export interface AttachmentEncryptionManifest {
+  kind: 'pdf';
+}
+
 export interface AttachmentManifest {
   version: 1;
   id: string;
@@ -56,6 +78,8 @@ export interface AttachmentManifest {
   time: string;
   textExtraction?: TextExtractionManifest;
   textExtractionFailure?: TextExtractionFailureManifest;
+  /** Present when the stored bytes are encrypted and can be unlocked. */
+  encrypted?: AttachmentEncryptionManifest;
 }
 
 export interface StoredAttachment {
@@ -66,6 +90,14 @@ export interface StoredAttachment {
   extractedText?: string;
   /** Verified absolute path to the retained extraction. */
   extractedTextPath?: string;
+  /** True while this attachment needs a password and has not been unlocked. */
+  locked?: boolean;
+  /**
+   * The in-RAM decrypted copy, present only after a successful unlock in this
+   * daemon process. Nothing here is ever persisted: the path is on a memory
+   * filesystem and the text lives in the heap.
+   */
+  decrypted?: UnlockedAttachment;
 }
 
 export type AttachmentInput =
@@ -89,6 +121,10 @@ export interface AttachmentStoreOptions {
   maxSizeBytes?: number;
   /** Injectable for deterministic tests; production uses unpdf/pdf.js. */
   pdfExtractor?: (input: Uint8Array) => Promise<ExtractedDocumentText>;
+  /** Injectable for deterministic tests; production runs qpdf in a Worker. */
+  pdfDecryptor?: (input: Uint8Array, password: string, options?: PdfDecryptionOptions) => Promise<Uint8Array>;
+  /** Bounds and TTL for decrypted copies held in RAM. */
+  unlock?: UnlockedAttachmentCacheOptions;
 }
 
 export type AttachmentErrorCode =
@@ -99,7 +135,17 @@ export type AttachmentErrorCode =
   | 'unsupported_mime'
   | 'mime_mismatch'
   | 'attachment_not_found'
-  | 'corrupt_attachment';
+  | 'corrupt_attachment'
+  // Unlock-flow reasons. `wrong_password` is the retryable one: the same bytes
+  // with a different password may still succeed.
+  | 'wrong_password'
+  | 'attachment_not_locked'
+  | 'decryption_unavailable'
+  | 'decryption_timeout'
+  | 'decryption_failed';
+
+/** Codes a caller can usefully retry with different input. */
+export const RETRYABLE_ATTACHMENT_ERROR_CODES = new Set<AttachmentErrorCode>(['wrong_password']);
 
 export class AttachmentError extends Error {
   readonly code: AttachmentErrorCode;
@@ -575,6 +621,10 @@ function isTextExtractionFailureManifest(value: unknown): value is TextExtractio
   );
 }
 
+function isAttachmentEncryptionManifest(value: unknown): value is AttachmentEncryptionManifest {
+  return typeof value === 'object' && value !== null && (value as AttachmentEncryptionManifest).kind === 'pdf';
+}
+
 function isManifest(value: unknown, expectedHash?: string): value is AttachmentManifest {
   if (typeof value !== 'object' || value === null) return false;
   const item = value as Partial<AttachmentManifest>;
@@ -598,8 +648,26 @@ function isManifest(value: unknown, expectedHash?: string): value is AttachmentM
     !Number.isNaN(Date.parse(item.time)) &&
     (item.textExtraction === undefined || isTextExtractionManifest(item.textExtraction)) &&
     (item.textExtractionFailure === undefined || isTextExtractionFailureManifest(item.textExtractionFailure)) &&
-    !(item.textExtraction !== undefined && item.textExtractionFailure !== undefined)
+    !(item.textExtraction !== undefined && item.textExtractionFailure !== undefined) &&
+    (item.encrypted === undefined || isAttachmentEncryptionManifest(item.encrypted)) &&
+    // Encrypted bytes cannot have yielded text, and a successful extraction
+    // proves they were never locked. A manifest claiming both is corrupt.
+    !(item.encrypted !== undefined && item.textExtraction !== undefined) &&
+    (item.encrypted === undefined || item.mime === 'application/pdf')
   );
+}
+
+/**
+ * Whether this attachment needs a password before its content can be read.
+ *
+ * Manifests written before the unlock flow existed recorded an encrypted PDF as
+ * a terminal `password_protected_document` extraction failure. Reading that
+ * shape as "locked" upgrades those uploads in place, with no migration and no
+ * rewrite of bytes that are content-addressed by hash.
+ */
+export function isLockedAttachment(manifest: AttachmentManifest): boolean {
+  if (manifest.encrypted?.kind === 'pdf') return true;
+  return manifest.mime === 'application/pdf' && manifest.textExtractionFailure?.code === 'password_protected_document';
 }
 
 async function readManifest(manifestPath: string, expectedHash: string): Promise<AttachmentManifest> {
@@ -626,6 +694,13 @@ function isExists(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST';
 }
 
+const DECRYPTION_ERROR_CODES: Readonly<Record<PdfDecryptionError['code'], AttachmentErrorCode>> = {
+  wrong_password: 'wrong_password',
+  unreadable_document: 'decryption_failed',
+  decryption_timeout: 'decryption_timeout',
+  decrypted_document_too_large: 'attachment_too_large',
+};
+
 async function pause(milliseconds: number): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, milliseconds));
 }
@@ -634,12 +709,21 @@ async function pause(milliseconds: number): Promise<void> {
 export class AttachmentStore {
   readonly rootDir: string;
   readonly maxSizeBytes: number;
+  /** Decrypted copies, in RAM only, for the lifetime of this daemon process. */
+  readonly unlocked: UnlockedAttachmentCache;
   private readonly pdfExtractor: (input: Uint8Array) => Promise<ExtractedDocumentText>;
+  private readonly pdfDecryptor: (
+    input: Uint8Array,
+    password: string,
+    options?: PdfDecryptionOptions,
+  ) => Promise<Uint8Array>;
 
   constructor(options: AttachmentStoreOptions = {}) {
     this.rootDir = path.resolve(options.rootDir ?? path.join(homedir(), '.kteam'));
     this.maxSizeBytes = options.maxSizeBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
     this.pdfExtractor = options.pdfExtractor ?? extractPdfText;
+    this.pdfDecryptor = options.pdfDecryptor ?? decryptPdfInMemory;
+    this.unlocked = new UnlockedAttachmentCache(options.unlock ?? {});
   }
 
   private attachmentsDir(sessionId: string): string {
@@ -692,6 +776,7 @@ export class AttachmentStore {
             'This DOCX needs a password to open; kteam could not read its text. Decrypt it locally and re-attach it if you want the agent to read it',
         }
       : undefined;
+    let encrypted: AttachmentEncryptionManifest | undefined;
     if (!textExtractionFailure) {
       try {
         if (detectedMime === 'application/pdf') extraction = await this.pdfExtractor(bytes);
@@ -699,8 +784,18 @@ export class AttachmentStore {
           extraction = extractDocxText(bytes);
         }
       } catch (error) {
-        if (error instanceof DocumentExtractionError) textExtractionFailure = extractionFailureManifest(error);
-        else throw error;
+        if (!(error instanceof DocumentExtractionError)) throw error;
+        // A PDF that refuses to open without a user password is LOCKED, not
+        // failed: the human can supply the password and get its text. Every
+        // other reason — and every locked DOCX, which qpdf cannot open — keeps
+        // its terminal named failure exactly as before.
+        //
+        // Verified in document-extract.test.ts: a permissions-only/owner-password
+        // PDF opens with the empty user password and takes the success branch, so
+        // it never reaches here and is never shown as locked.
+        if (detectedMime === 'application/pdf' && error.code === 'password_protected_document') {
+          encrypted = { kind: 'pdf' };
+        } else textExtractionFailure = extractionFailureManifest(error);
       }
     }
 
@@ -784,6 +879,7 @@ export class AttachmentStore {
         time: new Date().toISOString(),
         ...(textExtraction ? { textExtraction } : {}),
         ...(textExtractionFailure ? { textExtractionFailure } : {}),
+        ...(encrypted ? { encrypted } : {}),
       };
 
       await writeFile(contentPath, bytes, { flag: 'wx', mode: 0o600 });
@@ -899,7 +995,9 @@ export class AttachmentStore {
       if (metadata.size !== manifest.size) {
         throw new AttachmentError('corrupt_attachment', 'attachment content size does not match its manifest');
       }
-      if (!manifest.textExtraction) return { manifest, path: contentRealPath };
+      if (!manifest.textExtraction) {
+        return this.withUnlockState(sessionId, { manifest, path: contentRealPath });
+      }
 
       const extractedPath = path.join(hashDir, manifest.textExtraction.filename);
       const [extractedRealPath, extractedMetadata] = await Promise.all([realpath(extractedPath), lstat(extractedPath)]);
@@ -919,13 +1017,122 @@ export class AttachmentStore {
           'attachment text extraction character count does not match its manifest',
         );
       }
-      return { manifest, path: contentRealPath, extractedText, extractedTextPath: extractedRealPath };
+      return this.withUnlockState(sessionId, {
+        manifest,
+        path: contentRealPath,
+        extractedText,
+        extractedTextPath: extractedRealPath,
+      });
     } catch (error) {
       if (isMissing(error)) {
         throw new AttachmentError('corrupt_attachment', 'attachment content is missing');
       }
       throw error;
     }
+  }
+
+  /**
+   * Overlay the process-local unlock state onto a stored attachment.
+   *
+   * Nothing here reads or writes durable storage: `locked` is derived from the
+   * manifest and `decrypted` comes from the in-RAM cache, so a restarted daemon
+   * correctly reports the attachment as locked again.
+   */
+  private withUnlockState(sessionId: string, stored: StoredAttachment): StoredAttachment {
+    if (!isLockedAttachment(stored.manifest)) return stored;
+    const decrypted = this.unlocked.get(sessionId, stored.manifest.id);
+    return decrypted ? { ...stored, locked: false, decrypted } : { ...stored, locked: true };
+  }
+
+  /**
+   * Decrypt a locked attachment with the human's password and publish the plain
+   * bytes at a RAM-backed path the agent can open.
+   *
+   * The decrypted copy is never written to disk and never enters the
+   * content-addressed store: the original stays exactly as uploaded, and the
+   * plaintext lives on tmpfs plus this process's heap until it is released,
+   * evicted, or expires. Text extraction runs against the decrypted bytes and is
+   * kept in memory for the same lifetime — deliberately NOT through the durable
+   * extraction writer, which would put the document's text on disk.
+   */
+  async unlock(sessionId: string, attachmentId: string, password: string): Promise<StoredAttachment> {
+    assertSessionId(sessionId);
+    if (typeof password !== 'string' || password.length === 0) {
+      throw new AttachmentError('wrong_password', 'a password is required to unlock this attachment');
+    }
+    const stored = await this.get(sessionId, attachmentId);
+    if (!isLockedAttachment(stored.manifest)) {
+      throw new AttachmentError('attachment_not_locked', 'this attachment is not encrypted; no password is needed');
+    }
+    if (!this.unlocked.available) {
+      throw new AttachmentError(
+        'decryption_unavailable',
+        'this host has no memory-backed filesystem, so a decrypted copy cannot be given to the agent without writing it to disk',
+      );
+    }
+
+    const original = await readFile(stored.path);
+    let plain: Uint8Array;
+    try {
+      plain = await this.pdfDecryptor(original, password);
+    } catch (error) {
+      if (!(error instanceof PdfDecryptionError)) throw error;
+      throw new AttachmentError(DECRYPTION_ERROR_CODES[error.code], error.message);
+    }
+
+    let extraction: ExtractedDocumentText | undefined;
+    let extractionFailure: TextExtractionFailureManifest | undefined;
+    try {
+      extraction = await this.pdfExtractor(plain);
+    } catch (error) {
+      if (error instanceof DocumentExtractionError) extractionFailure = extractionFailureManifest(error);
+      else throw error;
+    }
+
+    try {
+      await this.unlocked.set(sessionId, attachmentId, {
+        bytes: plain,
+        filename: stored.manifest.filename,
+        ...(extraction
+          ? {
+              extraction: {
+                method: extraction.method,
+                characters: extraction.characters,
+                truncated: extraction.truncated,
+                ...(extraction.totalPages === undefined ? {} : { totalPages: extraction.totalPages }),
+                ...(extraction.pagesRead === undefined ? {} : { pagesRead: extraction.pagesRead }),
+              },
+              text: extraction.text,
+            }
+          : {}),
+        ...(extractionFailure ? { extractionFailure } : {}),
+      });
+    } catch (error) {
+      if (error instanceof RangeError) throw new AttachmentError('attachment_too_large', error.message);
+      throw error;
+    } finally {
+      // The RAM-backed file now owns the plaintext; drop our heap copy.
+      plain.fill(0);
+    }
+    return await this.get(sessionId, attachmentId);
+  }
+
+  /** Forget a decrypted copy: zero its pages, remove it, and report locked again. */
+  async lock(sessionId: string, attachmentId: string): Promise<StoredAttachment> {
+    assertSessionId(sessionId);
+    const stored = await this.get(sessionId, attachmentId);
+    await this.unlocked.release(sessionId, stored.manifest.id);
+    return await this.get(sessionId, attachmentId);
+  }
+
+  /** Release every decrypted copy belonging to a session (close/remove paths). */
+  async releaseSession(sessionId: string): Promise<void> {
+    await this.unlocked.releaseSession(sessionId);
+  }
+
+  /** Release every decrypted copy this store holds. Call on daemon shutdown. */
+  async dispose(): Promise<void> {
+    await this.unlocked.dispose();
   }
 
   async list(sessionId: string): Promise<StoredAttachment[]> {
@@ -962,7 +1169,7 @@ export class AttachmentStore {
 export function formatAttachmentReferenceBlock(attachments: readonly StoredAttachment[]): string {
   if (attachments.length === 0) return '';
   const heading = attachments.length === 1 ? 'Attached file' : 'Attached files';
-  const extractedCount = attachments.filter(item => item.manifest.textExtraction).length;
+  const extractedCount = attachments.filter(item => item.manifest.textExtraction || item.decrypted?.extraction).length;
   const perExtractionBudget =
     extractedCount === 0
       ? 0
@@ -975,8 +1182,32 @@ export function formatAttachmentReferenceBlock(attachments: readonly StoredAttac
   ];
 
   for (const attachment of attachments) {
-    const { manifest } = attachment;
+    const { manifest, decrypted } = attachment;
+    if (decrypted) {
+      // The agent gets the DECRYPTED path, because a path it cannot open is the
+      // same as no attachment at all. The line still states plainly what that
+      // path is, so nothing here reads as an ordinary stored file.
+      lines.push(`- ${decrypted.path} (${manifest.mime}, ${decrypted.size} bytes, id ${manifest.id})`);
+      lines.push(
+        `  Encrypted PDF unlocked in kteam with a password the human supplied. The path above is a temporary copy on a memory filesystem (RAM, never written to disk) that expires at ${decrypted.expiresAt}; read it now rather than later. The stored original at ${attachment.path} is still encrypted.`,
+      );
+      if (decrypted.extractionFailure) {
+        lines.push(
+          `  Text extraction failed in kteam (${decrypted.extractionFailure.code}): ${trimTerminator(decrypted.extractionFailure.message)}. The decrypted PDF itself is readable at the path above; do not assume its text was read.`,
+        );
+        continue;
+      }
+      if (!decrypted.extraction || decrypted.text === undefined) continue;
+      lines.push(...extractionLines(manifest.id, decrypted.extraction, decrypted.text, perExtractionBudget, undefined));
+      continue;
+    }
     lines.push(`- ${attachment.path} (${manifest.mime}, ${manifest.size} bytes, id ${manifest.id})`);
+    if (attachment.locked) {
+      lines.push(
+        `  This PDF is encrypted and still locked in kteam (encrypted_pdf_locked): no password has been supplied, so its text was not read and the file at the path above cannot be opened without one. Ask the human to unlock it in kteam if you need its contents.`,
+      );
+      continue;
+    }
     const extractionFailure = manifest.textExtractionFailure;
     if (extractionFailure) {
       // Strip a trailing sentence terminator before re-appending our own, but
@@ -984,41 +1215,83 @@ export function formatAttachmentReferenceBlock(attachments: readonly StoredAttac
       // trailing punctuation would otherwise yield a line the UI parser cannot
       // match, which makes it fall back to showing the raw reference block
       // (storage path included). Keep the original message in that case.
-      const reason = extractionFailure.message.replace(/[.!?]+$/, '') || extractionFailure.message;
       lines.push(
-        `  Text extraction failed in kteam (${extractionFailure.code}): ${reason}. The original file remains available at the path above; do not assume its text was read.`,
+        `  Text extraction failed in kteam (${extractionFailure.code}): ${trimTerminator(extractionFailure.message)}. The original file remains available at the path above; do not assume its text was read.`,
       );
       continue;
     }
     const extraction = manifest.textExtraction;
     if (!extraction || attachment.extractedText === undefined || attachment.extractedTextPath === undefined) continue;
-    const excerpt = safePromptPrefix(attachment.extractedText, perExtractionBudget);
-    const promptTruncated = excerpt.length < attachment.extractedText.length;
-    const pageDetails =
-      extraction.totalPages === undefined
-        ? ''
-        : extraction.pagesRead === extraction.totalPages
-          ? `${extraction.totalPages} page${extraction.totalPages === 1 ? '' : 's'}; `
-          : `${extraction.pagesRead ?? 0} of ${extraction.totalPages} pages; `;
-    const retained = extraction.truncated
-      ? `retained first ${extraction.characters} characters; source extraction truncated; `
-      : `retained ${extraction.characters} characters; `;
-    const prompt = promptTruncated
-      ? `prompt excerpt ${excerpt.length} of ${extraction.characters} retained characters; `
-      : `prompt includes all ${excerpt.length} retained characters; `;
-    const omissions =
-      extraction.method === 'pdfjs'
-        ? 'layout, images, and scanned content are not included'
-        : 'formatting, images, and other non-text document content are not included';
     lines.push(
-      `  Text extracted by kteam (${extraction.method === 'pdfjs' ? 'pdf.js' : 'DOCX XML'}; ${pageDetails}${retained}${prompt}${omissions}).`,
-      `  Full retained extraction: ${attachment.extractedTextPath}`,
-      `  ----- BEGIN KTEAM EXTRACTED TEXT ${manifest.id} -----`,
-      excerpt,
-      `  ----- END KTEAM EXTRACTED TEXT ${manifest.id} -----`,
+      ...extractionLines(
+        manifest.id,
+        extraction,
+        attachment.extractedText,
+        perExtractionBudget,
+        attachment.extractedTextPath,
+      ),
     );
   }
   return lines.join('\n');
+}
+
+/** Strip a trailing sentence terminator before our own is appended, but never
+ * let the reason collapse to empty: a message that is entirely trailing
+ * punctuation would yield a line the UI parser cannot match, which makes it fall
+ * back to showing the raw reference block (storage path included). */
+function trimTerminator(message: string): string {
+  return message.replace(/[.!?]+$/, '') || message;
+}
+
+interface ExtractionSummary {
+  method: TextExtractionMethod;
+  characters: number;
+  truncated: boolean;
+  totalPages?: number;
+  pagesRead?: number;
+}
+
+/**
+ * The extracted-text stanza, shared by the durable and the RAM-only paths.
+ *
+ * `retainedPath` is omitted for a decrypted attachment: its text was never
+ * written anywhere, so pointing the agent at a file would be a lie. The stanza
+ * says exactly as much as is true in each case.
+ */
+function extractionLines(
+  attachmentId: string,
+  extraction: ExtractionSummary,
+  text: string,
+  budget: number,
+  retainedPath: string | undefined,
+): string[] {
+  const excerpt = safePromptPrefix(text, budget);
+  const promptTruncated = excerpt.length < text.length;
+  const pageDetails =
+    extraction.totalPages === undefined
+      ? ''
+      : extraction.pagesRead === extraction.totalPages
+        ? `${extraction.totalPages} page${extraction.totalPages === 1 ? '' : 's'}; `
+        : `${extraction.pagesRead ?? 0} of ${extraction.totalPages} pages; `;
+  const retained = extraction.truncated
+    ? `retained first ${extraction.characters} characters; source extraction truncated; `
+    : `retained ${extraction.characters} characters; `;
+  const prompt = promptTruncated
+    ? `prompt excerpt ${excerpt.length} of ${extraction.characters} retained characters; `
+    : `prompt includes all ${excerpt.length} retained characters; `;
+  const omissions =
+    extraction.method === 'pdfjs'
+      ? 'layout, images, and scanned content are not included'
+      : 'formatting, images, and other non-text document content are not included';
+  return [
+    `  Text extracted by kteam (${extraction.method === 'pdfjs' ? 'pdf.js' : 'DOCX XML'}; ${pageDetails}${retained}${prompt}${omissions}).`,
+    ...(retainedPath === undefined
+      ? ['  This extraction is held in memory only and was never written to disk.']
+      : [`  Full retained extraction: ${retainedPath}`]),
+    `  ----- BEGIN KTEAM EXTRACTED TEXT ${attachmentId} -----`,
+    excerpt,
+    `  ----- END KTEAM EXTRACTED TEXT ${attachmentId} -----`,
+  ];
 }
 
 function safePromptPrefix(text: string, maxCharacters: number): string {
