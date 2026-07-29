@@ -23,7 +23,7 @@
 //                  dashboard and the transcript exactly nothing.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react';
-import { ArrowDown, ArrowUp, CornerDownLeft, Search, Settings } from 'lucide-react';
+import { ArrowDown, ArrowUp, CornerDownLeft, KeyRound, Search, Settings } from 'lucide-react';
 import type { SessionView } from '../types';
 import { navigate } from '../lib/router';
 import { useStore } from '../lib/store';
@@ -39,6 +39,7 @@ import { TaskName, parseTaskName } from './TaskName';
 import { useLayoutMode } from '../hooks/useLayoutMode';
 import { settingsHref, settingsPaletteEntries, type SettingsPaletteEntry } from '../lib/settings';
 import { useInputModality } from '../hooks/useInputModality';
+import { actOnBrowserLogin } from '../lib/browser-login';
 
 /** Stable element ids. The palette is a SINGLETON (App mounts exactly one), so
  *  these are constants rather than `useId()` values — an option id that changed
@@ -47,8 +48,10 @@ import { useInputModality } from '../hooks/useInputModality';
 const PANEL_ID = 'kt-palette';
 const INPUT_ID = 'kt-palette-input';
 const LISTBOX_ID = 'kt-palette-listbox';
+const COMMANDS_HEADING_ID = 'kt-palette-group-commands';
 const SETTINGS_HEADING_ID = 'kt-palette-group-settings';
 const SESSIONS_HEADING_ID = 'kt-palette-group-sessions';
+const commandOptionId = (id: string) => `kt-palette-option-command-${id}`;
 const sessionOptionId = (sessionId: string) => `kt-palette-option-session-${sessionId}`;
 const settingsOptionId = (id: string) => `kt-palette-option-${id}`;
 
@@ -83,10 +86,27 @@ interface PaletteSession extends SessionEntry {
   folderName: string;
 }
 
-type PaletteResult = { kind: 'settings'; entry: SettingsPaletteEntry } | { kind: 'session'; entry: PaletteSession };
+const BROWSER_LOGIN_COMMAND = {
+  id: 'browser-login',
+  label: 'Open browser login window',
+  description: 'Sign in to shared Chrome through the private browser-login window',
+  searchTerms: 'browser login sign in shared chrome',
+} as const;
+
+type PaletteCommand = typeof BROWSER_LOGIN_COMMAND;
+type PaletteResult =
+  | { kind: 'command'; entry: PaletteCommand }
+  | { kind: 'settings'; entry: SettingsPaletteEntry }
+  | { kind: 'session'; entry: PaletteSession };
 
 function paletteResultId(result: PaletteResult): string {
+  if (result.kind === 'command') return commandOptionId(result.entry.id);
   return result.kind === 'settings' ? settingsOptionId(result.entry.id) : sessionOptionId(result.entry.id);
+}
+
+export function matchesBrowserLoginCommand(query: string): boolean {
+  const terms = query.trim().toLowerCase();
+  return !terms || BROWSER_LOGIN_COMMAND.searchTerms.includes(terms);
 }
 
 /** Fleet state, subscribed to ONLY while the palette is open.
@@ -186,12 +206,14 @@ export function CommandPalette({
     [entries, query],
   );
   const settingsResults = useMemo(() => settingsPaletteEntries(query), [query]);
+  const browserLoginCommand = matchesBrowserLoginCommand(query) ? BROWSER_LOGIN_COMMAND : null;
   const results = useMemo<PaletteResult[]>(
     () => [
+      ...(browserLoginCommand ? [{ kind: 'command' as const, entry: browserLoginCommand }] : []),
       ...settingsResults.map(entry => ({ kind: 'settings' as const, entry })),
       ...sessionResults.map(entry => ({ kind: 'session' as const, entry })),
     ],
-    [sessionResults, settingsResults],
+    [browserLoginCommand, sessionResults, settingsResults],
   );
 
   // The active row is DERIVED and clamped rather than corrected in an effect: a
@@ -242,6 +264,11 @@ export function CommandPalette({
 
   const run = useCallback(
     (result: PaletteResult) => {
+      if (result.kind === 'command') {
+        onClose();
+        void actOnBrowserLogin('start');
+        return;
+      }
       if (result.kind === 'session') {
         navigate(`/session/${encodeURIComponent(result.entry.id)}`);
         onClose();
@@ -342,13 +369,13 @@ export function CommandPalette({
             aria-controls={LISTBOX_ID}
             aria-activedescendant={activeEntry ? paletteResultId(activeEntry) : undefined}
             aria-autocomplete="list"
-            aria-label="Search sessions and settings"
+            aria-label="Search commands, sessions, and settings"
             autoComplete="off"
             spellCheck={false}
             value={query}
             onChange={event => setQuery(event.target.value)}
             onKeyDown={onInputKeyDown}
-            placeholder="Search sessions and settings…"
+            placeholder="Search commands, sessions, and settings…"
             // Not `.kt-input`: the panel already draws the edge, and a second
             // bordered control inside it reads as a box in a box. Type size and
             // colour still come from tokens.
@@ -360,20 +387,36 @@ export function CommandPalette({
             (the transcript); this is an overlay and never nests inside it. */}
         <div className="min-h-0 flex-1 overflow-y-auto scroll-thin px-xs py-xs">
           <div id={LISTBOX_ID} role="listbox" aria-label="Results">
+            {browserLoginCommand && (
+              <div role="group" aria-labelledby={COMMANDS_HEADING_ID}>
+                <div id={COMMANDS_HEADING_ID} className="kt-label px-cell-x pb-xs pt-xs">
+                  {trimmed ? 'Commands' : 'Browser'}
+                </div>
+                <CommandOption
+                  entry={browserLoginCommand}
+                  selected={activeIndex === 0}
+                  onActivate={() => run({ kind: 'command', entry: browserLoginCommand })}
+                  onHover={() => setActive(0)}
+                />
+              </div>
+            )}
             {settingsResults.length > 0 && (
               <div role="group" aria-labelledby={SETTINGS_HEADING_ID}>
                 <div id={SETTINGS_HEADING_ID} className="kt-label px-cell-x pb-xs pt-xs">
                   {trimmed ? 'Settings' : 'Commands'}
                 </div>
-                {settingsResults.map((entry, index) => (
-                  <SettingsOption
-                    key={entry.id}
-                    entry={entry}
-                    selected={index === activeIndex}
-                    onActivate={() => run({ kind: 'settings', entry })}
-                    onHover={() => setActive(index)}
-                  />
-                ))}
+                {settingsResults.map((entry, index) => {
+                  const resultIndex = (browserLoginCommand ? 1 : 0) + index;
+                  return (
+                    <SettingsOption
+                      key={entry.id}
+                      entry={entry}
+                      selected={resultIndex === activeIndex}
+                      onActivate={() => run({ kind: 'settings', entry })}
+                      onHover={() => setActive(resultIndex)}
+                    />
+                  );
+                })}
               </div>
             )}
             {sessionResults.length > 0 && (
@@ -382,7 +425,7 @@ export function CommandPalette({
                   {trimmed ? 'Sessions' : 'Recent sessions'}
                 </div>
                 {sessionResults.map((entry, index) => {
-                  const resultIndex = settingsResults.length + index;
+                  const resultIndex = (browserLoginCommand ? 1 : 0) + settingsResults.length + index;
                   return (
                     <SessionOption
                       key={entry.id}
@@ -419,6 +462,36 @@ export function CommandPalette({
           {announcement}
         </span>
       </div>
+    </div>
+  );
+}
+
+function CommandOption({
+  entry,
+  selected,
+  onActivate,
+  onHover,
+}: {
+  entry: PaletteCommand;
+  selected: boolean;
+  onActivate: () => void;
+  onHover: () => void;
+}) {
+  return (
+    <div
+      id={commandOptionId(entry.id)}
+      role="option"
+      aria-selected={selected}
+      data-active={selected ? 'true' : undefined}
+      onClick={onActivate}
+      onPointerMove={onHover}
+      className="kt-navrow min-h-[44px] cursor-pointer items-start"
+    >
+      <KeyRound size={14} className="mt-0.5 shrink-0 text-warn" aria-hidden="true" />
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span className="font-semibold text-fg">{entry.label}</span>
+        <span className="truncate text-meta text-muted">{entry.description}</span>
+      </span>
     </div>
   );
 }
