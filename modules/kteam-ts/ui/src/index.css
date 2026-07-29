@@ -1583,3 +1583,36 @@ body {
 :root[data-theme^='ember-'] .kt-panel__header {
   box-shadow: var(--rule-inset);
 }
+
+/* Portrait gate — shown only when a phone-sized viewport is turned sideways
+   and the platform refused screen.orientation.lock() (see lib/orientation-lock.ts). */
+#kteam-portrait-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  text-align: center;
+  background: var(--surface, #111);
+  color: var(--text, #f5f5f5);
+}
+
+.kteam-portrait-gate__icon {
+  font-size: 2.5rem;
+  line-height: 1;
+  margin-bottom: 0.75rem;
+}
+
+.kteam-portrait-gate__title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 0 0 0.35rem;
+}
+
+.kteam-portrait-gate__body {
+  margin: 0;
+  opacity: 0.75;
+  font-size: 0.9rem;
+}
