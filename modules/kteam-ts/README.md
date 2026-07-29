@@ -114,7 +114,7 @@ same allowlist and shows documents as file cards rather than broken image tiles.
   text first.
 - Each original file is limited to 20 MiB. The daemon verifies bytes instead of
   trusting the filename or browser MIME declaration, derives a safe extension,
-  and keeps the successful original downloadable.
+  and keeps every accepted original byte-for-byte downloadable.
 - Text, Markdown, CSV, and JSON are delivered as verified local text paths.
 - PDF text is extracted by kteam before the prompt is sent: at most the first
   100 pages, at most 250,000 retained characters, and a 15-second extraction
@@ -127,8 +127,13 @@ same allowlist and shows documents as file cards rather than broken image tiles.
 - Every extraction and truncation is disclosed in the agent prompt and UI. PDF
   extraction is text-only: page layout, figures, and scanned content are not
   included.
-- Scanned/image-only PDFs, unreadable files, and password-protected PDF/DOCX
-  files fail explicitly instead of producing an empty successful attachment.
+- When extraction cannot read a scanned/image-only, corrupt, over-complex, or
+  truly user-password-protected document, kteam retains the original and names
+  the reason on the attachment in both the agent prompt and UI. The file stays
+  openable/downloadable; the agent is explicitly told not to assume its text was
+  read. Permissions-only PDFs with an empty user password extract normally.
+- Unsupported or MIME-mismatched files and originals over the hard 20 MiB cap
+  remain typed upload errors because those are invalid attachment requests.
 
 The harnesses have different native file support, so kteam does not rely on it
 for PDFs or DOCX:

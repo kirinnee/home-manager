@@ -355,11 +355,23 @@ describe('kteam daemon API', () => {
     expect(new Uint8Array(await download.arrayBuffer())).toEqual(new TextEncoder().encode('%PDF'));
   });
 
-  test('returns the real typed attachment failure instead of a generic conflict', async () => {
+  test('returns retained extraction failures as successful, downloadable attachments', async () => {
     const service = new FakeService();
-    service.addAttachment = async () => {
-      throw new AttachmentError('no_extractable_text', 'PDF has no extractable text; it looks like a scan');
+    const document: AttachmentView = {
+      id: `att_${'c'.repeat(64)}`,
+      filename: 'scan.pdf',
+      mime: 'application/pdf',
+      size: 5,
+      sha256: 'c'.repeat(64),
+      path: '/daemon-only/scan.pdf',
+      createdAt: '2026-07-29T01:00:00.000Z',
+      textExtractionFailure: {
+        code: 'no_extractable_text',
+        message: 'PDF has no extractable text; it looks like a scan',
+      },
     };
+    service.addAttachment = async () => document;
+    service.getAttachment = async () => ({ attachment: document, bytes: new TextEncoder().encode('%PDF') });
     const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
     servers.push(server);
     const form = new FormData();
@@ -369,10 +381,35 @@ describe('kteam daemon API', () => {
       headers: { authorization: 'Bearer secret' },
       body: form,
     });
-    expect(response.status).toBe(422);
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual(document);
+
+    const download = await fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/attachments/${document.id}`, {
+      headers: { authorization: 'Bearer secret' },
+    });
+    expect(download.status).toBe(200);
+    expect(download.headers.get('content-disposition')).toBe('attachment; filename="scan.pdf"');
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(new TextEncoder().encode('%PDF'));
+  });
+
+  test('keeps the hard attachment-size cap as a typed client error', async () => {
+    const service = new FakeService();
+    service.addAttachment = async () => {
+      throw new AttachmentError('attachment_too_large', 'attachment is larger than the 20971520-byte limit');
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const form = new FormData();
+    form.set('file', new File(['too large'], 'large.pdf', { type: 'application/pdf' }));
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/attachments`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer secret' },
+      body: form,
+    });
+    expect(response.status).toBe(413);
     expect(await response.json()).toEqual({
-      error: 'PDF has no extractable text; it looks like a scan',
-      code: 'no_extractable_text',
+      error: 'attachment is larger than the 20971520-byte limit',
+      code: 'attachment_too_large',
     });
   });
 

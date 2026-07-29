@@ -73,6 +73,7 @@ import {
   formatAttachmentSize,
   isImageMime,
   sameAttachmentIds,
+  textExtractionFailureCopy,
   validateAttachmentFile,
   type AttachmentView,
   type StoredTranscriptImage,
@@ -1530,6 +1531,11 @@ export function PendingAttachmentStrip({
             {entry.view?.textExtraction && (
               <span className="block text-faint">
                 text extracted for agent{entry.view.textExtraction.truncated ? ' · truncated' : ''}
+              </span>
+            )}
+            {entry.status === 'ready' && entry.view?.textExtractionFailure && (
+              <span className="block text-warn">
+                {textExtractionFailureCopy(entry.view.textExtractionFailure.code)}
               </span>
             )}
           </span>

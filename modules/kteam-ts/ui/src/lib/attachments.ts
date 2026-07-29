@@ -28,6 +28,34 @@ export type AttachmentErrorCode =
   | 'attachment_not_found'
   | 'corrupt_attachment';
 
+export interface TextExtraction {
+  method: 'pdfjs' | 'docx-xml';
+  characters: number;
+  truncated: boolean;
+  totalPages?: number;
+  pagesRead?: number;
+}
+
+export const TEXT_EXTRACTION_FAILURE_CODES = [
+  'password_protected_document',
+  'no_extractable_text',
+  'unreadable_document',
+  'document_extraction_timeout',
+  'document_too_complex',
+] as const;
+
+export type KnownTextExtractionFailureCode = (typeof TEXT_EXTRACTION_FAILURE_CODES)[number];
+
+/** Keep known codes discoverable while allowing a newer daemon to add a safe,
+ * validated machine code before a cached UI bundle is refreshed. */
+export type TextExtractionFailureCode = KnownTextExtractionFailureCode | (string & {});
+
+export interface TextExtractionFailure {
+  code: TextExtractionFailureCode;
+  /** Daemon metadata retained for transcript fidelity; never render it verbatim. */
+  message: string;
+}
+
 export interface AttachmentView {
   id: string;
   filename: string;
@@ -37,13 +65,9 @@ export interface AttachmentView {
   /** Daemon-local audit metadata only. The UI must never render or fetch it. */
   path: string;
   createdAt: string;
-  textExtraction?: {
-    method: 'pdfjs' | 'docx-xml';
-    characters: number;
-    truncated: boolean;
-    totalPages?: number;
-    pagesRead?: number;
-  };
+  textExtraction?: TextExtraction;
+  /** Mutually exclusive with textExtraction when the daemon could retain the original but not its text. */
+  textExtractionFailure?: TextExtractionFailure;
 }
 
 export interface StoredTranscriptAttachment {
@@ -55,7 +79,8 @@ export interface StoredTranscriptAttachment {
   size?: number;
   /** A tool path is useful alt text, but is never used as a fetch target. */
   alt?: string;
-  textExtraction?: AttachmentView['textExtraction'];
+  textExtraction?: TextExtraction;
+  textExtractionFailure?: TextExtractionFailure;
 }
 
 /** Compatibility name while callers migrate from image-only presentation. */
@@ -90,8 +115,61 @@ const ERROR_COPY: Record<AttachmentErrorCode, string> = {
   corrupt_attachment: 'Attachment is no longer available — re-add it',
 };
 
+const MAX_TEXT_EXTRACTION_FAILURE_CODE_LENGTH = 64;
+const TEXT_EXTRACTION_FAILURE_CODE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
+
+const TEXT_EXTRACTION_FAILURE_COPY: Readonly<Record<KnownTextExtractionFailureCode, string>> = {
+  password_protected_document:
+    'Agent text extraction failed: this PDF or Word document needs a password, so kteam could not read its text. The original remains attached and downloadable; decrypt it locally and re-attach it if the agent should read it.',
+  no_extractable_text: 'Agent text extraction failed: no readable text was found; it may be a scan.',
+  unreadable_document: 'Agent text extraction failed: the document is unreadable or corrupt.',
+  document_extraction_timeout: 'Agent text extraction failed: document reading timed out.',
+  document_too_complex: 'Agent text extraction failed: the document is too complex or exceeds extraction limits.',
+};
+
+const UNKNOWN_TEXT_EXTRACTION_FAILURE_COPY =
+  'Agent text extraction failed: kteam could not read the document text. The original remains attached and downloadable.';
+
 export function attachmentErrorCopy(code: AttachmentErrorCode): string {
   return ERROR_COPY[code];
+}
+
+function isKnownTextExtractionFailureCode(code: string): code is KnownTextExtractionFailureCode {
+  return (TEXT_EXTRACTION_FAILURE_CODES as readonly string[]).includes(code);
+}
+
+export function isTextExtraction(value: unknown): value is TextExtraction {
+  if (!value || typeof value !== 'object') return false;
+  const extraction = value as Record<string, unknown>;
+  return (
+    (extraction['method'] === 'pdfjs' || extraction['method'] === 'docx-xml') &&
+    typeof extraction['characters'] === 'number' &&
+    typeof extraction['truncated'] === 'boolean' &&
+    (extraction['totalPages'] === undefined || typeof extraction['totalPages'] === 'number') &&
+    (extraction['pagesRead'] === undefined || typeof extraction['pagesRead'] === 'number')
+  );
+}
+
+export function isTextExtractionFailure(value: unknown): value is TextExtractionFailure {
+  if (!value || typeof value !== 'object') return false;
+  const failure = value as Record<string, unknown>;
+  return (
+    typeof failure['code'] === 'string' &&
+    failure['code'].length <= MAX_TEXT_EXTRACTION_FAILURE_CODE_LENGTH &&
+    TEXT_EXTRACTION_FAILURE_CODE.test(failure['code']) &&
+    typeof failure['message'] === 'string' &&
+    failure['message'].length > 0 &&
+    failure['message'].length <= 500 &&
+    failure['message'] === failure['message'].trim() &&
+    !/[\u0000-\u001f\u007f]/.test(failure['message'])
+  );
+}
+
+/** Curated UI copy deliberately omits the daemon's opaque raw message. */
+export function textExtractionFailureCopy(code: TextExtractionFailureCode): string {
+  return isKnownTextExtractionFailureCode(code)
+    ? TEXT_EXTRACTION_FAILURE_COPY[code]
+    : UNKNOWN_TEXT_EXTRACTION_FAILURE_COPY;
 }
 
 /** File.type is a declaration, not proof. Empty is allowed so the daemon can
@@ -163,6 +241,10 @@ export function attachmentErrorMessage(error: unknown): string {
 }
 
 export function attachmentFromView(sessionId: string, view: AttachmentView): StoredTranscriptAttachment {
+  const textExtraction = isTextExtraction(view.textExtraction) ? view.textExtraction : undefined;
+  const textExtractionFailure = isTextExtractionFailure(view.textExtractionFailure)
+    ? view.textExtractionFailure
+    : undefined;
   return {
     kind: 'attachment',
     sessionId,
@@ -170,7 +252,8 @@ export function attachmentFromView(sessionId: string, view: AttachmentView): Sto
     filename: view.filename,
     mime: view.mime,
     size: view.size,
-    ...(view.textExtraction ? { textExtraction: view.textExtraction } : {}),
+    ...(textExtraction && !textExtractionFailure ? { textExtraction } : {}),
+    ...(textExtractionFailure && !textExtraction ? { textExtractionFailure } : {}),
   };
 }
 

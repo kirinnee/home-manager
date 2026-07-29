@@ -378,12 +378,6 @@ function attachmentErrorStatus(code: AttachmentErrorCode): number {
       return 404;
     case 'corrupt_attachment':
       return 409;
-    case 'password_protected_document':
-    case 'no_extractable_text':
-    case 'unreadable_document':
-    case 'document_extraction_timeout':
-    case 'document_too_complex':
-      return 422;
     default:
       return 400;
   }

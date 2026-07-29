@@ -373,6 +373,28 @@ describe('journalled sent-message merge', () => {
     expect(stripAttachmentReferenceBlock(text.replace('application/pdf', 'application/msword'))).toBeNull();
   });
 
+  test('joins an exact document extraction-failure disclosure and rejects near-misses', () => {
+    const docId = `att_${'c'.repeat(64)}`;
+    const failureLine =
+      '  Text extraction failed in kteam (no_extractable_text): document has no extractable text; it may be a scan or image-only document. The original file remains available at the path above; do not assume its text was read.';
+    const text = `please inspect\n\nAttached file (inspect this file directly before responding):\n- /home/kirin/.kteam/${SESSION}/attachments/${'c'.repeat(64)}/scan.pdf (application/pdf, 123 bytes, id ${docId})\n${failureLine}`;
+    expect(stripAttachmentReferenceBlock(text)).toEqual({ text: 'please inspect', attachmentIds: [docId] });
+    const futureFailureLine =
+      '  Text extraction failed in kteam (future_document_read_error): parser detail /home/kirin/.kteam/ms1docs-12345678/attachments/private.pdf. The original file remains available at the path above; do not assume its text was read.';
+    expect(stripAttachmentReferenceBlock(text.replace(failureLine, futureFailureLine))).toEqual({
+      text: 'please inspect',
+      attachmentIds: [docId],
+    });
+    expect(stripAttachmentReferenceBlock(text.replace('no_extractable_text', 'no-extractable-text'))).toBeNull();
+    expect(stripAttachmentReferenceBlock(text.replace('at the path above', 'at this path'))).toBeNull();
+    expect(
+      stripAttachmentReferenceBlock(
+        text.replace('document has no extractable text', 'document has no\t extractable text'),
+      ),
+    ).toBeNull();
+    expect(stripAttachmentReferenceBlock(`${text}\n${failureLine}`)).toBeNull();
+  });
+
   test('retains optional document extraction event metadata for the attachment card', () => {
     const docId = `att_${'b'.repeat(64)}`;
     const index = buildSendIndex(
@@ -394,6 +416,79 @@ describe('journalled sent-message merge', () => {
       totalPages: 3,
       pagesRead: 2,
     });
+  });
+
+  test('retains valid future extraction-failure event metadata while rejecting malformed or contradictory states', () => {
+    const docId = `att_${'d'.repeat(64)}`;
+    const failure = {
+      code: 'password_protected_document',
+      message: 'PDF is password-protected; kteam could not extract text',
+    } as const;
+    const index = buildSendIndex(
+      [
+        journal(1, 'attachment.created', {
+          id: docId,
+          filename: 'protected.pdf',
+          mime: 'application/pdf',
+          size: 123,
+          textExtractionFailure: failure,
+        }),
+      ],
+      SESSION,
+    );
+    expect(index.attachments.get(docId)?.textExtractionFailure).toEqual(failure);
+    expect(index.attachments.get(docId)?.textExtraction).toBeUndefined();
+
+    const futureFailure = {
+      code: 'future_document_read_error',
+      message: 'parser detail /home/kirin/.kteam/ms1docs-12345678/attachments/private.pdf',
+    };
+    const future = buildSendIndex(
+      [
+        journal(2, 'attachment.created', {
+          id: docId,
+          filename: 'protected.pdf',
+          mime: 'application/pdf',
+          size: 123,
+          textExtractionFailure: futureFailure,
+        }),
+      ],
+      SESSION,
+    );
+    expect(future.attachments.get(docId)?.textExtractionFailure).toEqual(futureFailure);
+    expect(future.attachments.get(docId)?.textExtraction).toBeUndefined();
+
+    for (const code of ['future-document', 'a'.repeat(65)]) {
+      const malformed = buildSendIndex(
+        [
+          journal(3, 'attachment.created', {
+            id: docId,
+            filename: 'protected.pdf',
+            mime: 'application/pdf',
+            size: 123,
+            textExtractionFailure: { ...futureFailure, code },
+          }),
+        ],
+        SESSION,
+      );
+      expect(malformed.attachments.get(docId)?.textExtractionFailure).toBeUndefined();
+    }
+
+    const contradictory = buildSendIndex(
+      [
+        journal(4, 'attachment.created', {
+          id: docId,
+          filename: 'protected.pdf',
+          mime: 'application/pdf',
+          size: 123,
+          textExtraction: { method: 'pdfjs', characters: 70, truncated: false },
+          textExtractionFailure: failure,
+        }),
+      ],
+      SESSION,
+    );
+    expect(contradictory.attachments.get(docId)?.textExtraction).toBeUndefined();
+    expect(contradictory.attachments.get(docId)?.textExtractionFailure).toBeUndefined();
   });
 
   test('attachment-only and peer sends retain their correct user-row semantics', () => {

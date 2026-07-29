@@ -15,6 +15,7 @@ import {
   formatAttachmentSize,
   isBrowserOpenableAttachment,
   isImageMime,
+  textExtractionFailureCopy,
   type StoredTranscriptAttachment,
   type TranscriptImage,
 } from '../lib/attachments';
@@ -151,6 +152,11 @@ function AttachmentDocumentCard({ attachment }: { attachment: StoredTranscriptAt
         {attachment.textExtraction && (
           <span className="block text-faint">
             text extracted for agent{attachment.textExtraction.truncated ? ' · truncated' : ''}
+          </span>
+        )}
+        {attachment.textExtractionFailure && (
+          <span className="block text-warn" role="status">
+            {textExtractionFailureCopy(attachment.textExtractionFailure.code)}
           </span>
         )}
         {failed ? (

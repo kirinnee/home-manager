@@ -48,6 +48,21 @@ const PDF = (() => {
     view: { textExtraction: { method: 'pdfjs' as const, characters: 92, truncated: true } },
   } as Entry;
 })();
+const PDF_WITH_FAILED_EXTRACTION = (() => {
+  const file = new File(['%PDF'], 'scanned-report.pdf', { type: 'application/pdf' });
+  Object.defineProperty(file, 'size', { value: 123_456 });
+  return {
+    localId: 'scanned-pdf',
+    file,
+    status: 'ready' as const,
+    view: {
+      textExtractionFailure: {
+        code: 'no_extractable_text' as const,
+        message: 'parser detail /home/kirin/.kteam/ms1docs-12345678/attachments/private.pdf',
+      },
+    },
+  } as Entry;
+})();
 
 describe('pending attachment chip density', () => {
   test('the thumbnail is the compact 36px box, not the old 48px one', () => {
@@ -107,5 +122,16 @@ describe('pending attachment chip density', () => {
     expect(html).toContain('text extracted for agent · truncated');
     expect(html).not.toContain('src="blob:pdf"');
     expect(html).toContain('min-w-0');
+  });
+
+  test('a ready document warns about failed agent extraction without becoming retryable', () => {
+    const html = render([PDF_WITH_FAILED_EXTRACTION]);
+    expect(html).toContain('scanned-report.pdf');
+    expect(html).toContain('>ready<');
+    expect(html).toContain('Agent text extraction failed: no readable text was found; it may be a scan.');
+    expect(html).toContain('text-warn');
+    expect(html).not.toContain('parser detail');
+    expect(html).not.toContain('aria-label="Retry scanned-report.pdf"');
+    expect(html).toContain('aria-label="Remove scanned-report.pdf"');
   });
 });
