@@ -312,7 +312,16 @@ export function SessionsListPage() {
         </div>
       )}
 
-      <div data-density-region="dashboard-scroller" className="min-h-0 flex-1 overflow-y-auto scroll-thin">
+      {/* PULL DOWN HERE OPENS THE PALETTE (phones). The attribute is the whole
+          opt-in — the gesture itself is delegated from the shell
+          (hooks/usePullToPalette.ts) — and `overscroll-contain` is what stops
+          that same pull from chaining to the browser's own pull-to-refresh, the
+          way the fleet sidebar's pull already does. */}
+      <div
+        data-density-region="dashboard-scroller"
+        data-pull-to-palette
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain scroll-thin"
+      >
         {!sessions && <SkeletonRows />}
         {sessions && visible.length === 0 && (
           <div className="rounded-panel border border-dashed border-border bg-surface-2 px-4 py-10 text-center text-muted">
