@@ -6,6 +6,7 @@ import {
   SessionTaskList,
   SessionTasksSurface,
   TaskProjectionView,
+  coalesceLoads,
   sessionTasksEmptyCopy,
   taskDetailRequestIsCurrent,
   type TaskDetailRequestToken,
@@ -110,6 +111,27 @@ test('the list and kanban read only the selected session, with files and advisor
   expect(kanban.match(/data-task-lane="in_progress"/g)).toHaveLength(1);
   expect(kanban).not.toContain('Visible X7');
   expect(kanban).not.toContain('Visible N9');
+});
+
+test('list and kanban speak the themed panel + status tone language', () => {
+  const list = renderToStaticMarkup(<SessionTaskList tasks={mine} onOpen={() => undefined} />);
+  // The container is a real themed panel, not a bespoke bordered box.
+  expect(list).toContain('kt-panel');
+  expect(list).not.toContain('rounded-md border border-border-soft');
+  // Every row carries its state as a rail: I3 is live (ok), B2 blocked (err).
+  expect(list.match(/kt-task-rail/g)).toHaveLength(mine.length);
+  expect(list).toContain('data-tone="ok"');
+  expect(list).toContain('data-tone="err"');
+
+  const kanban = renderToStaticMarkup(<SessionTaskKanban tasks={mine} onOpen={() => undefined} />);
+  // Each lane is one panel whose header wears the lane tone (dot + count ink);
+  // the old panel-inside-panel nesting is gone.
+  expect(kanban).toContain('kt-panel__header');
+  expect(kanban).toContain('kt-task-tone-dot');
+  expect(kanban).toContain('kt-task-tone-ink');
+  expect(kanban).toMatch(/data-task-lane="live"[^>]*data-tone="ok"/u);
+  expect(kanban).toMatch(/data-task-lane="in_progress"[^>]*data-tone="warn"/u);
+  expect(kanban).not.toContain('bg-surface-2 p-2');
 });
 
 test('compact kanban stacks every count and task at full width without a horizontal board', () => {
@@ -321,6 +343,54 @@ test('the task detail surface threads every session opener without owning anothe
   expect(source).toContain('onPinOpen={onPinOpen}');
   expect(source).toContain('surfaceCwd={cwd}');
   expect(source).not.toContain('requestedCodeReference');
+});
+
+test('event storms coalesce into one follow-up load and every completed response is applied', async () => {
+  // Regression: tasks.updated events arriving faster than one slow /v1/tasks
+  // round trip used to supersede (and discard) every response, so the surface
+  // never left "Loading tasks…" on a busy fleet.
+  let started = 0;
+  const applied: number[] = [];
+  const gates: Array<() => void> = [];
+  const load = coalesceLoads(async () => {
+    const run = ++started;
+    await new Promise<void>(resolve => gates.push(resolve));
+    applied.push(run);
+  });
+
+  const first = load();
+  // Five "events" land while the first request is still on the wire…
+  const stormed = [load(), load(), load(), load(), load()];
+  expect(started).toBe(1);
+  gates.shift()!();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  // …the first response was APPLIED, and the storm collapsed into ONE rerun
+  // (already in flight; `first` settles only after its queued follow-up does).
+  expect(applied).toEqual([1]);
+  expect(started).toBe(2);
+  gates.shift()!();
+  await first;
+  await Promise.all(stormed);
+  expect(applied).toEqual([1, 2]);
+  expect(started).toBe(2);
+
+  // A quiet trigger afterwards runs immediately and applies too.
+  const quiet = load();
+  expect(started).toBe(3);
+  gates.shift()!();
+  await quiet;
+  expect(applied).toEqual([1, 2, 3]);
+});
+
+test('a coalesced loader survives a failing run and releases the queue', async () => {
+  let attempts = 0;
+  const load = coalesceLoads(async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error('transient');
+  });
+  await expect(load()).rejects.toThrow('transient');
+  await load();
+  expect(attempts).toBe(2);
 });
 
 test('a late task-detail response cannot overwrite the latest task or cross a session switch', async () => {

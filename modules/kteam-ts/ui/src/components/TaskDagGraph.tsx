@@ -320,6 +320,20 @@ export function TaskDagGraph({
                         rx="5"
                         vectorEffect="non-scaling-stroke"
                       />
+                      {/* The same status rail the list/kanban rows wear, so a
+                          node's state reads at pan-and-zoom distance. Missing
+                          dependencies stay rail-less: absence renders as
+                          unknown, never as a confident status colour. */}
+                      {task && (
+                        <rect
+                          className="kt-task-dag-node-rail"
+                          x="2"
+                          y="2"
+                          width="3.5"
+                          height={node.height - 4}
+                          rx="1.75"
+                        />
+                      )}
                       <circle className="kt-task-dag-node-dot" cx="16" cy="18" r="4" />
                       <text className="kt-task-dag-node-title" x="27" y="23">
                         {taskTitlePreview(title)}

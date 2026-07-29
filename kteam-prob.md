@@ -2870,3 +2870,519 @@ escalation. Pin one test where a single sweep has both anomaly classes and cap
 
 _(Linda, session `ms3wfazx-e3f00d06`; traced independently by Dakota
 `ms3wkmyk-111d22de`; append-only diagnosis, no daemon fix.)_
+
+## Cross-harness migrate is refused, so a 429'd Claude session can only be relaunched (context is discarded)
+
+**Problem.** When an Anthropic-backed session is hard-blocked on
+`API Error: Request rejected (429) · All credentials for model <m> are cooling
+down via provider claude`, the only remedy is moving it to a Codex model
+(different provider). `kteam migrate` cannot do this: it is documented as
+"continue a session on another same-kind account" and explicitly refuses
+claude -> codex. `kteam restart` is also not a remedy — it respawns the same
+TUI on the same model/harness, so it 429s again immediately.
+
+The consequence is that every claude -> codex move is a **full relaunch**, which
+discards all accumulated turns. The cost is not uniform: moving a session at
+turn 1 is free, moving one at turn 64 destroys a large amount of real work.
+
+**Evidence.** 2026-07-28, provider-wide Anthropic cooldown. 32 live sessions
+were hard-429'd (26 under lead zelda `ms1lhymf-c4051f31`, 1 under noel
+`ms1m06zd-6868d3cf`, 5 orphaned). Session alina `ms2uvvca-0c62c9f6` was at
+turn 64 with a 29 KB `summary.md` when its credentials died. It could not be
+migrated; noel had to stop it and start hank `ms3xx4jg-315a28fe` on
+`codex-auto-loge` / gpt-5.6-sol as a brand-new session.
+
+**Workaround that worked (do this, not a bare prompt replay).** noel wrote the
+successor a handover file pointing at three things in order: (1) the original
+`prompt.md` unchanged, (2) the predecessor's `summary.md` — which contained six
+numbered findings, several of them _retractions of her own earlier answers_, so
+the successor was told explicitly to read the retractions and not only the
+conclusions, and (3) the standing contract. noel also wrote in the delta that
+existed nowhere in `summary.md` (branch landing state, a reverted grpc bump, a
+known-red package, and a worktree ruling). The successor's first action was set
+to _report what it believes the remaining scope is_ for confirmation — NOT to
+resume — because resuming from an assumption about where a mid-flight
+predecessor stopped is how a successor invents work or silently drops it.
+
+**Suspected code path.** `modules/kteam-ts` — the `migrate` command's
+same-kind/account guard, and the absence of any harness-crossing resume path
+that could replay transcript context into a different harness. A cheap
+improvement would be a first-class "relaunch on another harness with a
+generated handover" command, so the handover discipline above is not
+re-invented by hand per incident.
+
+**Also worth noting.** `kteam ps` surfaces no 429 signal at all: the daemon's
+`state.quota.atLimit` flagged only 2 of the 32 blocked sessions. The reliable
+detector was grepping `~/.kteam/<id>/last-snapshot.txt` for the literal
+`API Error: Request rejected (429)`. Looser greps for `quota`/`rate limit`
+produce heavy false positives, because the pane status bar prints quota on
+every session.
+
+_(Reported by noel `ms1m06zd-6868d3cf` after the alina -> hank move; logged by
+josiah `ms1linkw-57900cdb` on the human lead's session.)_
+
+## kteam start: stale credential-rejection cache (2026-07-27 PT)
+
+`kteam start` refuses a wrapper with "credentials were rejected (kfleet usage reports
+auth failure)" even after the key is rotated and EVERY live source is healthy:
+`kfleet usage` table shows ✓ for all four glm52 wrappers, `kfleet usage --json` shows
+`ok=true authOk=true error=none`. The rejection persisted across a daemon restart and
+across `kfleet apply`. So kteam is consulting a cached/stale auth verdict somewhere
+other than kfleet's current output — location unknown (nothing in
+~/.kteam/daemon/config.json). Effect: an account stays unusable indefinitely after a
+single auth failure, even once fixed. Repro: reject a z.ai key, rotate it, `kfleet
+apply`, `kteam start --agent claude-auto-glm52a ...` → still rejected. Needs: kteam
+to re-query kfleet at start time or expose a cache-clear.
+
+## `kteam wait --until` exits 0 on an invalid flag (looks like success)
+
+**Problem.** `kteam wait <id> --until 180m` printed `error: unknown option '--until'` and exited
+**0**. The lead's background-job harness reported "completed (exit code 0)" for both waits, which
+reads as "the agent finished". Neither agent had even started its first edit.
+
+**Evidence.** 2026-07-28 ~05:42, sessions `ms48a90j-0d9b6658` and `ms48afih-53ad36c9`. Both waits
+returned instantly; `kteam ps` showed both still `running`. `--until` is real on `kteam send --ask`,
+which is where the confusion comes from — it is not a `wait` option.
+
+**Why it matters.** A lead who arms waits and then trusts the completion notification will believe
+work finished that never started. This is the same trust failure as `completed` being a claim, but
+worse: there is no summary.md to catch it, because nothing ran.
+
+**Suspected code path.** `modules/kteam-ts/src/*-cli.ts` argument parsing — commander is presumably
+configured without `.exitOverride()` / with a handler that swallows the unknown-option error, or the
+process exit code is not propagated from the parse failure.
+
+**Fix direction.** Unknown-option and parse failures should exit non-zero (commander's default is 1).
+Consider also rejecting `--until` on `wait` with a pointer to `--timeout`, since the two are easy to
+confuse and the failure is silent.
+
+**Workaround.** `kteam wait <id> --timeout <seconds>`. Verify the wait is really watching by checking
+the job is still running after a few seconds rather than trusting the completion event.
+
+## A teammate cannot claim files on the lead's task record
+
+**Problem.** Task records are per-session and an agent may only write its own. When a lead grants a
+teammate ownership of a file, the teammate's `kteam task file …` is rejected — `an agent may only
+change tasks in its own session` — so the claim can only be filed by the lead. Every grant needs a
+round-trip even after the decision is made.
+
+**Evidence.** 2026-07-28 ~05:46. fredricka (`ms48afih-53ad36c9`) was granted
+`ui/src/components/TranscriptRow.tsx` against `#F38` (owned by `ms1lhymf-c4051f31`), attempted the
+claim, was rejected, and had to ask the lead to run it.
+
+**Why it matters.** File claims are the mechanism that stops concurrent teammates clobbering each
+other in a shared working tree — the single most expensive failure mode in this session. Making the
+lead the only writer puts the claim on the slow path exactly when contention is highest, so claims
+get skipped and the map goes stale. The enforcement is correct in spirit (records are per-session,
+provenance should be unforgeable); the ergonomics defeat the purpose.
+
+**Suspected code path.** `modules/kteam-ts/src/tasks-cli.ts` / `tasks-api.ts` session-ownership check
+applied uniformly to every mutation, including `file`.
+
+**Fix direction.** `file` is already documented as ADVISORY, never a lock — so it does not need the
+same write protection as `status`/`phase`. Either let any session append a file claim stamped with
+its own resolved actor (the pins provenance pattern: the claim records WHO claimed, unforgeably), or
+add an explicit delegation so a lead can grant a session write access to one record.
+
+**Workaround.** The teammate takes the grant and proceeds; the lead files the claim behind them.
+
+## `status.showuntrackedfiles=no` hides new files from every landing list
+
+**Problem.** The home-manager repo has `status.showuntrackedfiles=no` in its LOCAL git
+config. `git status` and `git status --porcelain` therefore show **zero** untracked files.
+Every agent that builds a landing list from `git status` — which is all of them — silently
+omits every new file it created. The omission is invisible: the list looks complete, the
+focused tests pass (they run against the working tree, where the files exist), and the gap
+only appears when someone builds from a clean checkout.
+
+**Evidence.** 2026-07-28 ~06:20. Landing four verified lists at HEAD `e7a3ead` produced 34
+test failures in a detached release worktree, all from two unresolvable imports:
+`./tasks-workflow` (imported by the committed `tasks-store.ts`, `tasks-contract.ts`,
+`tasks.ts`, `tasks-cli.ts`) and `./provider-outage` (imported by the committed
+`session-manager.ts`). Both modules existed on disk and passed their own tests (40/0) but
+were untracked. `git status --porcelain | rg -c '^\?\?'` returned nothing;
+`git status --porcelain -uall | rg -c '^\?\?'` returned **25**.
+
+Two of the 25 were required by already-committed code, so HEAD was red the moment the
+lists landed. Fixed in `c01c40a`.
+
+**Why it matters — this is the root cause of a pattern, not a one-off.** Earlier in this
+same session the lead committed the wrong file set FIVE separate times, each caught only by
+the clean-worktree release gate and each attributed at the time to carelessness in staging.
+It was not carelessness. It is this config. Any workflow where an agent reports "these are
+my changed files" is systematically wrong for new files, and the error is undetectable
+without either `-uall` or a clean-checkout build.
+
+It also masks unlanded features. The 25 include eight `terminal-*.ts` modules (the web
+terminals feature) which are NOT imported by any committed file — the feature has been
+running only because kteamd executes from source in the working tree, so untracked files
+work fine locally while not existing in git at all.
+
+**Suspected code path.** Not kteam code — repo configuration. Probably set to quieten
+`git status` noise from build artifacts (`tsconfig.tsbuildinfo` and
+`.kteam-prob-triage.md` are in the hidden set).
+
+**Fix direction.** Remove `status.showuntrackedfiles=no` and instead `.gitignore` the
+artifacts that motivated it. Hiding untracked files to reduce noise trades a small
+annoyance for a silent correctness failure in every landing.
+
+**Workaround until then.** Every agent must use `git status --porcelain -uall` when building
+a landing list, and every release must build from a detached worktree — that gate is the
+only thing that caught this, five times, before it reached a deploy.
+
+## One file with two owners silently lands the other owner's half-done work
+
+**Problem.** `src/session-manager.ts` was edited concurrently by two teammates: carol
+(send-ledger reconciliation) and baruch (provider-outage detection). carol's landing list
+named the file, and her gates were green — so the file landed carrying BOTH sets of edits.
+HEAD then contained baruch's provider-down CALL SITES without his TYPES, which lived in
+files nobody had released.
+
+**Evidence.** 2026-07-28 ~06:50, HEAD `f7298f7`. `tsc -b` in a clean worktree:
+`WardenConfig.providerOutage` missing (session-manager.ts:6971, 7901-7958), then after
+landing `daemon-config.ts`, `AgentUsage.unavailable / .retryAt / .unavailableReason`
+missing (session-manager.ts:6437-6463). Each fix exposed the next link. The feature
+actually spanned 17 kteam-ts files plus 15 more across kfleet-ts and kloge-ts.
+
+**Why it matters.** The owning teammate's gates cannot catch this — carol correctly
+verified HER change, in a tree where baruch's edits were also present, so everything
+passed. The contamination is invisible to both owners and to the lead reviewing either
+list. It only appears in a clean checkout, and then it appears as a CASCADE: fixing one
+missing type reveals the next, which tempts the lead into landing an unreleased feature
+file-by-file to chase compiler errors. That is how half-finished features ship.
+
+The escape here was asking the feature's owner for an explicit ready/not-ready boundary.
+His answer — "the kteam detector portion is ready, here is its complete dependency list;
+the kfleet feed is NOT ready; if you need HEAD green sooner, revert my call sites instead"
+— was the only thing that prevented shipping unreviewed security fixes (a generated 0600
+management key and a redacted CLIProxy state projection) as collateral.
+
+**Suspected code path.** Not a code defect — a coordination gap. kteam has advisory file
+claims (`kteam task file`) that would have surfaced the double ownership, but claims are
+optional, and only the record's own session may write them (see the earlier entry), so in
+practice they are frequently skipped.
+
+**Fix direction.** Make file claims cheap enough to be habitual, and have the daemon WARN
+when two live sessions claim the same path rather than silently accepting both. A lead
+accepting a landing list should be able to ask "does any other live session claim these
+paths?" and get an answer.
+
+**Workaround.** Before accepting any landing list that includes a file touched by more than
+one live session, ask each owner for an explicit ready/not-ready boundary and their
+complete dependency list — including files they do not consider "theirs". Verify the
+proposed set in a detached worktree BEFORE committing, never after.
+
+## STANDING PATTERN: parsers tuned to one harness are silently wrong on the other
+
+**Three independent instances found in a single session, 2026-07-28.** Each had green tests
+on both sides and each was invisible until someone deliberately checked the OTHER harness.
+
+1. **Codex compaction records discarded before classification.** The transcript normalizer
+   accepted conversation only from `response_item` records. Codex writes its replacement
+   summary as a top-level `{"type":"compacted","payload":{"message":…}}` record, so the
+   whole thing was dropped before the UI classifier ever ran. Claude's path worked, so the
+   feature looked fine.
+
+2. **Claude compaction summary extracted the wrong line.** The extractor took the first
+   line after `Summary:`, which in Claude's real output is the structural heading
+   `1. Primary Request and Intent:` rather than the content beneath it. It "worked" — it
+   just showed a heading.
+
+3. **Question option matching returned `menu_unbound`.** Claude draws its preview panel's
+   TOP border on the same physical row as the first wrapped option label
+   (`zinc endpoint + argon        ┌─────…`). The parser removed right-panel content
+   beginning with `│`, but the top row begins with `┌`, so the border survived as label
+   text and no option ever matched. Checking the other harness then revealed a SECOND,
+   unrelated hole: Codex 0.145.0 renders `Option 1  First choice.` with the description in
+   a space-aligned second column, which was also being read as label text.
+
+**Why this keeps happening.** Whoever writes the parser has one harness in front of them.
+Tests are written from that harness's real output, so they pass. The other harness's shape
+never appears in any fixture, so nothing fails. The symptom is not a crash — it is a
+silently dropped record, a wrong-but-plausible string, or a match that never binds. All
+three above shipped and stayed shipped.
+
+**Standing rule for this codebase.** Any change to a parser, normalizer, classifier or
+matcher must be checked against BOTH Claude and Codex real output before it is considered
+done, and must carry a real captured fixture for each. Treat "I only had one harness's
+output" as an unfinished change, not a limitation.
+
+**Cheap detection.** For every such module, assert that a real fixture from each harness
+produces a sensible result. Synthetic strings written from the author's own assumptions
+prove nothing here — that is precisely how all three survived their test suites.
+
+## An escape route must not share a dependency with the thing it escapes
+
+**Problem.** Structured questions could reach a state with no way out: the answer failed
+with `menu_unbound`, and abandon/cancel ALSO failed, because cancel-preflight depended on
+the same menu binding as answering did. `pendingQuestion` was never cleared, which keeps the
+composer hidden. The human could not answer, could not cancel, and could not type.
+
+**Evidence.** 2026-07-28, live admin-ui question. The UI POSTed the correct `{responses}`
+payload; the daemon rejected with `menu_unbound`; every subsequent click-abandon failed
+cancel-preflight; `pendingQuestion` remained set. Fixed in `fe4759a`.
+
+**The generalisable point.** The recovery path was implemented in terms of the same
+mechanism as the primary path, so a single broken matcher took out both at once. Any
+"escape hatch", "cancel", "force release" or "recover" path should be audited for shared
+dependencies with what it is meant to rescue — including on the client side, where an
+optimistic local dismissal that is reconciled by a server round-trip will snap back the
+moment that round-trip is the thing failing.
+
+**Fix shape used.** Server: a bound-abandon path independent of the matcher, which clears
+pending state even when the cleanup keystroke cannot be confirmed, journals the
+unconfirmed release, and never synthesizes an answer. Client: suppress locally keyed by
+`toolUseId` so the composer mounts immediately, reconciling in the background.
+
+## FIVE shared-type breaks in one afternoon — the ownership model has a structural hole
+
+**Update to the earlier entry.** What was logged as a two-instance pattern reached FIVE in a
+single afternoon, across four different teammates. Every one blocked the entire fleet,
+because `tsc -b` builds the whole project and is the required gate for everybody.
+
+1. ottis widened `ManagedBrowserRuntime` (methods returning a snapshot instead of `void`);
+   `FakeBrowserRuntime` in `api-server.test.ts` still returned `void`. Blocked rianna.
+2. mileena added `assigneeSessionId`/`assigneeName` to `TaskLive`; three fixture files
+   broke, one of them deny-listed to her. Blocked the fleet.
+3. ottis assigned `() => service.stop(...)` to a `() => Promise<void>` handler, implicitly
+   returning a value. Blocked emari, terran and darl.
+4. emari left `BARE_NAMED_RESULT_BUDGET` declared and unused (TS6133). Blocked darl.
+5. terran widened `WardenAttentionView` (`verdictCoverage`) and the status shape
+   (`needsHumanKind`); three fixtures went stale. Blocked emari and darl.
+
+**The structural hole.** File-level ownership assumes changes are file-local. A TYPE change
+is not — its blast radius is every construction site, and those sites live in files the
+type's owner is forbidden to edit. So the deny list, the very mechanism preventing
+collisions, is what makes each break unfixable by whoever discovers it. In all five cases
+the blocked teammate did exactly the right thing and still lost time.
+
+**What worked.** mileena's resolution was the cheapest by a wide margin: make the new fields
+OPTIONAL-but-nullable. Zero fixtures changed, no cross-owner hunk, no round trip through the
+lead. Every other case required the type's owner to be interrupted and to edit files in two
+or three ownership domains.
+
+**Rules to adopt.**
+
+- Before landing a type widening, grep EVERY construction site. If any sits in a
+  deny-listed file, prepare that hunk and route it BEFORE landing, not after a gate goes red.
+- Prefer OPTIONAL fields wherever absence is legitimate. This is the same principle as
+  returning 404 for a missing provider so older clients degrade honestly — applied to types
+  instead of routes.
+- Consider shared fixture BUILDERS so a type gains a field in one place rather than in N
+  test files owned by N people. This would have prevented 2, 3 and 5 outright.
+- A lead should accept a blocked teammate's focused tests plus a scoped typecheck rather
+  than holding them behind someone else's breakage, and route the repair immediately.
+
+## `kteam pin` swallows unknown subcommands as note text (2026-07-28, niccole / ms54o28u-789798b3)
+
+**Problem.** The pin passthrough CLI treats ANY first argument that is not `add`/`ls`/`rm` as
+the note body. `kteam pin help` — the natural way an agent probes a passthrough verb —
+silently creates a pin whose content is the word "help".
+
+**Evidence.** Ran `kteam pin help` while inventorying the CLI surface for the #F91 skill
+design; got `pinned — 1 pin(s) in ms54o28u-789798b3`, and `kteam pin ls` showed
+`9978a270  note  [agent niccole]  help`. Cleaned up with `kteam pin rm 9978a270`. Sibling
+passthroughs are inconsistent: `kteam task help` and `kteam browser help` correctly reject
+with `unknown … command "help"` + usage; bare `kteam attention` prints usage.
+
+**Suspected code path.** `modules/kteam-ts/src/pins-cli.ts` — the default branch of the
+subcommand dispatch falls through to "add note" instead of reserving unknown single-word
+commands (compare the guard in `tasks-cli.ts` / `browser-cli.ts`).
+
+**Workaround.** Probe pin usage with bare `kteam pin` (no args — prints usage without
+mutating); if `help` was pinned by accident, `kteam pin ls` then `kteam pin rm <id>`.
+Cheap fix: reserve `help`/`--help` (and maybe any single known-verb-like token) in the
+pin dispatcher before treating input as note text.
+
+---
+
+## `kteam wait` exits 0 when the DAEMON is unreachable — a lost daemon looks like a finished session
+
+**Date:** 2026-07-29
+**Session:** `jaison` `ms5ax87p-774fdec3` (codex-auto-loge / gpt-5.6-sol, label `kfleet-login-ux`)
+**Reported by:** josiah (lead, `ms1linkw-57900cdb`)
+
+**Problem.** A backgrounded `kteam wait ms5ax87p-774fdec3` terminated with **exit code 0**,
+which the harness surfaced as "Background command completed (exit code 0)" — the
+canonical signal that the awaited session had finished. It had not. The session was
+still `tool_running` on turn 1 at the moment `wait` returned.
+
+**Evidence.** The wait job's captured output was not a completion report at all:
+
+```
+kteam: kteam daemon is unavailable at http://127.0.0.1:7337 (Unable to connect.
+Is the computer able to access the url?); run `kteam daemon start`
+```
+
+Yet the process exited 0. Immediately afterwards `kteam status ms5ax87p-774fdec3`
+succeeded and showed:
+
+```
+jaison (ms5ax87p-774fdec3)  tool_running  codex-auto-loge  model=gpt-5.6-sol
+  context 84% used  last tool started 2026-07-29T00:36:56.690Z
+```
+
+So the daemon had recovered by then — the unavailability was transient — but `wait`
+had already given up and reported success.
+
+**Why this matters.** `kteam wait` is the primitive the whole fleet uses to gate on
+"is this teammate done". CLAUDE.md tells leads to prefer `wait` over polling. If a
+momentary daemon blip converts into exit 0, a lead will read a still-running session
+as complete, inspect an unfinished worktree, and report half-finished work upward as
+done. This is precisely the false-completion failure mode the "verify, don't trust"
+rule exists to catch — except here the _waiting primitive itself_ is the liar, so the
+usual defence (read summary.md) also fails, because summary.md is simply absent
+(empty) on a session that has not finished.
+
+**Suspected code path.** `modules/kteam-ts` — the `wait` CLI command and whatever HTTP
+client it uses to reach `http://127.0.0.1:7337`. The transport/connection error is
+being caught, printed as a human-readable message, and then falling through to the
+normal (success) exit path instead of exiting non-zero. Two distinct defects:
+
+1. **Wrong exit code.** A daemon-unreachable error must exit non-zero. "I could not
+   determine the outcome" and "the outcome was success" must never share exit 0.
+2. **No reconnect.** A transient daemon blip should be retried with backoff rather
+   than abandoning the wait outright — the daemon was demonstrably back within
+   seconds, and the session ran on for a long time afterwards.
+
+Worth auditing every other `kteam` subcommand for the same swallow-and-exit-0 shape.
+
+**Workaround.** Do not trust a returning `kteam wait`. After it returns, re-check
+`kteam status <id>` and confirm the state is genuinely terminal before believing the
+session is done, and re-arm the wait if it is not. Gating on a deliverable
+(`kteam wait <id> --until-marker <file>`) is more robust than gating on the daemon's
+liveness view, but note it likely shares the same exit-code bug.
+
+## a-gitlint hook cannot run in a git worktree (2026-07-29)
+
+**Problem.** The `a-gitlint` pre-commit hook fails in every git worktree with
+`Error: Invalid value for '--msg-filename': '.git/COMMIT_EDITMSG': Not a directory`
+(exit 253). In a worktree, `.git` is a _file_ containing a gitdir pointer, not a
+directory, so the hardcoded relative `.git/COMMIT_EDITMSG` never resolves.
+
+**Why it matters.** The house rule is that every landing goes through a clean
+detached worktree. That makes this hook dead for all agents on every commit —
+so commit-message linting is silently not happening on the path we actually use.
+
+**Evidence.** Landing #F102 from `wt-f102`: `Secrets sync`, both `Secrets
+Scanning` hooks and `treefmt` all passed; only `Gitlint` failed, with the error
+above. Running `gitlint --msg-filename <file>` directly on the same message
+exits 0.
+
+**Suspected fix.** The hook should resolve the git dir rather than assume
+`.git/` is a directory — e.g. `$(git rev-parse --git-path COMMIT_EDITMSG)`,
+which is worktree-correct.
+
+**Workaround used.** Validate the message with `gitlint --msg-filename` directly,
+then commit with `SKIP=a-gitlint`. Do NOT use `--no-verify` — that would also
+disable the secrets hooks.
+
+## Secrets-sync hook gives a false positive under `git commit --only` (2026-07-29)
+
+**Problem.** `a-secrets-sync` blocks with "secrets.yaml is out of step with
+secrets.enc.yaml" even when `scripts/secrets/check.sh` run directly exits 0 and
+`encrypt.sh` reports "already in step — skipping (no churn)".
+
+**Cause.** `git commit --only <paths>` builds a partial index, so pre-commit
+stashes everything outside that set. `secrets.enc.yaml` is reverted to HEAD,
+while `secrets.yaml` is gitignored and therefore _not_ stashed — so the hook
+compares HEAD's ciphertext against the edited plaintext and always sees drift.
+`git add secrets.enc.yaml` does NOT help: `--only` excludes it from the tree
+being committed, so it is stashed regardless.
+
+**Workaround.** Commit from a clean worktree. `secrets.yaml` is gitignored and
+never copied there, and `check.sh` exits 0 when the working copy is absent —
+so the hook passes honestly rather than being bypassed.
+
+## `kteam send` fails to a session that is PARKED waiting for that very reply (2026-07-29)
+
+**Problem.** `kteam send <peer>` failed three times in a row with
+`kteam: interactive harness did not become ready within 30s; last frame:
+promptReady=false, cursor=2:47`, addressed to a session whose own status read
+`⏸ DECLARED WAIT: reply from zelda until 2026-07-29T02:38:32.118Z — parked on
+purpose`. Nothing landed in `channel/inbox.jsonl` on any of the three attempts.
+A fourth identical attempt ~90s later succeeded immediately.
+
+**Why it matters.** The parked session was blocked on precisely the reply that
+could not be delivered, and would have timed out at the deadline having received
+nothing. The lead has no signal that delivery failed other than reading the
+inbox file directly — and the error text ("harness did not become ready")
+describes a _startup_ condition, not a delivery failure, so it reads as
+transient noise rather than "your message was dropped".
+
+**Evidence.** Session `ms598p60-3602abe6` (refugia, codex-auto-loge, gpt-5.6-sol,
+`turn 1`, `context 6% used`). Failures at ~02:27–02:28 UTC; success at 02:29:13.
+Message size was not the cause: a ~3KB message and a ~250-byte message both
+failed, and the same ~250-byte message then succeeded unchanged.
+
+**Suspected cause.** The send path waits for an interactive prompt to be ready,
+but a codex session in a declared wait presents no ready prompt — so the
+readiness probe and the parked state are mutually exclusive. Likely a
+`promptReady` gate in the send path that should be bypassed (or satisfied
+differently) when the target is in a declared wait.
+
+**Workaround.** Retry the send; it succeeded on the next attempt. ALWAYS verify
+delivery by tailing `~/.kteam/<id>/channel/inbox.jsonl` — the CLI's failure
+message does not distinguish "not delivered" from "transiently noisy".
+
+## Tasks side pane never leaves "Loading tasks…" on a busy fleet (jakiya, #B43, 2026-07-29)
+
+**Problem.** With ~50 sessions live, opening the session side pane's Tasks
+surface showed "Loading tasks…" indefinitely — the surface never rendered a
+single task even though `/v1/tasks` returned 200 with all 65 records.
+
+**Evidence.** Playwright against a temp Vite proxying the live daemon
+(`ms5eojft-50784d8f/proof/`): `/v1/tasks` took ~13.9s for 245KB (curl direct,
+same result), while `tasks.updated` fleet events arrived every few seconds.
+Each event re-triggered `load()`, which bumped a generation counter that
+DISCARDED the previous in-flight response on arrival. Response always
+superseded → applied never → perpetual loading.
+
+**Suspected code path.** `modules/kteam-ts/ui/src/components/SessionTasks.tsx`
+`SessionTasksSurface.load()` (the `seq.current !== generation` early return),
+fed by `useFleetEvents(tasks.updated)`.
+
+**Fix (landed with #B43).** Replaced discard-on-supersede with
+`coalesceLoads()`: one request in flight, event storms coalesce into exactly
+one follow-up, every completed response is applied. Safe because the fleet
+task list is session-independent. Verified against the live busy daemon.
+
+**Still open (backend).** ~14s to serve 245KB of tasks is the underlying
+smell — `/v1/tasks` appears to contend with whatever the busy daemon is doing
+(the same box serves sub-second when idle: a throwaway daemon with the same
+65-task tasks.json answered in 0.36s). Worth profiling the aggregate route's
+live-liveness enrichment under load.
+
+### Follow-up (same day): the parked-send failure is a correctness hazard, not just noise
+
+Reproduced a second time, and the consequence is worse than first logged.
+
+Session `ms5eo2ei-77224049` (daneen) entered a 44-minute DECLARED WAIT on
+`kteamd bootstrap completes (restarted externally, pid 1676880)`. That premise
+was **false** — the daemon had not restarted (identical pid) and could never
+report `ok`, because it is wedged by the #B44 analytics-import bug. The teammate
+had parked on a condition that cannot occur.
+
+**Four consecutive `kteam send` attempts failed**, all with
+`interactive harness did not become ready within 30s`. Nothing reached
+`channel/inbox.jsonl`. Message size was irrelevant (3KB and 250B both failed).
+So the lead **could not correct a teammate who had parked on a false premise** —
+the teammate would have burned the full 44 minutes waiting for an impossible
+event, and the send path gave no indication the correction was being dropped.
+
+**What worked:** `kteam interrupt <name>` followed immediately by `kteam send`.
+The send then landed on the first try and was confirmed in `inbox.jsonl`.
+(`kteam status` still displayed the stale DECLARED WAIT line afterwards, so the
+status line is not a reliable indicator that the park was broken — verify via
+the inbox instead.)
+
+**Why this matters beyond one session.** A declared wait is exactly the state in
+which a teammate is _most_ likely to need steering: they have stopped work and
+committed to a condition they cannot re-evaluate on their own. Making that the
+one state where messages cannot be delivered inverts the intent of the feature.
+
+**Suggested fix.** The send path's `promptReady` probe should be bypassed (or
+satisfied differently) when the target is in a declared wait — delivery to
+`inbox.jsonl` does not require an interactive prompt. Failing that, `kteam send`
+must at minimum exit non-zero with an explicit "message NOT delivered" and
+suggest `kteam interrupt`, rather than reporting a harness-startup condition.

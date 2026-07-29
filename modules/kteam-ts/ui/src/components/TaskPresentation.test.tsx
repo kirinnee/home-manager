@@ -62,6 +62,52 @@ describe('task-v2 presentation', () => {
     expect(html).toContain('bg-warn');
     expect(html.indexOf('</button>')).toBeLessThan(html.indexOf('href="/session/ms4v5fu2-f2a89500"'));
   });
+  test('every row wears its board state as a tone rail, even when the badge is implied away', () => {
+    // Blocked wins the tone exactly like it wins the badge.
+    const blocked = renderToStaticMarkup(<TaskRow task={task} onOpen={() => undefined} />);
+    expect(blocked).toContain('kt-task-rail');
+    expect(blocked).toContain('data-tone="err"');
+    // A lane-implied row loses its badge but keeps its colour.
+    const live = renderToStaticMarkup(
+      <TaskRow
+        task={{
+          ...task,
+          phase: 'live',
+          status: 'live',
+          blocked: false,
+          blockedReason: null,
+          blockedSince: null,
+          blockedBy: [],
+        }}
+        impliedLane="live"
+        onOpen={() => undefined}
+      />,
+    );
+    expect(live).not.toContain('data-task-status-badge');
+    expect(live).toContain('kt-task-rail');
+    expect(live).toContain('data-tone="ok"');
+  });
+  test('the quick summary panel tints by the task state tone instead of a fixed accent', () => {
+    const blocked = renderToStaticMarkup(<TaskDetail task={task} activity={[]} />);
+    expect(blocked).toContain('kt-task-summary');
+    expect(blocked).toMatch(/data-tone="err"[^>]*class="kt-task-tone kt-task-summary/u);
+    const done = renderToStaticMarkup(
+      <TaskDetail
+        task={{
+          ...task,
+          phase: 'done',
+          status: 'done',
+          blocked: false,
+          blockedReason: null,
+          blockedSince: null,
+          blockedBy: [],
+        }}
+        activity={[]}
+      />,
+    );
+    expect(done).toMatch(/data-tone="ok"[^>]*class="kt-task-tone kt-task-summary/u);
+    expect(done).not.toContain('bg-accent-soft');
+  });
   test('row makes the complete title dominant and allows it to wrap', () => {
     const title = 'Filter kanban without hiding context';
     const html = renderToStaticMarkup(<TaskRow task={{ ...task, title }} onOpen={() => undefined} />);
