@@ -1441,6 +1441,73 @@ wardenConfigCommand
     },
   );
 
+const cgroupsCommand = program.command('cgroups').description('two-level Linux cgroup resource limits');
+const printCgroupConfig = (view: Awaited<ReturnType<ApiClient['cgroupConfig']>>) => {
+  const config = view.config;
+  console.log(
+    `cgroups: ${config.enabled ? 'ENABLED' : 'disabled'}  supported=${view.supported ? 'yes' : 'no'}  slice=${view.fleetSlice}`,
+  );
+  console.log(
+    `fleet: cpu=${config.fleet.cpuPercent}% host (${view.effective.fleet.cpuQuota})  memory=${config.fleet.memoryPercent}% host (${view.effective.fleet.memoryMax} bytes)`,
+  );
+  console.log(
+    `per-agent: cpu=${config.perAgent.cpuPercent}% host (${view.effective.perAgent.cpuQuota})  memory=${config.perAgent.memoryPercent}% host (${view.effective.perAgent.memoryMax} bytes)`,
+  );
+  if (view.restartRequiredSessions.length > 0)
+    console.log(`restart required: ${view.restartRequiredSessions.join(', ')}`);
+  for (const warning of view.warnings) console.log(`warning: ${warning}`);
+};
+const cgroupsConfigCommand = cgroupsCommand
+  .command('config')
+  .description('show effective fleet and per-agent caps')
+  .option('--json')
+  .action(async (options: { json?: boolean }) => {
+    const view = await (await client()).cgroupConfig();
+    if (options.json) return console.log(JSON.stringify(view, null, 2));
+    printCgroupConfig(view);
+  });
+cgroupsConfigCommand
+  .command('set')
+  .description('persist and apply cgroup limits live where possible')
+  .option('--enabled <bool>', 'true | false — false bypasses systemd-run for new/relaunched agents')
+  .option('--fleet-cpu <percent>', 'aggregate CPU as percent of host capacity')
+  .option('--fleet-memory <percent>', 'aggregate RAM as percent of host capacity')
+  .option('--agent-cpu <percent>', 'per-agent CPU as percent of host capacity')
+  .option('--agent-memory <percent>', 'per-agent RAM as percent of host capacity')
+  .option('--json')
+  .action(
+    async (options: {
+      enabled?: string;
+      fleetCpu?: string;
+      fleetMemory?: string;
+      agentCpu?: string;
+      agentMemory?: string;
+      json?: boolean;
+    }) => {
+      const patch: Record<string, unknown> = {};
+      if (options.enabled !== undefined) {
+        if (options.enabled !== 'true' && options.enabled !== 'false')
+          throw new Error('--enabled must be true or false');
+        patch.enabled = options.enabled === 'true';
+      }
+      const fleet: Record<string, number> = {};
+      if (options.fleetCpu !== undefined) fleet.cpuPercent = Number(options.fleetCpu);
+      if (options.fleetMemory !== undefined) fleet.memoryPercent = Number(options.fleetMemory);
+      if (Object.keys(fleet).length > 0) patch.fleet = fleet;
+      const perAgent: Record<string, number> = {};
+      if (options.agentCpu !== undefined) perAgent.cpuPercent = Number(options.agentCpu);
+      if (options.agentMemory !== undefined) perAgent.memoryPercent = Number(options.agentMemory);
+      if (Object.keys(perAgent).length > 0) patch.perAgent = perAgent;
+      if (Object.keys(patch).length === 0)
+        throw new Error('nothing to set — pass --enabled/--fleet-cpu/--fleet-memory/--agent-cpu/--agent-memory');
+      const view = await (await client()).updateCgroupConfig(patch as never);
+      if (options.json) return console.log(JSON.stringify(view, null, 2));
+      printCgroupConfig(view);
+      if (view.restartRequiredSessions.length > 0)
+        console.log('running sessions listed above retain their previous placement until relaunched');
+    },
+  );
+
 program.command('doctor').action(async () => {
   const tmux = Bun.spawnSync(['tmux', '-V']);
   const agents = discoverAutoAgents(paths.kfleetBin);

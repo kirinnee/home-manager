@@ -1,6 +1,8 @@
 import { readFile } from 'fs/promises';
 import type {
   AttachmentView,
+  CgroupConfigPatch,
+  CgroupConfigView,
   SessionView,
   UsageFeedView,
   WardenConfigPatch,
@@ -223,6 +225,16 @@ export class ApiClient {
    *  normalized effective config + warnings. */
   updateWardenConfig(patch: WardenConfigPatch) {
     return this.request<WardenConfigView>('/v1/warden/config', {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+  cgroupConfig() {
+    return this.request<CgroupConfigView>('/v1/cgroups/config');
+  }
+  updateCgroupConfig(patch: CgroupConfigPatch) {
+    return this.request<CgroupConfigView>('/v1/cgroups/config', {
       method: 'PATCH',
       body: JSON.stringify(patch),
       headers: { 'content-type': 'application/json' },
