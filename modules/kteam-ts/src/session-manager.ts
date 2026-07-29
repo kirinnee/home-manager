@@ -543,6 +543,14 @@ const GLOBAL_BACKLOG_MAX = 5_000;
 /** Expected cadence of the daemon self-check. Lag is the measured timer gap
  * above this interval, not the whole interval itself. */
 const SELF_CHECK_INTERVAL_MS = 60_000;
+/** A bootstrap phase is best-effort repair, never a lease on daemon health.
+ *  Five minutes accommodates the known ~30 s cold scan with ample headroom,
+ *  while putting a hard ceiling on a wedged transcript/tmux await. */
+const BOOTSTRAP_PHASE_TIMEOUT_MS = 5 * 60_000;
+/** Warden state is one small JSON document. A slow/broken read must release the
+ *  single-flight latch well before the enclosing bootstrap phase deadline so
+ *  a later self-check can retry it. */
+const WARDEN_STATE_READ_TIMEOUT_MS = 10_000;
 /** A self-check tick this late means the event loop stopped running: the
  *  timer interval is 60 s, so three missed ticks is unambiguous. */
 const WEDGE_GAP_MS = 180_000;
@@ -960,6 +968,12 @@ export class SessionManager implements KTeamService {
   /** Fleet warden (layer-3 oversight): a periodic deterministic sweep plus,
    *  when enabled, rate-limited LLM escalation. */
   private wardenTimer?: ReturnType<typeof setInterval>;
+  /** Deduplicates concurrent bootstrap/self-check attempts to arm the warden. */
+  private wardenStarting?: Promise<void>;
+  /** Test seams for the poisoned-single-flight regression. */
+  private wardenStateReadTimeoutMs = WARDEN_STATE_READ_TIMEOUT_MS;
+  private readWardenState = async (): Promise<WardenRuntimeState | undefined> =>
+    await readJsonIfPresent<WardenRuntimeState>(this.paths.wardenState);
   /** Armed in create(), independent of bootstrap â the watchdog for the
    *  silent-partial-boot class. */
   private selfCheckTimer?: ReturnType<typeof setInterval>;
@@ -970,6 +984,9 @@ export class SessionManager implements KTeamService {
    *  bootstrap window. A cold empty index previously claimed healthy at
    *  136 ms while journal import/recovery continued for another 29.8 s. */
   private bootstrapFinished = false;
+  /** Field (rather than an inlined constant) so the never-settling regression
+   *  can exercise the real deadline path without waiting five minutes. */
+  private bootstrapPhaseTimeoutMs = BOOTSTRAP_PHASE_TIMEOUT_MS;
   /** When the self-check last ran; its lateness is the wedge detector. */
   private lastSelfCheckAt = 0;
   /** Latest observed timer delay beyond the expected self-check interval. */
@@ -1320,27 +1337,68 @@ export class SessionManager implements KTeamService {
   readonly bootstrapErrors: string[] = [];
 
   async bootstrap(): Promise<void> {
-    // Partition-tolerant and LOUD: each phase runs even if an earlier one
-    // threw; every failure is logged AND kept for the health endpoint. The
-    // self-check timer (armed in create(), independent of this chain) watches
-    // for the residue: unmonitored running sessions, dead warden timer.
-    const phase = async (name: string, work: () => Promise<unknown>) => {
+    // Partition-tolerant, BOUNDED, and LOUD: each phase runs even if an
+    // earlier one threw or never settled; every failure is logged AND kept
+    // for the health endpoint. The self-check timer (armed in create(),
+    // independent of this chain) watches for the residue: unmonitored running
+    // sessions, dead warden timer.
+    const phase = async (name: string, work: (signal: AbortSignal) => Promise<unknown>) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
+      const abort = new AbortController();
       try {
-        await work();
+        const deadline = new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            timedOut = true;
+            abort.abort();
+            reject(new Error(`timed out after ${this.bootstrapPhaseTimeoutMs}ms`));
+          }, this.bootstrapPhaseTimeoutMs);
+        });
+        const operation = Promise.resolve().then(() => work(abort.signal));
+        // Promise.race consumes a losing rejection, which avoids an unhandled
+        // rejection but would also hide the actionable late error. Preserve it
+        // in the daemon log while the durable bootstrap diagnostic retains the
+        // bounded timeout outcome.
+        void operation.catch(error => {
+          if (timedOut)
+            console.error(
+              `kteamd: bootstrap phase ${name} failed after its deadline: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        });
+        await Promise.race([operation, deadline]);
       } catch (error) {
         const message = `bootstrap phase ${name} failed: ${error instanceof Error ? error.message : String(error)}`;
         this.bootstrapErrors.push(message);
         console.error(`kteamd: ${message}`);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
       }
     };
-    await phase('import', () => this.store.importFromDisk());
-    // Set even when the phase FAILED: a partial index is exactly what the
-    // consistency check should repair â it just must not race the import.
-    this.indexImported = true;
-    await phase('recover', () => this.recover());
-    await phase('warden', () => this.startWarden());
-    await phase('scratch-gc', () => this.sweepScratch());
-    this.bootstrapFinished = true;
+    try {
+      await phase('import', async () => {
+        const result = await this.store.importFromDisk();
+        if (result.failedSessionIds?.length) {
+          const preview = result.failedSessionIds.slice(0, 10);
+          const suffix = result.failedSessionIds.length > preview.length ? ', …' : '';
+          throw new Error(
+            `${result.failedSessionIds.length} session(s) failed to import and were skipped: ${preview.join(', ')}${suffix}`,
+          );
+        }
+      });
+      // Set even when the phase failed or timed out: a partial index is exactly
+      // what the consistency check should repair. Import operations are
+      // idempotent, so a timed-out import finishing in the background may
+      // safely overlap that repair.
+      this.indexImported = true;
+      await phase('recover', signal => this.recover(signal));
+      await phase('warden', () => this.startWarden());
+      await phase('scratch-gc', () => this.sweepScratch());
+    } finally {
+      // This latch describes whether bootstrap is still running, not whether
+      // every best-effort repair succeeded. Health exposes degradation
+      // separately and selfCheck owns ongoing invariant repair.
+      this.bootstrapFinished = true;
+    }
     if (this.bootstrapErrors.length > 0) {
       this.emitTransient('fleet.bootstrap_errors', { errors: this.bootstrapErrors });
     }
@@ -1382,9 +1440,22 @@ export class SessionManager implements KTeamService {
     // boot without eyeballing timestamps.
     const unmonitoredRunning = active.filter(item => !this.monitors.has(item.config.id)).length;
     const lastSweepMs = this.wardenState.lastSweepAt ? Date.parse(this.wardenState.lastSweepAt) : 0;
+    const wardenTimerArmed = this.wardenTimer !== undefined;
+    const bootstrapState = !this.bootstrapFinished
+      ? 'running'
+      : this.bootstrapErrors.length > 0
+        ? 'degraded'
+        : 'complete';
     return {
-      ok: this.bootstrapFinished && this.bootstrapErrors.length === 0 && unmonitoredRunning === 0,
+      // `ok` is current serviceability. Historical bootstrap failures remain
+      // visible below, but no longer condemn a repaired fleet forever. After
+      // an import timeout the indexed membership can briefly undercount
+      // on-disk sessions; bootstrapState stays degraded while the independent
+      // consistency check discovers and repairs those rows (at most one tick).
+      ok: this.bootstrapFinished && unmonitoredRunning === 0 && wardenTimerArmed,
       bootstrapping: !this.bootstrapFinished,
+      bootstrapState,
+      bootstrapDegraded: bootstrapState === 'degraded',
       version: KTEAM_VERSION,
       pid: process.pid,
       home: this.paths.home,
@@ -1393,7 +1464,7 @@ export class SessionManager implements KTeamService {
       monitors: this.monitors.size,
       unmonitoredRunning,
       wardenLastSweepSeconds: lastSweepMs > 0 ? Math.floor((Date.now() - lastSweepMs) / 1000) : null,
-      wardenTimerArmed: this.wardenTimer !== undefined,
+      wardenTimerArmed,
       eventLoopLagMs: this.eventLoopLagMs,
       lastSelfCheckAt: this.lastSelfCheckAt > 0 ? new Date(this.lastSelfCheckAt).toISOString() : null,
       wedgeCount: this.wedgeCount,
@@ -3897,6 +3968,10 @@ export class SessionManager implements KTeamService {
     // status guard turns any stale wake into a no-op once we relaunch.
     await this.cancelQuotaWaiter(id);
     const view = await this.get(id);
+    if (view.state.status === 'kill_failed')
+      throw new Error(
+        `cannot migrate session ${id}: the previous tmux kill failed; run \`kteam stop ${id}\` again before migrating`,
+      );
     const from = view.config.binary;
     const harness = inferHarness(agent);
     if (harness !== view.config.harness)
@@ -3966,54 +4041,61 @@ export class SessionManager implements KTeamService {
       harnessHome: view.config.harnessHome,
       transcriptFile: view.config.transcriptFile,
     };
-    // Journal the intent BEFORE stopping the pane: a crash between here and a
-    // successful relaunch leaves a durable `migration` marker (plus this event)
-    // rather than a silently half-migrated config.
-    await this.store.updateConfig<SessionConfig>(id, current => ({ ...current, migration: { from, to: agent, at } }));
-    await this.emit(id, 'session.migrating', { from, to: agent, model: nextModel, at }, 'daemon');
-    // Stop the old pane and its monitor before relaunching under the new account.
-    await this.stopMonitor(id, true);
-    const paneState = await this.tmux.state(view.config.tmuxSession);
-    if (paneState.alive) await this.stopTmuxWithEvidence(view.config, `migrate ${from} -> ${agent}`);
-    const migrated = await this.store.updateConfig<SessionConfig>(id, current => ({
-      ...current,
-      binary: agent,
-      harness,
-      modelHint: modelHint(agent),
-      model: nextModel,
-      harnessHome,
-      updatedAt: now(),
-    }));
-    if (agent !== from) {
-      // Usage belongs to the wrapper account, not the conversation. Never show
-      // the old account's cached quota while the new wrapper is coming up.
-      await this.store.updateState<SessionState>(id, current => ({
-        ...current,
-        quota: undefined,
-        usage5hPercent: undefined,
-        usageWeeklyPercent: undefined,
-        usage5hResetAt: undefined,
-        usageWeeklyResetAt: undefined,
-        usageAtLimit: undefined,
-        usageAuthOk: undefined,
-      }));
-    }
-    // Claude transcripts live under the new home; repoint the watched file so the
-    // monitor tails the right JSONL after relaunch (codex rediscovers on resume).
-    if (migrated.harness === 'claude') {
-      const transcriptFile = claudeTranscriptPath(migrated);
-      await this.store.updateConfig<SessionConfig>(id, current => ({ ...current, transcriptFile }));
-    }
-    await this.emit(id, 'session.migrated', { from, to: agent, model: nextModel }, 'daemon');
+    let migrated = view.config;
+    let resumed: SessionView;
+    let relaunchRequired = false;
     try {
-      const resumed = await this.resume(
+      // Journal the intent BEFORE stopping the pane: a crash between here and a
+      // successful relaunch leaves a durable `migration` marker (plus this event)
+      // rather than a silently half-migrated config. Every following step through
+      // relaunch is inside this rollback boundary.
+      await this.store.updateConfig<SessionConfig>(id, current => ({ ...current, migration: { from, to: agent, at } }));
+      await this.emit(id, 'session.migrating', { from, to: agent, model: nextModel, at }, 'daemon');
+
+      // Stop the old pane and its monitor before relaunching. The managed helper
+      // re-arms the monitor if a kill fails and the old pane is still alive.
+      const paneState = await this.tmux.state(view.config.tmuxSession);
+      if (paneState.alive) {
+        await this.stopManagedSession(view.config, `migrate ${from} -> ${agent}`, true);
+        relaunchRequired = true;
+      } else {
+        await this.stopMonitor(id, true);
+        relaunchRequired = true;
+      }
+
+      // Persist account identity and the account-derived transcript path in ONE
+      // write. No observer can see a new wrapper/home paired with the old path.
+      migrated = await this.store.updateConfig<SessionConfig>(id, current => {
+        const next: SessionConfig = {
+          ...current,
+          binary: agent,
+          harness,
+          modelHint: modelHint(agent),
+          model: nextModel,
+          harnessHome,
+          updatedAt: now(),
+        };
+        return next.harness === 'claude' ? { ...next, transcriptFile: claudeTranscriptPath(next) } : next;
+      });
+      if (agent !== from) {
+        // Usage belongs to the wrapper account, not the conversation. Never show
+        // the old account's cached quota while the new wrapper is coming up.
+        await this.store.updateState<SessionState>(id, current => ({
+          ...current,
+          quota: undefined,
+          usage5hPercent: undefined,
+          usageWeeklyPercent: undefined,
+          usage5hResetAt: undefined,
+          usageWeeklyResetAt: undefined,
+          usageAtLimit: undefined,
+          usageAuthOk: undefined,
+        }));
+      }
+      resumed = await this.resume(
         id,
         'You have been migrated to a different account mid-task due to quota/auth issues on the previous one. ' +
           'Re-read your latest turn file and continue exactly where you left off.',
       );
-      // Relaunch succeeded â the transition is complete, clear the staged marker.
-      await this.store.updateConfig<SessionConfig>(id, current => ({ ...current, migration: undefined }));
-      return resumed;
     } catch (error) {
       if (error instanceof ResumeCancelled) {
         // A newer operation superseded this relaunch and now owns the config;
@@ -4047,25 +4129,96 @@ export class SessionManager implements KTeamService {
           (paneAfterFailure?.alive && !paneAfterFailure.dead && paneAfterFailure.promptReady)),
       );
       const keepLaunchedModel = Boolean(nextModel && (observedNextModel || reachedPromptReady));
-      await this.store
-        .updateConfig<SessionConfig>(id, current => ({
+      let rolledBack: SessionConfig | undefined;
+      let rollbackError: string | undefined;
+      try {
+        rolledBack = await this.store.updateConfig<SessionConfig>(id, current => ({
           ...current,
           ...original,
           ...(keepLaunchedModel ? { model: nextModel } : {}),
           migration: undefined,
           updatedAt: now(),
-        }))
-        .catch(() => undefined);
+        }));
+      } catch (rollbackFailure) {
+        rollbackError = rollbackFailure instanceof Error ? rollbackFailure.message : String(rollbackFailure);
+      }
+      // updateConfig writes config.json before refreshing SQLite. A rejected
+      // refresh may therefore still have restored the authoritative document;
+      // observe it after the attempt rather than equating rejection with either
+      // success or failure.
+      const afterRollback = await this.get(id).catch(() => undefined);
+      const observedConfig = afterRollback?.config ?? rolledBack;
+      const restoredModel = keepLaunchedModel ? nextModel : original.model;
+      const restoredToOriginal = Boolean(
+        observedConfig &&
+        observedConfig.binary === original.binary &&
+        observedConfig.harness === original.harness &&
+        observedConfig.modelHint === original.modelHint &&
+        observedConfig.model === restoredModel &&
+        observedConfig.harnessHome === original.harnessHome &&
+        observedConfig.transcriptFile === original.transcriptFile &&
+        observedConfig.migration === undefined,
+      );
+      const killFailed = latest?.state.status === 'kill_failed' || afterRollback?.state.status === 'kill_failed';
+      const paneOutcome = killFailed
+        ? 'tmux kill is unconfirmed (kill_failed)'
+        : paneAfterFailure === undefined
+          ? 'pane state unknown'
+          : paneAfterFailure.alive && !paneAfterFailure.dead
+            ? 'pane still alive'
+            : 'pane stopped';
+      const rollbackOutcome = restoredToOriginal
+        ? `session restored to ${from}`
+        : `rollback incomplete; observed wrapper ${observedConfig?.binary ?? 'unknown'}`;
       const reason =
-        `migration to ${agent} failed: ${detail}; session restored to ${from} (stopped)` +
-        (keepLaunchedModel ? ` and kept launched model ${nextModel}` : '');
-      await this.transition(
+        `migration to ${agent} failed: ${detail}; ${rollbackOutcome} (${paneOutcome})` +
+        (keepLaunchedModel ? ` and kept launched model ${nextModel}` : '') +
+        (rollbackError ? `; rollback write failed: ${rollbackError}` : '');
+      // kill_failed is a quarantine backed by kill.json. Never downgrade it to
+      // generic failed merely to fit the migration error path. Likewise, a
+      // failure before the original pane was stopped leaves its existing state
+      // and monitor intact rather than falsely terminalizing live work.
+      if (!killFailed && relaunchRequired) {
+        await this.transition(
+          id,
+          { status: 'failed', reason, finishedAt: now(), health: 'crashed' },
+          'session.failed',
+        ).catch(() => undefined);
+      }
+      await this.emit(
         id,
-        { status: 'failed', reason, finishedAt: now(), health: 'crashed' },
-        'session.failed',
+        'session.migrate_failed',
+        {
+          from,
+          to: agent,
+          model: nextModel,
+          detail,
+          ...(restoredToOriginal ? { restoredTo: from } : {}),
+          ...(observedConfig?.binary ? { observedWrapper: observedConfig.binary } : {}),
+          ...(rollbackError ? { rollbackError } : {}),
+          status: killFailed
+            ? 'kill_failed'
+            : relaunchRequired
+              ? 'failed'
+              : (afterRollback?.state.status ?? latest?.state.status ?? view.state.status),
+        },
+        'daemon',
       ).catch(() => undefined);
       throw new Error(reason);
     }
+
+    // Relaunch is the proof of success. Only now clear the intent marker and
+    // publish durable completion evidence. A record-write failure must not roll
+    // the config back underneath an already-running pane on the new account.
+    await this.store
+      .updateConfig<SessionConfig>(id, current => ({ ...current, migration: undefined }))
+      .catch(error =>
+        console.error(`kteamd: migrated session ${id} but could not clear its intent marker: ${String(error)}`),
+      );
+    await this.emit(id, 'session.migrated', { from, to: agent, model: nextModel }, 'daemon').catch(error =>
+      console.error(`kteamd: migrated session ${id} but could not persist completion evidence: ${String(error)}`),
+    );
+    return await this.get(id).catch(() => resumed);
   }
 
   /** Validate a requested teammate callsign for a RENAME and ensure no OTHER
@@ -4808,10 +4961,14 @@ export class SessionManager implements KTeamService {
     return await readDiff(cwd, relativePath);
   }
 
-  private async recover(): Promise<void> {
+  private async recover(signal?: AbortSignal): Promise<void> {
+    const aborted = (): boolean => this.closed || signal?.aborted === true;
     const sessions = await this.list();
+    if (aborted()) return;
     const tmuxSessions = await this.tmux.listSessions();
+    if (aborted()) return;
     for (const session of sessions) {
+      if (aborted()) return;
       // A client may have started/resumed this session while bootstrap was
       // walking the imported index. Its fresh monitor owns reconciliation.
       if (this.monitors.has(session.config.id)) continue;
@@ -4823,6 +4980,7 @@ export class SessionManager implements KTeamService {
           await this.ensureSendLedgerReconciledUnlocked(session);
         });
       } catch (error) {
+        if (aborted()) return;
         // Send-ledger repair must never prevent pane adoption. Surface the
         // reconciliation fault, then continue with ordinary recovery.
         const message =
@@ -4834,6 +4992,10 @@ export class SessionManager implements KTeamService {
           () => undefined,
         );
       }
+      // A phase deadline cannot cancel the awaited filesystem/tmux primitive,
+      // but it does revoke this BOOT-TIME walk. Never let a late-unwedged
+      // operation resume against a stale session snapshot.
+      if (aborted()) return;
       try {
         // Terminal panes are exceptional restart wreckage. Inventory tmux ONCE
         // and probe only names that actually exist instead of forking one
@@ -4841,8 +5003,9 @@ export class SessionManager implements KTeamService {
         // an ACTIVE session: a launch can race boot after the inventory, and its
         // fresh state probe is the pane-safe guard against a false failure.
         if (terminalStatuses.includes(session.state.status) && !tmuxSessions.has(session.config.tmuxSession)) continue;
-        await this.recoverSession(session);
+        await this.recoverSession(session, signal);
       } catch (error) {
+        if (aborted()) return;
         // One bad session must never abort the chain: the 06:23 boot died
         // mid-recover and left every LATER session unmonitored with the
         // warden timer unarmed. Isolate, record, continue.
@@ -4854,14 +5017,16 @@ export class SessionManager implements KTeamService {
     }
   }
 
-  private async recoverSession(session: SessionView): Promise<void> {
+  private async recoverSession(session: SessionView, signal?: AbortSignal): Promise<void> {
     {
+      const aborted = (): boolean => this.closed || signal?.aborted === true;
       // Race guard: the API listens BEFORE bootstrap finishes, so a client
       // can start()/resume() a session while recover() walks the list. Such
       // a session already has a live monitor â adoption bookkeeping here
       // would fight the fresh launch (double monitors, spurious snapshots).
-      if (this.monitors.has(session.config.id)) return;
+      if (aborted() || this.monitors.has(session.config.id)) return;
       const paneState = await this.tmux.state(session.config.tmuxSession);
+      if (aborted() || this.monitors.has(session.config.id)) return;
       await this.serialized(session.config.id, async () => {
         const current = await this.get(session.config.id);
         await this.sweepSendFatesUnlocked(session.config.id, current, {
@@ -4872,18 +5037,22 @@ export class SessionManager implements KTeamService {
             current.state.status === 'rate_limited' ||
             current.state.status === 'retrying',
         });
-      }).catch(error =>
-        this.emit(
+      }).catch(error => {
+        if (aborted()) return;
+        return this.emit(
           session.config.id,
           'daemon.send_reconciliation_failed',
           { message: error instanceof Error ? error.message : String(error) },
           'daemon',
-        ).catch(() => undefined),
-      );
+        ).catch(() => undefined);
+      });
+      if (aborted() || this.monitors.has(session.config.id)) return;
       session = await this.get(session.config.id).catch(() => session);
+      if (aborted() || this.monitors.has(session.config.id)) return;
       if (session.state.status === 'kill_failed') {
         if (paneState.alive) {
           await this.tmux.snapshot(session.config, true);
+          if (aborted() || this.monitors.has(session.config.id)) return;
           try {
             await this.stopTmuxWithEvidence(session.config, 'retry kill after daemon restart');
           } catch {
@@ -4907,6 +5076,7 @@ export class SessionManager implements KTeamService {
       if (terminalStatuses.includes(session.state.status)) {
         if (paneState.alive) {
           await this.tmux.snapshot(session.config, true);
+          if (aborted() || this.monitors.has(session.config.id)) return;
           await this.stopTmuxWithEvidence(session.config, 'terminal session survived daemon restart');
         }
         return;
@@ -4922,6 +5092,7 @@ export class SessionManager implements KTeamService {
           'daemon.readopted',
           { promptReady: paneState.promptReady },
         );
+        if (aborted() || this.monitors.has(session.config.id)) return;
         await this.startMonitor(session.config.id);
         if (session.state.status === 'rate_limited' && session.config.retry?.waitForQuotaReset !== false) {
           this.scheduleQuotaWaiter(session.config.id);
@@ -4930,8 +5101,10 @@ export class SessionManager implements KTeamService {
       }
       if (paneState.alive) {
         await this.tmux.snapshot(session.config, true);
+        if (aborted() || this.monitors.has(session.config.id)) return;
         await this.stopTmuxWithEvidence(session.config, 'dead pane cleanup during daemon restart');
       }
+      if (aborted() || this.monitors.has(session.config.id)) return;
       if (session.state.status === 'rate_limited' && session.config.retry?.waitForQuotaReset !== false) {
         this.scheduleQuotaWaiter(session.config.id);
       } else if (session.state.status === 'retrying' && (session.state.retryAttempt ?? 0) > 0) {
@@ -7088,9 +7261,9 @@ export class SessionManager implements KTeamService {
     this.retryTimers.delete(id);
   }
 
-  private async stopManagedSession(config: SessionConfig, reason: string): Promise<void> {
-    await this.stopMonitor(config.id);
+  private async stopManagedSession(config: SessionConfig, reason: string, drain = false): Promise<void> {
     try {
+      await this.stopMonitor(config.id, drain);
       await this.stopTmuxWithEvidence(config, reason);
     } catch (error) {
       const paneState = await this.tmux.state(config.tmuxSession);
@@ -7495,14 +7668,43 @@ export class SessionManager implements KTeamService {
    *  detection sweep is always-on and free; LLM escalation inside it is gated on
    *  warden.enabled. */
   private async startWarden(): Promise<void> {
-    this.wardenState = (await readJsonIfPresent<WardenRuntimeState>(this.paths.wardenState)) ?? {};
-    const intervalMs = Math.max(60_000, this.wardenConfig.intervalMinutes * 60_000);
-    this.wardenTimer = setInterval(() => {
+    if (this.wardenTimer) return;
+    if (this.wardenStarting) return await this.wardenStarting;
+    const starting = (async () => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const stateRead = this.readWardenState();
+      const deadline = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`warden state read timed out after ${this.wardenStateReadTimeoutMs}ms`)),
+          this.wardenStateReadTimeoutMs,
+        );
+      });
+      let state: WardenRuntimeState;
+      try {
+        state = (await Promise.race([stateRead, deadline])) ?? {};
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
+      // Bootstrap's deadline does not cancel the underlying work. A self-check
+      // may therefore arrive while this read is still in flight; only the
+      // winner may arm a timer, and a late completion after close must do
+      // nothing.
+      if (this.closed || this.wardenTimer) return;
+      this.wardenState = state;
+      const intervalMs = Math.max(60_000, this.wardenConfig.intervalMinutes * 60_000);
+      this.wardenTimer = setInterval(() => {
+        void this.runSweep(false).catch(() => undefined);
+      }, intervalMs);
+      // A boot-time sweep so anomalies.json and `warden status` are populated
+      // without waiting a full interval; escalation still respects its own gate.
       void this.runSweep(false).catch(() => undefined);
-    }, intervalMs);
-    // A boot-time sweep so anomalies.json and `warden status` are populated
-    // without waiting a full interval; escalation still respects its own gate.
-    void this.runSweep(false).catch(() => undefined);
+    })();
+    this.wardenStarting = starting;
+    try {
+      await starting;
+    } finally {
+      if (this.wardenStarting === starting) this.wardenStarting = undefined;
+    }
   }
 
   /** Run a sweep exclusively (serialized against the interval and other forced

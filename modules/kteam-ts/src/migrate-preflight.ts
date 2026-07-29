@@ -866,19 +866,26 @@ export interface ReportMeta {
 }
 
 /** The markdown written to `<session dir>/migration-inflight.md` — the handoff
- *  note AND the forensic record of what a forced migrate destroyed. */
+ *  note AND the forensic record of what a forced migrate destroyed.
+ *
+ *  This half is written BEFORE the daemon is called, so it must never claim the
+ *  move happened: at this point the target is REQUESTED, not reached. The
+ *  settled truth is appended afterwards by `renderMigrationOutcome`. */
 export function renderInflightReport(report: InflightReport, meta: ReportMeta): string {
   const lines: string[] = [];
   lines.push('# Migration in-flight report');
   lines.push('');
   lines.push(`- Session: \`${meta.sessionId}\``);
-  lines.push(`- Migrated onto: \`${meta.targetAgent}\`${meta.targetModel ? ` (model \`${meta.targetModel}\`)` : ''}`);
-  lines.push(`- At: ${meta.at}`);
+  lines.push(
+    `- Migration requested onto: \`${meta.targetAgent}\`${meta.targetModel ? ` (model \`${meta.targetModel}\`)` : ''} ` +
+      '— **PENDING at the time this section was written; see the Outcome section below for what actually happened.**',
+  );
+  lines.push(`- Requested at: ${meta.at}`);
   lines.push(`- Status at migrate: ${report.status} (turn ${report.turn})`);
   lines.push(`- Worst verdict: **${VERDICT_LABEL[report.worstVerdict]}**`);
   if (meta.forced)
     lines.push(
-      '- **FORCED past a destructive/unknown refusal (`--force-inflight`).** The items below were killed by the relaunch.',
+      '- **FORCED past a destructive/unknown refusal (`--force-inflight`).** The items below are killed by the relaunch if it proceeds.',
     );
   lines.push('');
 
@@ -933,6 +940,94 @@ export function renderInflightReport(report: InflightReport, meta: ReportMeta): 
 
 function escapeCell(text: string): string {
   return text.replace(/\s+/g, ' ').replace(/\|/g, '\\|').trim();
+}
+
+/** What a post-attempt `kteam get` actually observed. Every field is optional
+ *  because the daemon may report a partial view; the WHOLE object is absent
+ *  when the post-attempt fetch itself failed — which must render as unknown,
+ *  never as an assumed rollback. */
+export interface ObservedSession {
+  binary?: string;
+  model?: string;
+  status?: string;
+}
+
+/** The settled result of one migrate attempt, rendered after the daemon call
+ *  returns or throws. `observed` is deliberately separate from `targetAgent`:
+ *  the target is what was ASKED FOR, `observed` is what the daemon REPORTS. */
+export interface MigrationOutcome {
+  ok: boolean;
+  /** The wrapper the session was on before the attempt. */
+  from: string;
+  targetAgent: string;
+  targetModel?: string;
+  /** ISO timestamp of the settlement. */
+  at: string;
+  /** Failure only: the error the daemon or the client produced, verbatim. */
+  detail?: string;
+  /** Omit entirely when the post-attempt fetch failed. */
+  observed?: ObservedSession;
+}
+
+function wrapperLine(observed: ObservedSession, from: string, targetAgent: string): string {
+  const binary = observed.binary;
+  const model = observed.model ? ` (model \`${observed.model}\`)` : '';
+  if (!binary) return `- Session now on: **UNKNOWN** — the daemon reported no wrapper for this session.`;
+  if (binary === from && from !== targetAgent)
+    return `- Session now on: \`${binary}\`${model} — the ORIGINAL account; the session did not move.`;
+  if (binary === targetAgent)
+    return (
+      `- Session now on: \`${binary}\`${model} — the REQUESTED target, **not** the original \`${from}\`. ` +
+      'The config was left staged on the target: the rollback did not complete.'
+    );
+  return `- Session now on: \`${binary}\`${model} — neither the original \`${from}\` nor the requested \`${targetAgent}\`.`;
+}
+
+/** The `## Outcome` section appended to `<session dir>/migration-inflight.md`
+ *  once the migrate attempt settles. This is the ONLY part of the report
+ *  allowed to state that the move happened. On failure it reports the error
+ *  plus whatever the daemon actually observes afterwards — and says UNKNOWN
+ *  rather than claiming a rollback it did not verify, because a daemon-side
+ *  refusal, a half-applied config, and a clean restore are all reachable. */
+export function renderMigrationOutcome(outcome: MigrationOutcome): string {
+  const lines: string[] = [];
+  const model = outcome.targetModel ? ` (model \`${outcome.targetModel}\`)` : '';
+  if (outcome.ok) {
+    lines.push('## Outcome — MIGRATION SUCCEEDED');
+    lines.push('');
+    lines.push(`- Settled at: ${outcome.at}`);
+    lines.push(`- Migrated from \`${outcome.from}\` onto \`${outcome.targetAgent}\`${model}.`);
+    if (outcome.observed?.binary)
+      lines.push(
+        `- Session now on: \`${outcome.observed.binary}\`` +
+          (outcome.observed.model ? ` (model \`${outcome.observed.model}\`)` : '') +
+          (outcome.observed.binary === outcome.targetAgent
+            ? ''
+            : ` — note: this is not the requested \`${outcome.targetAgent}\`.`),
+      );
+    if (outcome.observed?.status) lines.push(`- Status now: \`${outcome.observed.status}\``);
+    lines.push('- The relaunch under the new account completed; everything above describes what it interrupted.');
+    lines.push('');
+    return `${lines.join('\n')}\n`;
+  }
+
+  lines.push('## Outcome — MIGRATION FAILED');
+  lines.push('');
+  lines.push(`- Settled at: ${outcome.at}`);
+  lines.push(`- Requested target: \`${outcome.targetAgent}\`${model} (from \`${outcome.from}\`)`);
+  lines.push(`- **The migration did NOT complete.** Everything above describes what was in flight when it was tried.`);
+  lines.push(`- Error: ${truncate(outcome.detail?.trim() || 'no detail reported', 600)}`);
+  if (outcome.observed) {
+    lines.push(wrapperLine(outcome.observed, outcome.from, outcome.targetAgent));
+    lines.push(`- Status now: ${outcome.observed.status ? `\`${outcome.observed.status}\`` : '**UNKNOWN**'}`);
+  } else {
+    lines.push(
+      '- Session state after the failure: **UNKNOWN** — the post-failure fetch did not return, so whether the ' +
+        `session was restored to \`${outcome.from}\` is NOT confirmed. Run \`kteam status\` before acting on it.`,
+    );
+  }
+  lines.push('');
+  return `${lines.join('\n')}\n`;
 }
 
 /** The one-line handoff `kteam send` fires after a successful migrate. */

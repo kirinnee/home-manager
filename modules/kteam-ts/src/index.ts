@@ -23,6 +23,9 @@ import {
   handoffMessage,
   renderInflightCli,
   renderInflightReport,
+  renderMigrationOutcome,
+  type MigrationOutcome,
+  type ObservedSession,
 } from './migrate-preflight';
 import {
   buildWaiterNotices,
@@ -33,6 +36,7 @@ import {
   toGraphNode,
 } from './migrate-graph';
 import { createPaths } from './paths';
+import type { SessionView } from './service';
 import { SIGNAL_KINDS } from './types';
 import type { KTeamEvent, SessionStatus, SignalKind } from './types';
 import { compactUsageQuota, fetchKfleetUsage, UsageFeed, usageQuotaLabel } from './usage';
@@ -979,25 +983,67 @@ program
 
       // Write the report BEFORE the API call, so it survives a migrate that
       // fails and rolls back. Graph impact alone also needs a report so the
-      // relaunched agent knows which parked peers still need a reply.
+      // relaunched agent knows which parked peers still need a reply. This half
+      // states the target as REQUESTED only — the settled truth is appended by
+      // `finalizeReport` once the daemon call returns or throws, so a failed or
+      // daemon-refused migrate never leaves a file claiming it happened.
+      const fromBinary = view.config.binary;
       let reportPath: string | undefined;
+      let reportBody = '';
       if (!report.empty || !graphImpactEmpty(graphImpact)) {
         reportPath = path.join(view.directory, 'migration-inflight.md');
-        await writeTextAtomic(
-          reportPath,
+        reportBody =
           renderInflightReport(report, {
             sessionId: resolvedId,
             targetAgent: options.agent,
             targetModel: options.model,
             forced: decision.forced,
             at: now(),
-          }) + renderGraphHandoffSection(graphImpact),
-        );
+          }) + renderGraphHandoffSection(graphImpact);
+        await writeTextAtomic(reportPath, reportBody);
         if (!report.empty) console.error(renderInflightCli(report));
         console.error(`migrate: wrote migration report to ${reportPath}`);
       }
+      // Atomic rewrite of the WHOLE file (never an append): a torn finalize
+      // would otherwise leave the pending half asserting an unresolved move.
+      // Best-effort — a failed finalize must not mask the migrate's own result.
+      const finalizeReport = async (outcome: MigrationOutcome): Promise<void> => {
+        if (!reportPath) return;
+        await writeTextAtomic(reportPath, reportBody + renderMigrationOutcome(outcome)).catch(() => {});
+      };
+      const observedFrom = (settled: SessionView): ObservedSession => ({
+        ...(settled.config.binary ? { binary: settled.config.binary } : {}),
+        ...(settled.config.model ? { model: settled.config.model } : {}),
+        ...(settled.state.status ? { status: settled.state.status } : {}),
+      });
 
-      const migrated = await api.migrate(id, options.agent, options.model, options.allowContextDowngrade);
+      let migrated: SessionView;
+      try {
+        migrated = await api.migrate(id, options.agent, options.model, options.allowContextDowngrade);
+      } catch (error) {
+        // The daemon may have refused outright, rolled back, or left the config
+        // half-applied. Report what it observes NOW; an unavailable view stays
+        // explicitly unknown rather than being rendered as a clean rollback.
+        const latest = await api.get(resolvedId).catch(() => undefined);
+        await finalizeReport({
+          ok: false,
+          from: fromBinary,
+          targetAgent: options.agent,
+          targetModel: options.model,
+          at: now(),
+          detail: error instanceof Error ? error.message : String(error),
+          ...(latest ? { observed: observedFrom(latest) } : {}),
+        });
+        throw error;
+      }
+      await finalizeReport({
+        ok: true,
+        from: fromBinary,
+        targetAgent: options.agent,
+        targetModel: options.model,
+        at: now(),
+        observed: observedFrom(migrated),
+      });
 
       // Point the relaunched agent at the in-flight + graph report. Best-effort:
       // the migration already succeeded, so a failed send cannot fail it.

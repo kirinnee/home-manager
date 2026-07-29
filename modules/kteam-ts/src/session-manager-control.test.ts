@@ -3411,6 +3411,7 @@ describe('migrate — cross-account continuation', () => {
     let current = { ...(claudeSession.config as unknown as Loose) };
     const configUpdates: Loose[] = [];
     const events: Array<{ type: string; payload: Loose }> = [];
+    const steps: string[] = [];
     let resumedWith: string | undefined;
 
     const manager = migrateManager({
@@ -3428,9 +3429,11 @@ describe('migrate — cross-account continuation', () => {
       stopTmuxWithEvidence: async () => undefined,
       emit: async (_id: string, type: string, payload: Loose) => {
         events.push({ type, payload });
+        steps.push(type);
         return {} as unknown;
       },
       resume: async (_id: string, message?: string) => {
+        steps.push('resume');
         resumedWith = message;
         return claudeSession;
       },
@@ -3451,10 +3454,18 @@ describe('migrate — cross-account continuation', () => {
     expect(current.parent).toBe('p0');
     // Transcript repointed under the new home (claude).
     expect(String(current.transcriptFile)).toContain('/new/home/projects/');
+    // Every persisted config that points at the target already carries its
+    // target-derived transcript path; there is no half-migrated observation.
+    expect(
+      configUpdates
+        .filter(update => update.binary === 'claude-auto-glm52b')
+        .every(update => String(update.transcriptFile).includes('/new/home/projects/')),
+    ).toBe(true);
 
     const migrated = events.find(event => event.type === 'session.migrated');
     expect(migrated?.payload).toMatchObject({ from: 'claude-auto-glm52a', to: 'claude-auto-glm52b' });
     expect(resumedWith).toMatch(/migrated to a different account/);
+    expect(steps).toEqual(['session.migrating', 'resume', 'session.migrated']);
   });
 
   test('explicit --model overrides the new wrapper default', async () => {
@@ -3522,7 +3533,7 @@ describe('migrate — cross-account continuation', () => {
     });
 
     await expect(callMigrate(manager, 's1', 'claude-auto-glm52b')).rejects.toThrow(
-      'migration to claude-auto-glm52b failed: pane never became ready; session restored to claude-auto-glm52a (stopped)',
+      'migration to claude-auto-glm52b failed: pane never became ready; session restored to claude-auto-glm52a (pane stopped)',
     );
     // Config rolled back to the original account — never left on the wrapper that
     // never launched.
@@ -3532,8 +3543,233 @@ describe('migrate — cross-account continuation', () => {
     expect(current.migration).toBeUndefined();
     // Intent was journaled BEFORE stopping, then the session was marked failed.
     expect(events).toContain('session.migrating');
+    expect(events).not.toContain('session.migrated');
+    expect(events).toContain('session.migrate_failed');
     expect(transitions.at(-1)?.status).toBe('failed');
     expect(transitions.at(-1)?.reason).toContain('restored to claude-auto-glm52a');
+  });
+
+  test('a pre-stop failure restores the original config without terminalizing the still-live session', async () => {
+    const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-pre-stop-failure-'));
+    temporaryDirectories.push(wrapperDir);
+    await writeFile(
+      path.join(wrapperDir, 'claude-auto-glm52b'),
+      'export CLAUDE_CONFIG_DIR="/new/home"\nexport KTEAM_MODEL="glm-5.2-air"\n',
+      { mode: 0o755 },
+    );
+    let current = { ...(claudeSession.config as unknown as Loose) };
+    let reads = 0;
+    const transitions: Array<{ status?: string }> = [];
+    const failures: Loose[] = [];
+    const manager = migrateManager({
+      paths: { kfleetBin: wrapperDir },
+      get: async () => {
+        reads += 1;
+        return reads === 1 ? claudeSession : ({ ...claudeSession, config: current } as unknown as SessionView);
+      },
+      store: {
+        listSessions: () => [],
+        updateConfig: async (_id: string, mutate: (c: Loose) => Loose) => {
+          current = mutate(current);
+          return current;
+        },
+      },
+      tmux: { state: async () => ({ alive: true, dead: false, promptReady: true }) },
+      emit: async (_id: string, type: string, payload: Loose) => {
+        if (type === 'session.migrating') throw new Error('intent event persistence failed');
+        if (type === 'session.migrate_failed') failures.push(payload);
+        return {} as unknown;
+      },
+      transition: async (_id: string, patch: { status?: string }) => {
+        transitions.push(patch);
+      },
+    });
+
+    await expect(callMigrate(manager, 's1', 'claude-auto-glm52b')).rejects.toThrow(/intent event persistence failed/);
+    expect(current.binary).toBe('claude-auto-glm52a');
+    expect(current.migration).toBeUndefined();
+    expect(transitions).toEqual([]);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ restoredTo: 'claude-auto-glm52a', status: 'rate_limited' });
+  });
+
+  test('an unverified rollback reports the observed target and never claims restoration', async () => {
+    const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-rollback-failure-'));
+    temporaryDirectories.push(wrapperDir);
+    await writeFile(
+      path.join(wrapperDir, 'claude-auto-glm52b'),
+      'export CLAUDE_CONFIG_DIR="/new/home"\nexport KTEAM_MODEL="glm-5.2-air"\n',
+      { mode: 0o755 },
+    );
+    let current = { ...(claudeSession.config as unknown as Loose) };
+    let reads = 0;
+    let updates = 0;
+    const events: Array<{ type: string; payload: Loose }> = [];
+    const manager = migrateManager({
+      paths: { kfleetBin: wrapperDir },
+      get: async () => {
+        reads += 1;
+        return reads === 1 ? claudeSession : ({ ...claudeSession, config: current } as unknown as SessionView);
+      },
+      store: {
+        listSessions: () => [],
+        updateConfig: async (_id: string, mutate: (c: Loose) => Loose) => {
+          updates += 1;
+          if (updates === 3) throw new Error('rollback database refresh exploded');
+          current = mutate(current);
+          return current;
+        },
+      },
+      stopMonitor: async () => undefined,
+      tmux: { state: async () => ({ alive: false, dead: true, promptReady: false }) },
+      emit: async (_id: string, type: string, payload: Loose) => {
+        events.push({ type, payload });
+        return {} as unknown;
+      },
+      transition: async () => undefined,
+      resume: async () => {
+        throw new Error('pane never became ready');
+      },
+    });
+
+    await expect(callMigrate(manager, 's1', 'claude-auto-glm52b')).rejects.toThrow(
+      /rollback incomplete; observed wrapper claude-auto-glm52b.*rollback write failed: rollback database refresh exploded/,
+    );
+    expect(current.binary).toBe('claude-auto-glm52b');
+    expect(current.migration).toBeDefined();
+    expect(events.map(event => event.type)).not.toContain('session.migrated');
+    const failed = events.find(event => event.type === 'session.migrate_failed')?.payload;
+    expect(failed).toMatchObject({
+      observedWrapper: 'claude-auto-glm52b',
+      rollbackError: 'rollback database refresh exploded',
+      status: 'failed',
+    });
+    expect(failed?.restoredTo).toBeUndefined();
+  });
+
+  test('refuses an incoming kill_failed session before journaling migration intent', async () => {
+    const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-kill-failed-'));
+    temporaryDirectories.push(wrapperDir);
+    await writeFile(
+      path.join(wrapperDir, 'claude-auto-glm52b'),
+      'export CLAUDE_CONFIG_DIR="/new/home"\nexport KTEAM_MODEL="glm-5.2-air"\n',
+      { mode: 0o755 },
+    );
+    let journaled = false;
+    const manager = migrateManager({
+      paths: { kfleetBin: wrapperDir },
+      get: async () => ({
+        ...claudeSession,
+        state: { ...claudeSession.state, status: 'kill_failed' },
+      }),
+      store: {
+        listSessions: () => [],
+        updateConfig: async () => {
+          journaled = true;
+          throw new Error('must refuse before journaling migration intent');
+        },
+      },
+    });
+
+    await expect(callMigrate(manager, 's1', 'claude-auto-glm52b')).rejects.toThrow(/previous tmux kill failed/);
+    expect(journaled).toBe(false);
+  });
+
+  test('a relaunch failure preserves a kill_failed quarantine', async () => {
+    const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-preserve-kill-failed-'));
+    temporaryDirectories.push(wrapperDir);
+    await writeFile(
+      path.join(wrapperDir, 'claude-auto-glm52b'),
+      'export CLAUDE_CONFIG_DIR="/new/home"\nexport KTEAM_MODEL="glm-5.2-air"\n',
+      { mode: 0o755 },
+    );
+    let current = { ...(claudeSession.config as unknown as Loose) };
+    let reads = 0;
+    const transitions: Array<{ status?: string }> = [];
+    const events: string[] = [];
+    const manager = migrateManager({
+      paths: { kfleetBin: wrapperDir },
+      get: async () => {
+        reads++;
+        return reads === 1
+          ? claudeSession
+          : ({
+              ...claudeSession,
+              config: current,
+              state: { ...claudeSession.state, status: 'kill_failed' },
+            } as unknown as SessionView);
+      },
+      store: {
+        listSessions: () => [],
+        updateConfig: async (_id: string, mutate: (c: Loose) => Loose) => {
+          current = mutate(current);
+          return current;
+        },
+      },
+      stopMonitor: async () => undefined,
+      tmux: { state: async () => ({ alive: false, dead: true, promptReady: false }) },
+      emit: async (_id: string, type: string) => {
+        events.push(type);
+        return {} as unknown;
+      },
+      transition: async (_id: string, patch: { status?: string }) => {
+        transitions.push(patch);
+      },
+      resume: async () => {
+        throw new Error('failed resume cleanup could not kill pane');
+      },
+    });
+
+    await expect(callMigrate(manager, 's1', 'claude-auto-glm52b')).rejects.toThrow(/kill_failed/);
+    expect(current.binary).toBe('claude-auto-glm52a');
+    expect(current.migration).toBeUndefined();
+    expect(transitions).toEqual([]);
+    expect(events).not.toContain('session.migrated');
+    expect(events).toContain('session.migrate_failed');
+  });
+
+  test('a failed pane stop clears migration intent and re-arms the old monitor', async () => {
+    const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-stop-failure-'));
+    temporaryDirectories.push(wrapperDir);
+    await writeFile(
+      path.join(wrapperDir, 'claude-auto-glm52b'),
+      'export CLAUDE_CONFIG_DIR="/new/home"\nexport KTEAM_MODEL="glm-5.2-air"\n',
+      { mode: 0o755 },
+    );
+    let current = { ...(claudeSession.config as unknown as Loose) };
+    let monitorsStarted = 0;
+    const events: string[] = [];
+    const manager = migrateManager({
+      paths: { kfleetBin: wrapperDir },
+      get: async () => ({ ...claudeSession, config: current }) as unknown as SessionView,
+      store: {
+        listSessions: () => [],
+        updateConfig: async (_id: string, mutate: (c: Loose) => Loose) => {
+          current = mutate(current);
+          return current;
+        },
+      },
+      stopMonitor: async () => undefined,
+      stopTmuxWithEvidence: async () => {
+        throw new Error('kill timed out');
+      },
+      startMonitor: async () => {
+        monitorsStarted++;
+      },
+      tmux: { state: async () => ({ alive: true, dead: false, promptReady: false }) },
+      emit: async (_id: string, type: string) => {
+        events.push(type);
+        return {} as unknown;
+      },
+      transition: async () => undefined,
+    });
+
+    await expect(callMigrate(manager, 's1', 'claude-auto-glm52b')).rejects.toThrow(/kill timed out/);
+    expect(current.binary).toBe('claude-auto-glm52a');
+    expect(current.migration).toBeUndefined();
+    expect(monitorsStarted).toBe(1);
+    expect(events).not.toContain('session.migrated');
+    expect(events).toContain('session.migrate_failed');
   });
 
   test('rolls back the account but preserves a model that demonstrably launched', async () => {

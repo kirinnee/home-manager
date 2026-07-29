@@ -110,7 +110,8 @@ export interface AnalyticsRawSession {
   contextEndPercent: number | null;
   stalled: boolean;
   failed: boolean;
-  /** True when durable session.migrating/session.migrated evidence exists. */
+  /** True when durable session.migrated evidence exists (a successful migration).
+   *  In-flight session.migrating and failed session.migrate_failed do not count. */
   migrated: boolean;
   completed: boolean;
 }

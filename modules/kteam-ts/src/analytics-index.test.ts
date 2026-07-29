@@ -4,7 +4,7 @@ import type { Stats } from 'node:fs';
 import { appendFile, mkdtemp, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { AnalyticsIndex } from './analytics-index';
+import { AnalyticsIndex, ANALYTICS_SCHEMA_VERSION } from './analytics-index';
 import { scopeAnalyticsQuery } from './analytics-query';
 import { estimateEquivalentApiCost } from './model-cost';
 
@@ -270,7 +270,15 @@ describe('AnalyticsIndex', () => {
     const beforeMigration = index.query('{id=s2}');
     expect(beforeMigration.kind === 'raw' && beforeMigration.results[0]?.migrated).toBe(false);
     source.query(`INSERT INTO events VALUES ('s2', 1, '2026-07-01T00:07:00.000Z', 'session.started', 0, 1)`).run();
+    // In-flight and failed migration evidence must NOT mark a session migrated —
+    // only a successful session.migrated is durable evidence.
     source.query(`UPDATE events SET type = 'session.migrating' WHERE session_id = 's2' AND sequence = 1`).run();
+    const midMigration = index.query('{id=s2}');
+    expect(midMigration.kind === 'raw' && midMigration.results[0]?.migrated).toBe(false);
+    source.query(`UPDATE events SET type = 'session.migrate_failed' WHERE session_id = 's2' AND sequence = 1`).run();
+    const failedMigration = index.query('{id=s2}');
+    expect(failedMigration.kind === 'raw' && failedMigration.results[0]?.migrated).toBe(false);
+    source.query(`UPDATE events SET type = 'session.migrated' WHERE session_id = 's2' AND sequence = 1`).run();
     const afterMigration = index.query('{id=s2}');
     expect(afterMigration.kind === 'raw' && afterMigration.results[0]?.migrated).toBe(true);
     source.close();
@@ -978,6 +986,205 @@ describe('AnalyticsIndex', () => {
       known: 0,
       total: 0,
     });
+    source.close();
+  });
+
+  test('replaces a stale pre-fix migration trigger and survives a transcript path round-trip', async () => {
+    const { root, file, source } = await fixture();
+    const OLD = path.join(root, 'old.jsonl');
+    const NEW = path.join(root, 'new.jsonl');
+    const AUTHORITATIVE_SIZE = 4242;
+
+    insertSession(source, { id: 's1', status: 'running', harness: 'claude', transcriptFile: OLD });
+    // An authoritative chat_sources row for OLD carries real fingerprint metadata,
+    // so we can prove the 0/0 config placeholder never clobbers it.
+    addChatSource(source, 's1', OLD, {
+      dev: 66,
+      ino: 99,
+      size: AUTHORITATIVE_SIZE,
+      mtimeMs: 1_000,
+    } as unknown as Stats);
+
+    // Open once so the current (fixed) schema materializes and OLD is enrolled from
+    // the authoritative chat_sources row.
+    const first = new AnalyticsIndex({ databasePath: file });
+    await first.close();
+    expect(
+      source
+        .query<
+          { source_size: number },
+          [string]
+        >(`SELECT source_size FROM analytics_expected_sources WHERE session_id = 's1' AND source_file = ?`)
+        .get(OLD)?.source_size,
+    ).toBe(AUTHORITATIVE_SIZE);
+
+    // Simulate a DEPLOYED pre-fix daemon DB: restore the legacy INSERT OR IGNORE
+    // trigger body and stamp the previous schema version, so the next open is
+    // forced to drop and recreate the persistent trigger.
+    source.exec(`DROP TRIGGER analytics_session_source_update`);
+    source.exec(`
+      CREATE TRIGGER analytics_session_source_update
+      AFTER UPDATE OF config_json ON sessions
+      WHEN COALESCE(json_extract(OLD.config_json, '$.transcriptFile'), '')
+        <> COALESCE(json_extract(NEW.config_json, '$.transcriptFile'), '')
+      BEGIN
+        INSERT OR IGNORE INTO analytics_expected_sources
+          (session_id, source_file, harness, source_size, source_mtime_ms, seen_at)
+        SELECT NEW.id, json_extract(NEW.config_json, '$.transcriptFile'),
+          COALESCE(json_extract(NEW.config_json, '$.harness'), 'unknown'), 0, 0, CURRENT_TIMESTAMP
+        WHERE json_extract(NEW.config_json, '$.transcriptFile') IS NOT NULL;
+        UPDATE analytics_sessions SET
+          token_known = 0, input_tokens = NULL, output_tokens = NULL,
+          cached_input_tokens = NULL, cache_write_input_tokens = NULL,
+          cache_write_5m_input_tokens = NULL, cache_write_1h_input_tokens = NULL, pricing_model = NULL
+        WHERE session_id = NEW.id;
+      END;
+    `);
+    source
+      .query(`UPDATE analytics_meta SET value = ? WHERE key = 'schema_version'`)
+      .run(String(ANALYTICS_SCHEMA_VERSION - 1));
+
+    // EventStore persists session metadata with an outer conflict clause. That
+    // outer policy overrides a trigger-body OR IGNORE, turning a duplicate-key hit
+    // into an ABORT.
+    const persist = (transcriptFile: string): void => {
+      const config = {
+        id: 's1',
+        binary: 'claude-auto-loge',
+        model: 'claude-opus-5',
+        harness: 'claude',
+        mode: 'auto',
+        cwd: '/work/repo',
+        label: 'batch-a',
+        parent: 'lead',
+        createdAt: '2026-07-01T00:00:00.000Z',
+        transcriptFile,
+      };
+      const state = { id: 's1', status: 'running', startedAt: '2026-07-01T00:00:00.000Z', turn: 1 };
+      source
+        .query(
+          `
+          INSERT INTO sessions
+            (id, directory, status, created_at, updated_at, config_json, state_json, indexed_at)
+          VALUES ('s1', '/tmp/s1', 'running', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', ?, ?, '2026-07-01T00:00:00.000Z')
+          ON CONFLICT(id) DO UPDATE SET
+            config_json = excluded.config_json,
+            updated_at = excluded.updated_at,
+            indexed_at = excluded.indexed_at
+        `,
+        )
+        .run(JSON.stringify(config), JSON.stringify(state));
+    };
+
+    // RED: with the stale OR IGNORE trigger, moving the transcript path back to an
+    // already-enrolled value throws the exact UNIQUE error.
+    persist(NEW);
+    expect(() => persist(OLD)).toThrow(/UNIQUE constraint failed: analytics_expected_sources/);
+
+    // Reopen: the version mismatch drops and recreates the persistent trigger with
+    // the fixed DO NOTHING upsert, then cold-resyncs enrolment.
+    const second = new AnalyticsIndex({ databasePath: file });
+    opened.push(second);
+
+    // GREEN: the full old -> new -> old round-trip no longer throws.
+    expect(() => {
+      persist(OLD);
+      persist(NEW);
+      persist(OLD);
+    }).not.toThrow();
+
+    // Both sources stay enrolled and OLD's authoritative fingerprint is intact —
+    // the 0/0 placeholder never overwrote it.
+    const rows = source
+      .query<
+        { source_file: string; source_size: number },
+        []
+      >(`SELECT source_file, source_size FROM analytics_expected_sources WHERE session_id = 's1' ORDER BY source_file`)
+      .all();
+    const bySource = new Map(rows.map(row => [row.source_file, row.source_size]));
+    expect([...bySource.keys()].sort()).toEqual([NEW, OLD].sort());
+    expect(bySource.get(OLD)).toBe(AUTHORITATIVE_SIZE);
+    expect(bySource.get(NEW)).toBe(0);
+    source.close();
+  });
+
+  test('bootstrap re-import survives orphaned warm analytics rows without aborting', async () => {
+    const { file, source } = await fixture();
+    const T = '/transcripts/s1.jsonl';
+    const AUTHORITATIVE_SIZE = 4242;
+    insertSession(source, { id: 's1', status: 'running', harness: 'claude', transcriptFile: T });
+    addChatSource(source, 's1', T, { dev: 66, ino: 99, size: AUTHORITATIVE_SIZE, mtimeMs: 1_000 } as unknown as Stats);
+
+    // Materialize the warm analytics index and install the current triggers.
+    const first = new AnalyticsIndex({ databasePath: file });
+    await first.close();
+
+    // The warm analytics materialization outlives a pointer-index rebuild that
+    // drops and recreates `sessions`. DROP TABLE does not fire ON DELETE CASCADE,
+    // so the derived analytics_sessions and analytics_expected_sources rows are
+    // left orphaned. Reproduce that state directly by deleting the session with
+    // foreign keys off (a cascade would otherwise clear the derived rows).
+    source.exec('PRAGMA foreign_keys = OFF');
+    source.query(`DELETE FROM sessions WHERE id = 's1'`).run();
+    source.exec('PRAGMA foreign_keys = ON');
+    expect(
+      source.query<{ c: number }, []>(`SELECT COUNT(*) c FROM analytics_sessions WHERE session_id = 's1'`).get()?.c,
+    ).toBe(1);
+    expect(
+      source.query<{ c: number }, []>(`SELECT COUNT(*) c FROM analytics_expected_sources WHERE session_id = 's1'`).get()
+        ?.c,
+    ).toBe(1);
+
+    // EventStore re-imports each session via INSERT ... ON CONFLICT(id) DO UPDATE.
+    // The row is absent, so the INSERT branch fires analytics_sessions_insert while
+    // the orphaned derived rows still exist. A plain trigger body would ABORT here
+    // (the outer conflict policy overrides a trigger-body OR IGNORE, and a bare
+    // INSERT collides outright). The fixed idempotent trigger must not throw.
+    const config = {
+      id: 's1',
+      binary: 'claude-auto-loge',
+      model: 'claude-opus-5',
+      harness: 'claude',
+      mode: 'auto',
+      cwd: '/work/repo',
+      label: 'batch-a',
+      parent: 'lead',
+      createdAt: '2026-07-01T00:00:00.000Z',
+      transcriptFile: T,
+    };
+    const state = { id: 's1', status: 'running', startedAt: '2026-07-01T00:00:00.000Z', turn: 1 };
+    const reimport = (): void => {
+      source
+        .query(
+          `
+          INSERT INTO sessions
+            (id, directory, status, created_at, updated_at, config_json, state_json, indexed_at)
+          VALUES ('s1', '/tmp/s1', 'running', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', ?, ?, '2026-07-01T00:00:00.000Z')
+          ON CONFLICT(id) DO UPDATE SET
+            status = excluded.status,
+            config_json = excluded.config_json,
+            state_json = excluded.state_json,
+            indexed_at = excluded.indexed_at
+        `,
+        )
+        .run(JSON.stringify(config), JSON.stringify(state));
+    };
+    expect(() => reimport()).not.toThrow();
+
+    // The derived session row is refreshed and the authoritative expected-source
+    // fingerprint survived the placeholder DO NOTHING intact.
+    expect(
+      source.query<{ status: string }, []>(`SELECT status FROM analytics_sessions WHERE session_id = 's1'`).get()
+        ?.status,
+    ).toBe('running');
+    expect(
+      source
+        .query<
+          { source_size: number },
+          [string]
+        >(`SELECT source_size FROM analytics_expected_sources WHERE session_id = 's1' AND source_file = ?`)
+        .get(T)?.source_size,
+    ).toBe(AUTHORITATIVE_SIZE);
     source.close();
   });
 });
