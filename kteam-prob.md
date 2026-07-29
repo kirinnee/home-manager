@@ -3386,3 +3386,39 @@ satisfied differently) when the target is in a declared wait — delivery to
 `inbox.jsonl` does not require an interactive prompt. Failing that, `kteam send`
 must at minimum exit non-zero with an explicit "message NOT delivered" and
 suggest `kteam interrupt`, rather than reporting a harness-startup condition.
+
+---
+
+## 2026-07-29 — analytics trigger collision wedges bootstrap and makes migrate reports lie
+
+**Problem.** Daemon bootstrap remains `bootstrapping=true` indefinitely after
+`analytics_expected_sources(session_id, source_file)` rejects a repeated transcript enrolment.
+The same database error breaks `kteam migrate`; its preflight file already says `Migrated onto`
+before daemon persistence/relaunch succeeds, so failure leaves a false success record and can
+leave config, status, monitor, and pane state disagreeing.
+
+**Evidence.** Live read-only health showed daemon 0.2.1, pid 1676880, 44 running/44 monitored,
+warden armed, zero wedges, but `ok=false`, `bootstrapping=true`, and
+`bootstrap phase import failed: UNIQUE constraint failed:
+analytics_expected_sources.session_id, analytics_expected_sources.source_file`. The exact SQLite
+collision reproduces when EventStore's outer session UPSERT fires the analytics transcript-change
+trigger: SQLite overrides legacy `INSERT OR IGNORE` inside that trigger with the outer conflict
+policy. Explicit `ON CONFLICT(session_id, source_file) DO NOTHING` succeeds. Separately,
+`migration-inflight.md` is rendered before the API call with completed wording, while the daemon
+emits `session.migrated` before relaunch and only catches failures after several split writes.
+
+**Suspected code path.** `modules/kteam-ts/src/storage.ts:1583-1597` (outer metadata UPSERT) into
+`modules/kteam-ts/src/analytics-index.ts:559-568` (legacy trigger conflict clause);
+`session-manager.ts:1322-1343` and health at `:1386-1387` (unbounded bootstrap aggregate whose
+completion flag is last); `session-manager.ts:3972-4066` (migrate intent/stop/rewrite/success and
+rollback ordering); `index.ts:961-981` plus `migrate-preflight.ts:868-876` (pre-API report claims
+completion). Persistent analytics triggers require a schema-version bump when their body changes.
+
+**Workaround.** Do not retry migrations while this error is present: inspect the session's
+`config.json`, `state.json`, pane, and `migration-inflight.md` independently, and treat `failed` or
+`kill_failed` as unresolved until the pane is proven stopped. Do not edit the live SQLite database.
+After the code fix is built, the human must choose a daemon restart so the new analytics schema
+version recreates the trigger and the in-memory bootstrap state resets; duplicate-row cleanup is
+not required because the primary key rejected the duplicate.
+
+_(B44, session `ms5ep4kg-b9d5a0a8`; live database inspected read-only, never mutated; daemon never restarted.)_
