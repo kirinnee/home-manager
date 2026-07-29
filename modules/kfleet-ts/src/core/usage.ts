@@ -11,6 +11,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { probeCLIProxyUsage, type CLIProxyAvailability, type CLIProxyUnavailableReason } from './cliproxy-usage';
 import { jwtExpMs, readClaudeCred } from './creds';
 import { KIND_SPECS } from './kinds';
 import { type Identity, isOAuth, pickDonor, scanIdentities, syncIdentity } from './login';
@@ -19,7 +20,7 @@ import type { Config, Kind, ResolvedAgent } from './types';
 
 export { jwtExpMs } from './creds'; // re-export: existing consumers/tests import it from here
 
-export type UsageProvider = 'anthropic' | 'codex' | 'zai' | 'minimax';
+export type UsageProvider = 'anthropic' | 'codex' | 'zai' | 'minimax' | 'cliproxy';
 
 /** Per-account usage snapshot. One per resolved agent (binary). */
 export interface AccountUsage {
@@ -28,10 +29,14 @@ export interface AccountUsage {
   name: string; // resolved name, e.g. "auto-opus48"
   account?: string; // login identity (base agent) this binary belongs to, e.g. "kirin"
   provider: UsageProvider | null; // null = not a tracked/usage-windowed account
-  usageBased: boolean; // true iff provider !== null
+  usageBased: boolean; // true iff numerical subscription windows exist (CLIProxy availability stays false)
   ok: boolean; // probe attempted AND succeeded
   error?: string; // short reason when !ok
   unavailable?: boolean; // true when a configured usage account is definitely unusable (e.g. missing token)
+  /** Runtime availability for providers such as CLIProxyAPI that have no numerical usage window. */
+  availability?: CLIProxyAvailability;
+  unavailableReason?: CLIProxyUnavailableReason;
+  retryAt?: number; // epoch ms of the next known proxy retry/recovery
   authOk?: boolean; // logged in? true=creds present/valid, false=missing/rejected, undefined=couldn't tell
   fiveHourPercent?: number; // 0–100 utilization of the 5h window
   weeklyPercent?: number; // 0–100 utilization of the weekly/long window
@@ -698,6 +703,17 @@ export async function probeUsage(
       byBinary.set(m.binary, usage);
     }
   }
+
+  // Proxy availability is an independent, read-only management snapshot rather
+  // than a fabricated five-hour/weekly subscription window. Failed sources do
+  // not override the ordinary untracked row: that remains unknown/fail-open.
+  const cliProxy = await probeCLIProxyUsage(config.usage.cliProxy, agents, { timeoutMs, env });
+  for (const [binary, override] of cliProxy)
+    byBinary.set(binary, {
+      ...override,
+      kind: binary.startsWith('codex-') ? 'codex' : 'claude',
+      name: binary.replace(/^(claude|codex)-/, ''),
+    });
 
   // Emit one row per resolved agent (untracked ⇒ usageBased=false), stable order.
   return agents

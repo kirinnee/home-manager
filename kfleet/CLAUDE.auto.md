@@ -8,7 +8,7 @@
 - **Task records are PER SESSION.** After the human confirms a task, record it for this session with `kteam task create`; keep its status current as work progresses, and link any PR or branch with `kteam task link`. It is how the human sees what you are doing without asking.
 - **Tasks:** cite `#F12`; preserve the human ask + source, choose the workflow, declare real dependencies and claimed files as they become known, and record a reason for every phase move.
 - **Attention:** cite `?A3`; raise it only for direct human intervention, then resolve it when the blocker clears.
-- **Notifications:** delivery is not durable state; never turn completion/failure into Attention or double-notify a session transition.
+- **Notifications: do NOT send them yourself.** Claude Code delivers push notifications natively now, so firing your own is redundant and double-notifies the human. Do not call `PushNotification`, do not shell out to `osascript -e 'display notification …'` / `ntfy` / `terminal-notifier`, and do not add notify hooks for ordinary turn events. Just present the ask plainly in your reply and let the native surface deliver it. Delivery is still not durable state: never turn completion/failure into Attention, and never re-notify a session transition.
 
 ## Pull request workflow
 

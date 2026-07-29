@@ -282,6 +282,38 @@ rec {
     '';
   };
 
+  # Continuous Obsidian Sync for the HQ vault (Linux boxes only; inert on
+  # darwin, where the Obsidian desktop app does this itself). `ob` is
+  # atomi.obsidian_headless, installed via home.packages below.
+  #
+  # The vault was already registered with Obsidian Sync (bidirectional, merge)
+  # but nothing was ever running it, so every edit made ON the box stayed on
+  # the box. This unit is what actually moves them.
+  #
+  # Auth is a long-lived token at ~/.config/obsidian-headless/auth_token,
+  # materialized from sops by load-secrets (.obsidian.auth_token), so a fresh
+  # box syncs without an interactive `ob login`. `ob login` itself has no
+  # service-token option — only email/password/MFA — so the derived token is
+  # what gets stored; safer than a password and unaffected by MFA.
+  xdg.configFile."systemd/user/obsidian-sync-hq.service" = {
+    enable = profile.kernel == "linux";
+    text = ''
+      [Unit]
+      Description=Obsidian Sync (continuous) for the HQ vault
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      ExecStart=%h/.nix-profile/bin/ob sync --path %h/Obsidian/HQ --continuous
+      Restart=always
+      RestartSec=15
+      TimeoutStopSec=30
+
+      [Install]
+      WantedBy=default.target
+    '';
+  };
+
   home.activation.load-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     export SECRETS_FILE="${./secrets.enc.yaml}"
     ${modules.load-secrets}/bin/load-secrets
@@ -309,6 +341,20 @@ rec {
       if [ -d "$XDG_RUNTIME_DIR" ]; then
         systemctl --user daemon-reload || true
         systemctl --user enable --now box-backup.timer || true
+      fi
+    ''
+  );
+
+  # Enable the continuous Obsidian Sync unit. Kept separate from the backup
+  # activation above so a failure in one does not mask the other. `|| true`
+  # because a fresh box has no auth_token yet: the unit will crash-loop until
+  # `ob login` is run once, which is expected and must not fail activation.
+  home.activation.enable-obsidian-sync = lib.hm.dag.entryAfter [ "writeBoundary" ] (
+    lib.optionalString (profile.kernel == "linux") ''
+      export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+      if [ -d "$XDG_RUNTIME_DIR" ]; then
+        systemctl --user daemon-reload || true
+        systemctl --user enable --now obsidian-sync-hq.service || true
       fi
     ''
   );

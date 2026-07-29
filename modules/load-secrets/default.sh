@@ -38,6 +38,26 @@ yq -r '.ssh_keys | to_entries[] | .key' <<<"$yaml" | while read -r key; do
   chmod 0644 "$HOME/.ssh/$key.pub"
 done
 
+# Obsidian Sync headless auth token (`ob`). There is no service-account or API
+# token in `ob login` — only email/password/MFA — so what is persisted here is
+# the long-lived token `ob` derives after an interactive login. That is
+# deliberately safer than storing the password: it is scoped to sync, and it
+# still works on accounts with MFA enabled, which a stored password would not.
+#
+# Written with printf, NOT echo/yq redirection: the token is exactly 32 bytes
+# with no trailing newline, and `ob` rejects it if a newline is appended.
+# Absent key => skip, so a box without Obsidian Sync configured still activates.
+ob_token="$(yq -r '.obsidian.auth_token // ""' <<<"$yaml")"
+if [ -n "$ob_token" ]; then
+  mkdir -p "$HOME/.config/obsidian-headless"
+  (
+    umask 077
+    printf '%s' "$ob_token" >"$HOME/.config/obsidian-headless/auth_token"
+  )
+  chmod 0600 "$HOME/.config/obsidian-headless/auth_token"
+fi
+unset ob_token
+
 # load gpg keys — batch/loopback so secret-key import also works headless:
 # over ssh there is no tty, and gpg-agent's pinentry would otherwise die with
 # "Inappropriate ioctl for device" and fail the whole activation

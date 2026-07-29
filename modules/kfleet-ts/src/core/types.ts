@@ -144,6 +144,23 @@ const healthSchema = z
 // `interval` is jittered by ±`jitter` each cycle so a fleet's probes don't sync up.
 // `relogin` (default ON) first runs a token-free wrapper invocation on any OAuth
 // account whose access token is expired, so the CLI refreshes it before we probe.
+const cliProxyUsageSourceSchema = z
+  .object({
+    /** Base URL of a local CLIProxyAPI instance (without `/v0/management/...`). */
+    url: z.string().url(),
+    /** Management API key, literal or a `$ENV_VAR` reference. */
+    managementKey: z.string().min(1).optional(),
+    /** File containing the management key; supports `~/...` and `$ENV_VAR`. */
+    managementKeyFile: z.string().min(1).optional(),
+    /** Canonical base wrappers, e.g. `claude-loge` / `codex-loge`. */
+    baseAgents: z.array(z.string().regex(/^(claude|codex)-.+$/)).min(1),
+  })
+  .strict()
+  .refine(source => Number(source.managementKey !== undefined) + Number(source.managementKeyFile !== undefined) === 1, {
+    message: 'exactly one of managementKey or managementKeyFile is required',
+  });
+export type CLIProxyUsageSource = z.infer<typeof cliProxyUsageSourceSchema>;
+
 const usageSchema = z
   .object({
     enabled: z.boolean().default(true),
@@ -154,6 +171,9 @@ const usageSchema = z
     atLimitPercent: z.number().min(1).max(100).default(100), // 5h OR weekly ≥ this ⇒ at limit
     relogin: z.boolean().default(true), // pre-probe token-free re-login for expired OAuth accounts
     sync: z.boolean().default(true), // pre-probe heal: clone a valid sibling credential onto dead dirs of the same identity
+    // Local CLIProxyAPI pools expose runtime availability rather than numerical
+    // subscription windows. A failed source is deliberately ignored (unknown).
+    cliProxy: z.array(cliProxyUsageSourceSchema).default([]),
   })
   .default({});
 

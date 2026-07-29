@@ -10,11 +10,14 @@ export const dataDir = process.env.KLOGE_DIR ?? join(homedir(), '.kloge');
 export const authDir = join(dataDir, 'auth');
 export const configFile = join(dataDir, 'config.yaml');
 export const composeFile = join(dataDir, 'compose.yaml');
+export const managementKeyFile = join(dataDir, 'management-key');
 
-// CLIProxyAPI docker images. The maintained fork is deliberately opt-in so an
-// existing render keeps using the upstream image until its operator selects it.
-export const DEFAULT_IMAGE = 'eceasy/cli-proxy-api:latest';
+// CLIProxyAPI docker images. The maintained fork is the configured default so
+// kfleet's model-aware availability probe is active after a normal render. The
+// upstream image remains an explicit rollback/escape hatch via KLOGE_IMAGE.
+export const UPSTREAM_IMAGE = 'eceasy/cli-proxy-api:latest';
 export const PATCHED_IMAGE = 'kloge-cliproxy:patched';
+export const DEFAULT_IMAGE = PATCHED_IMAGE;
 
 export function resolveImage(environment: Record<string, string | undefined> = process.env): string {
   return environment.KLOGE_IMAGE ?? DEFAULT_IMAGE;

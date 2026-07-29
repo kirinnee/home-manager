@@ -39,4 +39,47 @@ describe('loadConfig', () => {
       expect(() => loadConfig(file)).toThrow(/invalid config/);
     });
   });
+
+  test('parses strict CLIProxyAPI availability sources', () => {
+    withTempConfig(
+      [
+        'usage:',
+        '  cliProxy:',
+        '    - url: http://127.0.0.1:8317',
+        '      managementKeyFile: ~/.kloge/management-key',
+        '      baseAgents: [claude-loge, codex-loge]',
+      ].join('\n'),
+      file => {
+        const c = loadConfig(file);
+        expect(c.usage.cliProxy).toEqual([
+          {
+            url: 'http://127.0.0.1:8317',
+            managementKeyFile: '~/.kloge/management-key',
+            baseAgents: ['claude-loge', 'codex-loge'],
+          },
+        ]);
+      },
+    );
+  });
+
+  test('rejects malformed CLIProxyAPI availability sources', () => {
+    withTempConfig(
+      'usage:\n  cliProxy:\n    - url: not-a-url\n      managementKey: key\n      baseAgents: [loge]\n',
+      file => {
+        expect(() => loadConfig(file)).toThrow(/invalid config/);
+      },
+    );
+  });
+
+  test('requires exactly one CLIProxyAPI management credential source', () => {
+    withTempConfig('usage:\n  cliProxy:\n    - url: http://127.0.0.1:8317\n      baseAgents: [claude-loge]\n', file => {
+      expect(() => loadConfig(file)).toThrow(/invalid config/);
+    });
+    withTempConfig(
+      'usage:\n  cliProxy:\n    - url: http://127.0.0.1:8317\n      managementKey: key\n      managementKeyFile: /tmp/key\n      baseAgents: [claude-loge]\n',
+      file => {
+        expect(() => loadConfig(file)).toThrow(/invalid config/);
+      },
+    );
+  });
 });

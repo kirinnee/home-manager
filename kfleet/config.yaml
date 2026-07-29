@@ -1,6 +1,13 @@
 # Account usage/login probing (kfleet usage + the `kfleet serve` background loop).
 usage:
   interval: 300 # seconds between background re-probes (every 5 min, ±jitter)
+  # CLIProxyAPI exposes current pool availability, not a fabricated numerical
+  # subscription window. kloge creates this separate management credential with
+  # mode 0600; there is no shared/default literal management key.
+  cliProxy:
+    - url: http://127.0.0.1:8317
+      managementKeyFile: ~/.kloge/management-key
+      baseAgents: [claude-loge, codex-loge]
 
 profiles:
   claude:
