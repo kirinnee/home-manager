@@ -15,6 +15,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { KIND_SPECS } from './kinds';
 import { jwtExpMs, keychainSuffix, readClaudeCred } from './creds';
+import { seedFirstRunFlags } from './firstrun';
+import { type AgentProbeTarget, prepareAgentEnv, resolveAgentWrapper } from './health';
 import type { Kind, ResolvedAgent } from './types';
 
 const KEYCHAIN_TIMEOUT_MS = 5_000;
@@ -28,6 +30,9 @@ export interface MemberStatus {
   variant: string;
   dir: string;
   state: CredState;
+  /** Resolved wrapper env, used only to distinguish intentional auth/model
+   * variables from contamination inherited from the calling agent session. */
+  env?: Record<string, string>;
   /** epoch ms the access token expires (valid/refreshable only, when known) */
   expiresAt?: number;
 }
@@ -38,6 +43,14 @@ export interface Identity {
   /** true = provider OAuth account (loginable); false = static API key (skipped) */
   oauth: boolean;
   members: MemberStatus[];
+}
+
+export type LivenessProbe = (member: AgentProbeTarget) => Promise<{ up: boolean; error?: string }>;
+
+export interface IdentityProbeResult {
+  identity: Identity;
+  member: MemberStatus;
+  error?: string;
 }
 
 /** Whether this agent authenticates via provider OAuth (vs a static API key). */
@@ -99,7 +112,13 @@ export async function scanIdentities(agents: ResolvedAgent[], now = Date.now()):
     }
     const dir = KIND_SPECS[a.kind].configDir(a.name);
     const status = id.oauth ? await credStatus(a.kind, dir, now) : { state: 'missing' as const };
-    id.members.push({ name: a.name, variant: a.variant ?? 'default', dir, ...status });
+    id.members.push({
+      name: a.name,
+      variant: a.variant ?? 'default',
+      dir,
+      ...(a.env ? { env: a.env } : {}),
+      ...status,
+    });
   }
   return [...byKey.values()];
 }
@@ -110,6 +129,53 @@ export function pickDonor(members: MemberStatus[]): MemberStatus | undefined {
   const rank = (m: MemberStatus): number => (m.state === 'valid' ? 2 : m.state === 'refreshable' ? 1 : 0);
   const best = [...members].sort((a, b) => rank(b) - rank(a) || (b.expiresAt ?? 0) - (a.expiresAt ?? 0))[0];
   return best && best.state !== 'missing' ? best : undefined;
+}
+
+/** The member whose wrapper represents an identity for both probing and login. */
+export function loginMember(identity: Identity): MemberStatus {
+  const member = identity.members.find(m => m.variant === 'default') ?? identity.members[0];
+  if (!member) throw new Error(`identity "${identity.base}": no members`);
+  return member;
+}
+
+/** Probe would-be interactive identities concurrently, preserving input order
+ * in each partition. Probe failures are data: they must lead to login, not crash
+ * the entire fleet command. */
+export async function filterLiveIdentities(
+  identities: Identity[],
+  probe: LivenessProbe,
+  concurrency = 4,
+): Promise<{ live: IdentityProbeResult[]; dead: IdentityProbeResult[] }> {
+  const results: Array<IdentityProbeResult & { up: boolean }> = new Array(identities.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < identities.length) {
+      const index = next++;
+      const identity = identities[index]!;
+      const member = loginMember(identity);
+      try {
+        const result = await probe({
+          name: member.name,
+          kind: identity.kind,
+          ...(member.env ? { env: member.env } : {}),
+        });
+        results[index] = { identity, member, up: result.up, error: result.error };
+      } catch (error) {
+        results[index] = {
+          identity,
+          member,
+          up: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+  }
+  const workerCount = Math.min(identities.length, Math.max(1, Math.floor(concurrency)));
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return {
+    live: results.filter(result => result.up).map(({ up: _up, ...result }) => result),
+    dead: results.filter(result => !result.up).map(({ up: _up, ...result }) => result),
+  };
 }
 
 /** The keychain "acct" attribute of a service item (needed to re-add it). */
@@ -193,28 +259,70 @@ export async function syncIdentity(identity: Identity, donor: MemberStatus): Pro
   return synced;
 }
 
-/** Run one interactive OAuth login for an identity, in its default-variant dir
- *  (falling back to the first member). Hands the terminal to the real CLI:
- *  claude opens its TUI on /login; codex runs its localhost-callback flow.
- *  Resolves once the CLI exits; the caller re-scans and syncs. */
-export async function interactiveLogin(identity: Identity): Promise<MemberStatus> {
-  const member = identity.members.find(m => m.variant === 'default') ?? identity.members[0];
-  if (!member) throw new Error(`identity "${identity.base}": no members`);
+export interface LoginTarget {
+  member: MemberStatus;
+  cmd: string[];
+  via: 'wrapper' | 'raw';
+}
+
+interface LoginTargetDeps {
+  resolveWrapper?: typeof resolveAgentWrapper;
+  which?: (binary: string) => string | null;
+}
+
+interface InteractiveLoginDeps extends LoginTargetDeps {
+  cwd?: string;
+  env?: Readonly<NodeJS.ProcessEnv>;
+  seed?: typeof seedFirstRunFlags;
+  spawn?: (options: {
+    cmd: string[];
+    env: NodeJS.ProcessEnv;
+    stdin: 'inherit';
+    stdout: 'inherit';
+    stderr: 'inherit';
+  }) => { exited: Promise<number> };
+}
+
+/** Resolve the generated wrapper used by normal sessions, with a raw CLI
+ * fallback for fresh machines where `kfleet apply` has not run yet. */
+export function resolveLoginTarget(identity: Identity, deps: LoginTargetDeps = {}): LoginTarget {
+  const member = loginMember(identity);
   const spec = KIND_SPECS[identity.kind];
-  const bin = Bun.which(spec.bin);
+  const wrapper = (deps.resolveWrapper ?? resolveAgentWrapper)({ name: member.name, kind: identity.kind }).resolved;
+  if (wrapper) {
+    return {
+      member,
+      cmd: identity.kind === 'claude' ? [wrapper, '/login'] : [wrapper, 'login'],
+      via: 'wrapper',
+    };
+  }
+
+  const bin = (deps.which ?? (binary => Bun.which(binary)))(spec.bin);
   if (!bin) {
     throw new Error(
       `the "${spec.bin}" CLI is not installed on this machine — install it (or log this account in on a machine that has it and re-run \`kfleet login\` to sync)`,
     );
   }
-  const cmd = identity.kind === 'claude' ? [bin, '/login'] : [bin, 'login'];
-  const proc = Bun.spawn({
-    cmd,
-    env: { ...process.env, ...spec.wrapperEnv(member.name, member.dir) },
+  return { member, cmd: identity.kind === 'claude' ? [bin, '/login'] : [bin, 'login'], via: 'raw' };
+}
+
+/** Run one interactive OAuth login for an identity. The generated wrapper is
+ * preferred so login gets the same env, flags, and prompt suppression as normal
+ * sessions. The TypeScript seeder makes the raw fallback safe on a fresh box. */
+export async function interactiveLogin(identity: Identity, deps: InteractiveLoginDeps = {}): Promise<MemberStatus> {
+  const target = resolveLoginTarget(identity, deps);
+  const spec = KIND_SPECS[identity.kind];
+  const sourceEnv = deps.env ?? process.env;
+  const baseEnv = prepareAgentEnv(target.member.env, sourceEnv);
+  (deps.seed ?? seedFirstRunFlags)(identity.kind, target.member.dir, deps.cwd ?? process.cwd(), baseEnv);
+  const spawn = deps.spawn ?? (options => Bun.spawn(options));
+  const proc = spawn({
+    cmd: target.cmd,
+    env: { ...baseEnv, ...spec.wrapperEnv(target.member.name, target.member.dir) },
     stdin: 'inherit',
     stdout: 'inherit',
     stderr: 'inherit',
   });
   await proc.exited;
-  return member;
+  return target.member;
 }
