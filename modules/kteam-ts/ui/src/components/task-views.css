@@ -1,0 +1,83 @@
+/* Task-surface tone plumbing (#B43). Status is the one fact a task board
+   exists to show, so it is the surface's colour spine: every row, lane header,
+   filter chip and detail summary re-encodes its EXISTING status tone as
+   colour. This adds no facts (round-2 removals stay removed) — it recolours
+   the facts already on screen.
+
+   One attribute (`data-tone`) resolves the three per-status custom properties;
+   everything downstream consumes those. Tones are the contrast-checked theme
+   tokens the badges already use (`--ok/--warn/--err/--pend/--accent` + their
+   `-bg`/`-border`), so all ten themes — High Contrast and Neo included —
+   inherit the treatment with no theme-specific rules here. */
+
+.kt-task-tone {
+  --task-tone: var(--pend);
+  --task-tone-bg: var(--pend-bg);
+  --task-tone-border: var(--pend-border);
+}
+
+.kt-task-tone[data-tone='ok'] {
+  --task-tone: var(--ok);
+  --task-tone-bg: var(--ok-bg);
+  --task-tone-border: var(--ok-border);
+}
+
+.kt-task-tone[data-tone='warn'] {
+  --task-tone: var(--warn);
+  --task-tone-bg: var(--warn-bg);
+  --task-tone-border: var(--warn-border);
+}
+
+.kt-task-tone[data-tone='err'] {
+  --task-tone: var(--err);
+  --task-tone-bg: var(--err-bg);
+  --task-tone-border: var(--err-border);
+}
+
+.kt-task-tone[data-tone='accent'] {
+  --task-tone: var(--accent);
+  --task-tone-bg: var(--accent-soft);
+  /* NOT --accent-border: 1.2-2.9:1 on surface in 6 of 10 themes (contract
+     §8.2, decorative tint only). The soft wash keeps the mixed edge. */
+  --task-tone-border: color-mix(in srgb, var(--accent) 38%, var(--surface));
+}
+
+/* The status rail — the row's left edge carries its state. Inset shadow, not
+   border, so row geometry (and the 44px targets) never shifts and the list's
+   dividers stay flush. Echoes the `--rail-active` family signature. */
+.kt-task-rail {
+  box-shadow: inset 3px 0 0 var(--task-tone);
+}
+
+/* Kanban lane identity: a filled dot beside the lane label. Round on purpose —
+   `--radius-dot` is never themed (shape is a non-colour status signal). */
+.kt-task-tone-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-dot);
+  border: 1px solid var(--task-tone-border);
+  background: var(--task-tone);
+}
+
+.kt-task-tone-ink {
+  color: var(--task-tone);
+}
+
+/* Selected status chips light in THEIR status colour (the kt-badge pattern:
+   tone ink + tone wash + ink-grade edge), so an active filter reads as "these
+   colours are showing" rather than a generic accent press. */
+.kt-task-chip-active {
+  border-color: var(--task-tone);
+  background: var(--task-tone-bg);
+  color: var(--task-tone);
+}
+
+/* Detail quick summary: the one tinted panel in detail follows the task's
+   state tone instead of a fixed accent, so blocked reads urgent and done
+   reads settled before a word is parsed. */
+.kt-task-summary {
+  border: 1px solid var(--task-tone-border);
+  border-radius: var(--radius-control);
+  background: var(--task-tone-bg);
+}

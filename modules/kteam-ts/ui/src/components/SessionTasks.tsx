@@ -97,7 +97,11 @@ export function SessionTaskList({
   const visibleTasks = sortTasksForList(tasks);
   const context = taskRowContext(visibleTasks);
   return (
-    <div data-task-view="list" className="divide-y divide-border-soft rounded-md border border-border-soft bg-surface">
+    // `.kt-panel`, not a bespoke bordered box: the list inherits each family's
+    // panel silhouette (Mission glow, Neo hard offset, Ember seams, Contrast
+    // plain border) exactly like the sessions list does. Clipping is safe here
+    // — rows host no popovers, and row focus rings sit inside the padding.
+    <div data-task-view="list" className="kt-panel overflow-hidden divide-y divide-border-soft">
       {visibleTasks.map(task => (
         <TaskRow
           key={task.id}
@@ -134,18 +138,27 @@ export function SessionTaskKanban({
     >
       {groupTasksByBoardLane(tasks).map(column => {
         const context = taskRowContext(column.tasks);
+        const lane = TASK_BOARD_LANE_META[column.lane];
         return (
+          // One `.kt-panel` per lane (gray-box-inside-gray-box nesting made the
+          // board read flat) with the lane's identity in its header: tone dot +
+          // tone count. The rows below repeat the same tone on their rails, so
+          // a column is a colour block, not a caption.
           <section
             key={column.lane}
             data-task-lane={column.lane}
-            aria-label={`${TASK_BOARD_LANE_META[column.lane].label} column`}
-            className={`${compact ? 'w-full min-w-0' : 'w-64 shrink-0'} rounded-md border border-border-soft bg-surface-2 p-2`}
+            data-tone={lane.tone}
+            aria-label={`${lane.label} column`}
+            className={`${compact ? 'w-full min-w-0' : 'w-64 shrink-0'} kt-task-tone kt-panel overflow-hidden`}
           >
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <h3 className="kt-label m-0">{TASK_BOARD_LANE_META[column.lane].label}</h3>
-              <span className="text-xs text-muted">{column.tasks.length}</span>
+            <div className="kt-panel__header justify-between">
+              <span className="flex min-w-0 items-center gap-sm">
+                <span className="kt-task-tone-dot" aria-hidden="true" />
+                <h3 className="kt-label m-0">{lane.label}</h3>
+              </span>
+              <span className="kt-task-tone-ink text-xs font-semibold">{column.tasks.length}</span>
             </div>
-            <div className="divide-y divide-border-soft rounded-md border border-border-soft bg-surface">
+            <div className="divide-y divide-border-soft">
               {column.tasks.map(task => (
                 <TaskRow
                   key={task.id}
@@ -257,6 +270,37 @@ export function TaskProjectionView({
   );
 }
 
+/** Serialize an async loader: one run in flight, triggers during that run
+ *  coalesce into exactly ONE follow-up, and every completed run's result is
+ *  applied. The previous generation-counter discipline DISCARDED superseded
+ *  responses instead — on a busy fleet, `tasks.updated` events arrive faster
+ *  than one slow `/v1/tasks` round trip, so every response was superseded and
+ *  the surface sat on "Loading tasks…" forever. Discarding is only required
+ *  when responses could interleave; serializing removes that case, and the
+ *  fleet list is session-independent so a completed response is never stale
+ *  data for the wrong surface. */
+export function coalesceLoads(run: () => Promise<void>): () => Promise<void> {
+  let inFlight = false;
+  let queued = false;
+  const invoke = async (): Promise<void> => {
+    if (inFlight) {
+      queued = true;
+      return;
+    }
+    inFlight = true;
+    try {
+      await run();
+    } finally {
+      inFlight = false;
+      if (queued) {
+        queued = false;
+        await invoke();
+      }
+    }
+  };
+  return invoke;
+}
+
 export interface TaskOpenRequest {
   id: string;
   sequence: number;
@@ -314,35 +358,37 @@ export function SessionTasksSurface({
   const [refreshing, setRefreshing] = useState(false);
   const [projection, setProjection] = useState<TaskProjection>('list');
   const [selectedStatuses, setSelectedStatuses] = useState<ReadonlySet<TaskStatus> | null>(null);
-  const seq = useRef(0);
   const detailSeq = useRef(0);
   const detailRequest = useRef<TaskDetailRequestToken | null>(null);
   const surfaceSessionId = useRef(sessionId);
   surfaceSessionId.current = sessionId;
   // ONE fleet fetch. List/Kanban are derived by session below; the DAG reads the
-  // whole array so its dependency closure can cross sessions.
-  const load = useCallback(async () => {
-    const generation = ++seq.current;
-    setRefreshing(true);
-    try {
-      const parsed = parseTaskListResponse(await api.listTasks());
-      if (seq.current !== generation) return;
-      setTasks(parsed.tasks);
-      setParseErrors(parsed.parseErrors);
-      setState('ready');
-      setError(null);
-    } catch (e) {
-      if (seq.current !== generation) return;
-      if (isUnknownRoute(e)) {
-        setState('absent');
-        return;
-      }
-      setError(e instanceof ApiError ? e.message : String(e));
-      setState(current => (current === 'ready' ? 'ready' : 'error'));
-    } finally {
-      if (seq.current === generation) setRefreshing(false);
-    }
-  }, []);
+  // whole array so its dependency closure can cross sessions. Loads are
+  // coalesced, never discarded — see coalesceLoads for why discarding starved
+  // this surface on a busy fleet.
+  const load = useMemo(
+    () =>
+      coalesceLoads(async () => {
+        setRefreshing(true);
+        try {
+          const parsed = parseTaskListResponse(await api.listTasks());
+          setTasks(parsed.tasks);
+          setParseErrors(parsed.parseErrors);
+          setState('ready');
+          setError(null);
+        } catch (e) {
+          if (isUnknownRoute(e)) {
+            setState('absent');
+            return;
+          }
+          setError(e instanceof ApiError ? e.message : String(e));
+          setState(current => (current === 'ready' ? 'ready' : 'error'));
+        } finally {
+          setRefreshing(false);
+        }
+      }),
+    [],
+  );
   // The store's one fleet socket supplies live-only aggregate events. Subscribe
   // before the initial fetch effect so a first task created in any previously
   // taskless session cannot fall into a load→subscribe gap.

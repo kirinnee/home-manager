@@ -2,6 +2,7 @@ import type { TaskStatus } from '../lib/tasks';
 import { TASK_STATUS_META } from '../lib/tasks';
 import { orderedTaskStatuses } from '../lib/task-views';
 import { cn } from '../lib/utils';
+import './task-views.css';
 
 export function TaskStatusFilter({
   counts,
@@ -38,23 +39,29 @@ export function TaskStatusFilter({
       {orderedTaskStatuses(counts, selected).map(status => {
         const active = selected?.has(status) ?? false;
         const count = counts.get(status) ?? 0;
-        const label = TASK_STATUS_META[status].label;
+        const { label, tone } = TASK_STATUS_META[status];
         return (
+          // Each chip wears its status tone: a dot at rest (previewing the rail
+          // colour the rows use), the full tone treatment when selected — so an
+          // active filter reads as "these colours are showing", not a generic
+          // accent press.
           <button
             key={status}
             type="button"
+            data-tone={tone}
             aria-pressed={active}
             aria-label={`${label}, ${count} ${count === 1 ? 'task' : 'tasks'}`}
             title={active ? `Remove ${label} from the filter` : `Show ${label} tasks`}
             onClick={() => onSelect(status)}
             className={cn(
-              'inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center gap-xs rounded-control border px-2 text-2xs font-semibold',
+              'kt-task-tone inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center gap-xs rounded-control border px-2 text-2xs font-semibold',
               active
-                ? 'border-accent bg-accent-soft text-accent'
+                ? 'kt-task-chip-active'
                 : 'border-border-soft bg-surface text-muted hover:border-accent-border hover:text-fg',
             )}
           >
-            {label} <span className="mono text-faint">{count}</span>
+            <span className="kt-task-tone-dot" aria-hidden="true" />
+            {label} <span className={cn('mono', active ? 'kt-task-tone-ink' : 'text-faint')}>{count}</span>
           </button>
         );
       })}

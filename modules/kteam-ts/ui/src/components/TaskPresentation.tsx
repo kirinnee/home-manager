@@ -34,6 +34,7 @@ import {
 } from '../lib/tasks';
 import { fmtAbsolute, fmtRelative } from '../lib/utils';
 import { TaskAssigneeLink } from './TaskAssigneeLink';
+import './task-views.css';
 
 /** The one session-navigation affordance every task surface links through, so a
  *  cross-session node opens its owning session the same way the sidebar does. */
@@ -121,7 +122,14 @@ export function TaskRow({
   const phaseNote = !task.blocked && task.phase !== 'dropped' ? task.statusReason : null;
   const pr = task.links.prs.map(parseGithubPr).find(Boolean);
   return (
-    <div data-task-id={task.id} className="group min-w-0 px-3 py-2 hover:bg-surface-2">
+    // The rail re-encodes boardState as colour (task-views.css). It is the
+    // row's one always-on state signal, so a state stays scannable even where
+    // the group context suppressed the redundant badge.
+    <div
+      data-task-id={task.id}
+      data-tone={boardState.tone}
+      className="kt-task-tone kt-task-rail group min-w-0 px-3 py-2 hover:bg-surface-2"
+    >
       <button
         type="button"
         onClick={() => onOpen(task.id)}
@@ -347,7 +355,9 @@ function TaskQuickSummary({ task }: { task: TaskSummary }) {
   const phaseNote = !task.blocked && task.phase !== 'dropped' ? task.statusReason : null;
   const headingId = `task-quick-summary-${task.id}`;
   return (
-    <section aria-labelledby={headingId} className="rounded-control border border-accent-border bg-accent-soft p-3">
+    // Tinted by the task's state tone (not a fixed accent): blocked reads
+    // urgent, done reads settled, before a word is parsed.
+    <section aria-labelledby={headingId} data-tone={state.tone} className="kt-task-tone kt-task-summary p-3">
       <Label id={headingId}>Quick summary</Label>
       <div className="mt-2 flex flex-col gap-1.5 text-ui leading-relaxed text-fg">
         <p>

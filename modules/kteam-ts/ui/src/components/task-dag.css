@@ -101,7 +101,14 @@
 .kt-task-dag-node-box {
   fill: var(--task-node-fill);
   stroke: var(--task-node-color);
-  stroke-width: 1.5;
+  stroke-width: 2;
+}
+
+/* Status rail inside the node — the SVG twin of `.kt-task-rail` on list and
+   kanban rows, so all three projections speak one edge language. */
+.kt-task-dag-node-rail {
+  fill: var(--task-node-color);
+  pointer-events: none;
 }
 
 .kt-task-dag-node[data-task-filter='context'] .kt-task-dag-node-box,
