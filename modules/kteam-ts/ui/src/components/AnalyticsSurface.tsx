@@ -73,11 +73,11 @@ export function sessionAnalyticsStarterQueries(sessionId: string): AnalyticsStar
   ];
 }
 
-/** Keep the shared transport file out of this feature's ownership collision.
- * The same parser used by the API server replaces any typed id matcher here,
- * before the existing global read transport is called. */
+/** Defense in depth: canonicalize the visible query here, then send the exact
+ * session separately so the API server replaces the matcher again at its own
+ * boundary. The global page omits that parameter and remains fleet-wide. */
 export function querySessionAnalytics(sessionId: string, query?: string): Promise<AnalyticsResponse> {
-  return api.analytics(scopeAnalyticsQuery(query, sessionId));
+  return api.analytics(scopeAnalyticsQuery(query, sessionId), sessionId);
 }
 
 function rawEquivalentCost(row: AnalyticsRawSession): string {

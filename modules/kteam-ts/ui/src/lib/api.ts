@@ -241,8 +241,13 @@ export const api = {
   wardenReport: (path: string) => request<string>(`/v1/warden/report?path=${encodeURIComponent(path)}`),
   search: (q: string, limit = 30) => request<SearchResponse>(`/v1/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   usage: () => request<UsageFeedView>('/v1/usage'),
-  analytics: (query?: string) =>
-    request<AnalyticsResponse>(query === undefined ? '/v1/analytics' : `/v1/analytics?q=${encodeURIComponent(query)}`),
+  analytics: (query?: string, sessionId?: string) => {
+    const parameters = [
+      query === undefined ? undefined : `q=${encodeURIComponent(query)}`,
+      sessionId === undefined ? undefined : `session=${encodeURIComponent(sessionId)}`,
+    ].filter((parameter): parameter is string => parameter !== undefined);
+    return request<AnalyticsResponse>(`/v1/analytics${parameters.length ? `?${parameters.join('&')}` : ''}`);
+  },
   wrappers: () => request<WrapperInfo[]>('/v1/wrappers'),
   projects: () => request<ProjectInfo[]>('/v1/projects'),
   createSession: (payload: StartSessionPayload) =>

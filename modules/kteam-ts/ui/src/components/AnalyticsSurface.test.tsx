@@ -1,12 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { AnalyticsAggregateResponse, AnalyticsRawResponse } from '../../../src/analytics-types';
-import { ApiError } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import {
   AnalyticsResponseView,
   AnalyticsSurface,
   analyticsErrorMessage,
   analyticsIdQuery,
+  querySessionAnalytics,
   sessionAnalyticsDefaultQuery,
   sessionAnalyticsStarterQueries,
 } from './AnalyticsSurface';
@@ -35,6 +36,21 @@ describe('session analytics query surface', () => {
       'count',
     ]);
     expect(sessionAnalyticsStarterQueries('ms59')[0]?.hint).toContain('equivalent API cost');
+  });
+
+  test('sends the exact session as a separate server-side boundary', async () => {
+    const original = api.analytics;
+    const calls: Array<[string | undefined, string | undefined]> = [];
+    api.analytics = ((query?: string, sessionId?: string) => {
+      calls.push([query, sessionId]);
+      return Promise.resolve({} as AnalyticsRawResponse);
+    }) as typeof api.analytics;
+    try {
+      await querySessionAnalytics('session-*', 'sum {id=someone-else}');
+    } finally {
+      api.analytics = original;
+    }
+    expect(calls).toEqual([['sum {id==session-*}', 'session-*']]);
   });
 
   test('renders one query-driven section, with no independent summary/tree/comparison panels', () => {
