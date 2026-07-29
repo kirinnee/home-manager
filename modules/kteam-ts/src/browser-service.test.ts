@@ -1,6 +1,16 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { createBrowserProfile } from './browser-profile';
 import { createPaths } from './paths';
-import { BrowserService, type BrowserServiceClock, type ManagedBrowserRuntime } from './browser-service';
+import {
+  BrowserService,
+  type BrowserRuntimeLaunchOptions,
+  type BrowserServiceClock,
+  type BrowserServiceOptions,
+  type ManagedBrowserRuntime,
+} from './browser-service';
 import {
   BrowserError,
   type BrowserInputEvent,
@@ -297,7 +307,11 @@ class FakeRuntime implements ManagedBrowserRuntime {
   }
 }
 
-function harness(maximumInstances = 3, idleTimeoutMs = 1_000) {
+function harness(
+  maximumInstances = 3,
+  idleTimeoutMs = 1_000,
+  options: Pick<BrowserServiceOptions, 'loginWindowOpen'> = {},
+) {
   const clock = new FakeClock();
   const runtimes = new Map<string, FakeRuntime>();
   const roots = new Map<string, string>();
@@ -312,6 +326,7 @@ function harness(maximumInstances = 3, idleTimeoutMs = 1_000) {
     {
       maximumInstances,
       idleTimeoutMs,
+      ...options,
       clock,
       runtimeFactory: async (id, root) => {
         const runtime = new FakeRuntime();
@@ -325,6 +340,143 @@ function harness(maximumInstances = 3, idleTimeoutMs = 1_000) {
 }
 
 describe('browser lifecycle', () => {
+  test('drains every runtime and rejects all CDP control while the human login window is open', async () => {
+    let loginOpen = false;
+    const { service, runtimes } = harness(3, 1_000, { loginWindowOpen: () => loginOpen });
+    const terminals: Array<{ code: number; reason: string }> = [];
+    await service.start('s1', 'agent');
+    await service.attachViewer(
+      's1',
+      () => undefined,
+      terminal => terminals.push(terminal),
+    );
+
+    loginOpen = true;
+    await service.closeForLoginWindow();
+    expect(runtimes.get('s1')?.closed).toBe(1);
+    expect(terminals).toEqual([{ code: 1001, reason: 'human browser login window opened' }]);
+
+    const expected = { code: 'login_window_open', status: 409 };
+    await expect(service.start('s1', 'agent')).rejects.toMatchObject(expected);
+    await expect(service.act('s1', { action: 'stop' }, 'agent')).rejects.toMatchObject(expected);
+    await expect(service.attachViewer('s1', () => undefined)).rejects.toMatchObject(expected);
+    await expect(
+      service.dispatchHumanInput('s1', { kind: 'key', type: 'keyDown', key: 'a', code: 'KeyA' }),
+    ).rejects.toMatchObject(expected);
+
+    loginOpen = false;
+    expect(await service.start('s1', 'agent')).toMatchObject({ state: 'running' });
+    await service.close();
+  });
+
+  test('releases and reports profile_busy when guarded lock cleanup races a foreign Chrome', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'kteam-browser-profile-race-'));
+    const paths = createPaths(home);
+    const profileService = createBrowserProfile(paths);
+    let releases = 0;
+    profileService.acquire = async ({ sessionId }) => ({
+      profile: profileService.profile,
+      sessionId,
+      daemonPid: process.pid,
+      acquiredAt: new Date(0).toISOString(),
+      recoveredDeadOwner: false,
+      updateChromePid: async () => undefined,
+      cleanupStaleChromeLocks: async () => {
+        throw new BrowserError('profile_busy', 'Chrome won the profile race', 409);
+      },
+      markPrimed: async () => undefined,
+      release: async () => {
+        releases += 1;
+        return true;
+      },
+    });
+    const launches: BrowserRuntimeLaunchOptions[] = [];
+    const service = new BrowserService(
+      paths,
+      { resolve: async ref => (ref === 's1' ? ref : undefined) },
+      {
+        profileService,
+        displayService: {
+          start: async () => ({ display: ':119', close: async () => undefined }),
+          close: async () => undefined,
+        },
+        chromeInstallation: async () => ({ executable: '/usr/bin/google-chrome', version: 'Chrome 150.0.0.0' }),
+        runtimeFactory: async (_id, _root, _viewport, options = {}) => {
+          launches.push(options);
+          return new FakeRuntime();
+        },
+      },
+    );
+    try {
+      await expect(service.start('s1', 'agent')).rejects.toMatchObject({
+        code: 'profile_busy',
+        status: 409,
+      });
+      expect(releases).toBe(1);
+      expect(launches).toHaveLength(0);
+    } finally {
+      await service.close();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test('leases one daemon profile and labels concurrent per-session fallback honestly', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'kteam-browser-shared-profile-'));
+    const paths = createPaths(home);
+    const launches = new Map<string, BrowserRuntimeLaunchOptions>();
+    let displayCloses = 0;
+    const service = new BrowserService(
+      paths,
+      { resolve: async ref => (['s1', 's2', 's3'].includes(ref) ? ref : undefined) },
+      {
+        maximumInstances: 3,
+        profileService: createBrowserProfile(paths),
+        displayService: {
+          start: async () => ({ display: ':118', close: async () => undefined }),
+          close: async () => {
+            displayCloses += 1;
+          },
+        },
+        chromeInstallation: async () => ({
+          executable: '/usr/bin/google-chrome',
+          version: 'Google Chrome 150.0.7871.186',
+        }),
+        runtimeFactory: async (id, _root, _viewport, options = {}) => {
+          launches.set(id, options);
+          await options.onChromeSpawn?.(40_000 + launches.size);
+          return new FakeRuntime();
+        },
+      },
+    );
+    try {
+      const shared = await service.start('s1', 'human');
+      expect(shared).toMatchObject({ profileKind: 'shared', profileSignedIn: false });
+      expect(launches.get('s1')).toMatchObject({
+        display: ':118',
+        profile: path.join(paths.daemon, 'browser', 'profile'),
+        chromeExecutable: '/usr/bin/google-chrome',
+      });
+
+      expect(await service.status('s2')).toMatchObject({
+        profileKind: 'session',
+        profileSignedIn: false,
+      });
+
+      const fallback = await service.start('s2', 'agent');
+      expect(fallback).toMatchObject({ profileKind: 'session', profileSignedIn: false });
+      expect(launches.get('s2')?.profile).toBe(path.join(home, 's2', 'browser', 'profile'));
+
+      await service.stop('s1', 'human');
+      const reused = await service.start('s3', 'agent');
+      expect(reused).toMatchObject({ profileKind: 'shared', profileSignedIn: false });
+      expect(launches.get('s3')?.profile).toBe(path.join(paths.daemon, 'browser', 'profile'));
+    } finally {
+      await service.close();
+      expect(displayCloses).toBe(1);
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test('one runtime per canonical session, persistent root, and a hard fleet cap', async () => {
     const { service, runtimes, roots } = harness(2);
     const first = await service.start('one', 'agent');

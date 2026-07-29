@@ -5,7 +5,6 @@ import {
   createFilesProvider,
   createReferencesProvider,
   createSkillsProvider,
-  isNamedReferenceQuery,
   loadSkillsCatalog,
   splitFileReferenceQuery,
   splitFileQuery,
@@ -37,12 +36,25 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-function match(trigger: ComposerTrigger, query: string): ComposerTriggerMatch {
-  return { trigger, query, start: 0, end: query.length + 1, caret: query.length + 1 };
+function match(trigger: ComposerTrigger, query: string, referenceTier?: number): ComposerTriggerMatch {
+  const triggerText = trigger === '@' ? '@'.repeat(referenceTier ?? 1) : trigger;
+  return {
+    trigger,
+    triggerText,
+    ...(trigger === '@' ? { referenceTier: referenceTier ?? 1 } : {}),
+    query,
+    start: 0,
+    end: query.length + triggerText.length,
+    caret: query.length + triggerText.length,
+  };
 }
 
 function context(trigger: ComposerTrigger, query: string, signal = new AbortController().signal) {
   return { query, match: match(trigger, query), signal };
+}
+
+function referenceContext(tier: number, query: string, signal = new AbortController().signal) {
+  return { query, match: match('@', query, tier), signal };
 }
 
 function agentSession({
@@ -232,12 +244,12 @@ describe('/ skills provider', () => {
   });
 });
 
-describe('store-backed reference providers', () => {
-  test('@ rows keep canonical task references, titles, and live statuses without fetching named data', () => {
+describe('store-backed repetition tiers', () => {
+  test('@@@ rows keep canonical task references, titles, and live statuses without fetching', () => {
     let tasks: ComposerTaskSummary[] = [{ id: 'F38', title: 'Composer autocomplete', status: 'in_progress' }];
     const provider = createReferencesProvider({ sessionId: 'one', getTasks: () => tasks });
 
-    const first = provider.initialCandidates!(context('@', 'F'))!;
+    const first = provider.initialCandidates!(referenceContext(3, 'F'))!;
     expect(first.candidates).toEqual([
       expect.objectContaining({
         kind: 'task',
@@ -250,11 +262,11 @@ describe('store-backed reference providers', () => {
     expect(requests).toHaveLength(0);
 
     tasks = [{ id: 'B7', title: 'New live snapshot', status: 'blocked' as const }];
-    const updated = provider.initialCandidates!(context('@', 'B'))!;
+    const updated = provider.initialCandidates!(referenceContext(3, 'B'))!;
     expect(updated.candidates[0]).toMatchObject({ label: '#B7', badge: 'Blocked' });
   });
 
-  test('@ rows contain unresolved canonical attention references and identifying subjects', () => {
+  test('@@@@ rows contain canonical attention references and identifying subjects', () => {
     const provider = createReferencesProvider({
       sessionId: 'one',
       getAttentionItems: () => [
@@ -262,7 +274,7 @@ describe('store-backed reference providers', () => {
         { id: 'A8', subject: 'Approve production access', source: 'permission' },
       ],
     });
-    const result = provider.initialCandidates!(context('@', 'A'))!;
+    const result = provider.initialCandidates!(referenceContext(4, 'A'))!;
     expect(result.candidates).toEqual([
       expect.objectContaining({
         kind: 'attention',
@@ -273,6 +285,35 @@ describe('store-backed reference providers', () => {
       }),
       expect.objectContaining({ label: '?A8', replacement: '?A8' }),
     ]);
+    expect(requests).toHaveLength(0);
+  });
+
+  test('@@@@@ rows contain only daemon-proven canonical pin references', () => {
+    const provider = createReferencesProvider({
+      sessionId: 'one',
+      getPins: () => [
+        { id: 'pin-1', kind: 'note', text: 'Ship after QA', by: 'human' },
+        { id: 'pin-2', kind: 'message', preview: 'Agent result', by: 'agent', createdByName: 'ottis' },
+        { id: 'echo', kind: 'note', text: 'Optimistic echo' },
+      ],
+    });
+    const result = provider.initialCandidates!(referenceContext(5, 'ship'))!;
+    expect(result.candidates).toEqual([
+      expect.objectContaining({
+        kind: 'pin',
+        label: 'pin: Ship after QA',
+        detail: 'Note pin',
+        badge: 'note',
+        replacement: '[pin: Ship after QA](#kteam-pin-reference?session=one&id=pin-1)',
+      }),
+      expect.objectContaining({
+        label: 'pin: Agent result',
+        detail: 'Message pin · Pinned by ottis',
+        replacement: '[pin: Agent result](#kteam-pin-reference?session=one&id=pin-2)',
+      }),
+    ]);
+    expect(result.contextLabel).toBe('@@@@@ session pins');
+    expect(result.notice).toBeUndefined();
     expect(requests).toHaveLength(0);
   });
 
@@ -290,7 +331,7 @@ describe('store-backed reference providers', () => {
     });
     const before = provider.snapshotKey;
 
-    const result = provider.candidates(context('@', 'F'));
+    const result = provider.candidates(referenceContext(3, 'F'));
     tasks = [{ id: 'F12', title: 'Loaded by the existing warmup', status: 'todo' }];
     release();
 
@@ -298,7 +339,7 @@ describe('store-backed reference providers', () => {
       candidates: [expect.objectContaining({ label: '#F12', detail: 'Loaded by the existing warmup' })],
     });
     expect(provider.snapshotKey).not.toBe(before);
-    expect(requests).toEqual(['/v1/sessions/one/fs']);
+    expect(requests).toEqual([]);
   });
 
   test('the composer factory exposes one action trigger and one reference trigger', () => {
@@ -307,25 +348,21 @@ describe('store-backed reference providers', () => {
       '@',
     ]);
   });
+
+  test('publishes the five-tier teaching legend on every reference query', () => {
+    const provider = createReferencesProvider({ sessionId: 'one' });
+    expect(provider.legend).toEqual([
+      { tier: 1, trigger: '@', label: 'Files' },
+      { tier: 2, trigger: '@@', label: 'Agents' },
+      { tier: 3, trigger: '@@@', label: 'Tasks' },
+      { tier: 4, trigger: '@@@@', label: 'Attention' },
+      { tier: 5, trigger: '@@@@@', label: 'Pins' },
+    ]);
+  });
 });
 
-describe('@ unified references provider', () => {
-  test.each([
-    ['', true],
-    ['ott', true],
-    ['F12', true],
-    ['#F12', true],
-    ['?A3', true],
-    ['src/', false],
-    ['src/app.ts', false],
-    ['app.ts:12', false],
-    ['someone@example.com', false],
-  ] as const)('classifies %p as named=%p', (query, expected) => {
-    expect(isNamedReferenceQuery(query)).toBe(expected);
-  });
-
-  test('groups live agents, tasks, and attention above Files and inserts a stable id-backed agent link', async () => {
-    responder = () => Response.json({ entries: [{ name: 'ottis.ts', type: 'file' }] });
+describe('@ repetition-selected references provider', () => {
+  test('@@ narrows only agents and inserts a stable id-backed link', async () => {
     const sessions = [
       agentSession({
         id: 'ms-finished',
@@ -351,8 +388,8 @@ describe('@ unified references provider', () => {
       getAttentionItems: () => [{ id: 'A3', subject: 'Choose delivery semantics', source: 'question' }],
     });
 
-    const initial = provider.initialCandidates?.(context('@', ''));
-    expect(initial?.candidates.map(candidate => candidate.group)).toEqual(['Agents', 'Agents', 'Tasks', 'Attention']);
+    const initial = provider.initialCandidates?.(referenceContext(2, 'ott'));
+    expect(initial?.candidates.map(candidate => candidate.group)).toEqual(['Agents', 'Agents']);
     expect(initial?.candidates[0]).toMatchObject({
       id: 'agent:ms-live',
       label: 'ottis',
@@ -364,19 +401,12 @@ describe('@ unified references provider', () => {
     expect(initial?.candidates[1]?.id).toBe('agent:ms-finished');
     expect(requests).toHaveLength(0);
 
-    const result = await provider.candidates(context('@', 'ott'));
-    expect(result.candidates.map(candidate => candidate.group)).toEqual([
-      'Agents',
-      'Agents',
-      'Tasks',
-      'Attention',
-      'Files',
-    ]);
-    expect(result.candidates.at(-1)).toMatchObject({ label: 'ottis.ts', replacement: '@ottis.ts' });
-    expect(requests).toEqual(['/v1/sessions/one/fs']);
+    const result = await provider.candidates(referenceContext(2, 'ott'));
+    expect(result.candidates.map(candidate => candidate.group)).toEqual(['Agents', 'Agents']);
+    expect(requests).toEqual([]);
   });
 
-  test('a path-shaped @src/ query is Files-only even when named rows would match src', async () => {
+  test('@ is Files-only even when another reference family would match the same query', async () => {
     responder = url => {
       expect(url).toBe('/v1/sessions/one/fs?path=src');
       return Response.json({ path: 'src', entries: [{ name: 'core.ts', type: 'file' }] });
@@ -388,14 +418,14 @@ describe('@ unified references provider', () => {
       getAttentionItems: () => [{ id: 'A3', subject: 'src approval', source: 'permission' }],
     });
 
-    expect(provider.initialCandidates?.(context('@', 'src/'))).toBeUndefined();
-    const result = await provider.candidates(context('@', 'src/'));
+    expect(provider.initialCandidates?.(referenceContext(1, 'src/'))).toBeUndefined();
+    const result = await provider.candidates(referenceContext(1, 'src/'));
     expect(result.candidates).toEqual([
       expect.objectContaining({ kind: 'file', group: 'Files', label: 'core.ts', replacement: '@src/core.ts' }),
     ]);
   });
 
-  test('a path-shaped query never waits for or warms unrelated named stores', async () => {
+  test('the Files tier never waits for or warms unrelated stores', async () => {
     responder = () => Response.json({ entries: [{ name: 'core.ts', type: 'file' }] });
     let taskWarmups = 0;
     let attentionWarmups = 0;
@@ -411,77 +441,62 @@ describe('@ unified references provider', () => {
       },
     });
 
-    await expect(provider.candidates(context('@', 'src/'))).resolves.toMatchObject({
+    await expect(provider.candidates(referenceContext(1, 'src/'))).resolves.toMatchObject({
       candidates: [expect.objectContaining({ group: 'Files', replacement: '@src/core.ts' })],
     });
     expect({ taskWarmups, attentionWarmups }).toEqual({ taskWarmups: 0, attentionWarmups: 0 });
   });
 
-  test('bare @ keeps every named group and Files discoverable under the global row cap', async () => {
-    responder = () =>
-      Response.json({
-        entries: Array.from({ length: 10 }, (_, index) => ({ name: `file-${index}.ts`, type: 'file' })),
-      });
+  test('@@@, @@@@, and @@@@@ warm only their own store and never touch Files', async () => {
+    let taskWarmups = 0;
+    let attentionWarmups = 0;
+    let pinWarmups = 0;
     const provider = createReferencesProvider({
       sessionId: 'one',
-      getSessions: () => [agentSession({ id: 'ms-ottis', teammate: 'ottis' })],
-      getTasks: () =>
-        Array.from({ length: 20 }, (_, index) => ({
-          id: `F${index + 1}`,
-          title: `Task ${index + 1}`,
-          status: 'todo' as const,
-        })),
-      getAttentionItems: () =>
-        Array.from({ length: 20 }, (_, index) => ({
-          id: `A${index + 1}`,
-          subject: `Attention ${index + 1}`,
-          source: 'question',
-        })),
+      getTasks: () => [{ id: 'F1', title: 'One', status: 'todo' }],
+      getAttentionItems: () => [{ id: 'A1', subject: 'One', source: 'question' }],
+      getPins: () => [{ id: 'pin-1', kind: 'note', text: 'One', by: 'human' }],
+      waitForTasks: () => {
+        taskWarmups += 1;
+        return Promise.resolve();
+      },
+      waitForAttentionItems: () => {
+        attentionWarmups += 1;
+        return Promise.resolve();
+      },
+      waitForPins: () => {
+        pinWarmups += 1;
+        return Promise.resolve();
+      },
     });
 
-    expect(provider.initialCandidates?.(context('@', ''))?.candidates).toHaveLength(16);
-    const result = await provider.candidates(context('@', ''));
-    const visible = rankComposerCandidates(result.candidates, '');
-    expect([...new Set(visible.map(candidate => candidate.group))]).toEqual(['Agents', 'Tasks', 'Attention', 'Files']);
-    expect(visible.filter(candidate => candidate.group === 'Files')).toHaveLength(4);
-    expect(visible.at(-1)?.group).toBe('Files');
+    await provider.candidates(referenceContext(3, 'F'));
+    expect({ taskWarmups, attentionWarmups, pinWarmups }).toEqual({
+      taskWarmups: 1,
+      attentionWarmups: 0,
+      pinWarmups: 0,
+    });
+    await provider.candidates(referenceContext(4, 'A'));
+    expect({ taskWarmups, attentionWarmups, pinWarmups }).toEqual({
+      taskWarmups: 1,
+      attentionWarmups: 1,
+      pinWarmups: 0,
+    });
+    await provider.candidates(referenceContext(5, 'pin'));
+    expect({ taskWarmups, attentionWarmups, pinWarmups }).toEqual({
+      taskWarmups: 1,
+      attentionWarmups: 1,
+      pinWarmups: 1,
+    });
+    expect(requests).toEqual([]);
   });
 
-  test('keeps named references available when Files fails', async () => {
-    responder = () => Response.json({ error: 'offline' }, { status: 503 });
-    const provider = createReferencesProvider({
-      sessionId: 'one',
-      getSessions: () => [agentSession({ id: 'ms-ottis', teammate: 'ottis' })],
-    });
-    const result = await provider.candidates(context('@', 'ott'));
-    expect(result.candidates).toEqual([expect.objectContaining({ id: 'agent:ms-ottis' })]);
-    expect(result.notice).toContain('Files unavailable');
-  });
-
-  test('a Files failure still keeps every available named group visible on bare @', async () => {
-    responder = () => Response.json({ error: 'offline' }, { status: 503 });
-    const provider = createReferencesProvider({
-      sessionId: 'one',
-      getSessions: () => [agentSession({ id: 'ms-ottis', teammate: 'ottis' })],
-      getTasks: () =>
-        Array.from({ length: 20 }, (_, index) => ({
-          id: `F${index + 1}`,
-          title: `Task ${index + 1}`,
-          status: 'todo' as const,
-        })),
-      getAttentionItems: () =>
-        Array.from({ length: 20 }, (_, index) => ({
-          id: `A${index + 1}`,
-          subject: `Attention ${index + 1}`,
-          source: 'question',
-        })),
-    });
-
-    const result = await provider.candidates(context('@', ''));
-    const visible = rankComposerCandidates(result.candidates, '');
-    expect(visible).toHaveLength(20);
-    expect([...new Set(visible.map(candidate => candidate.group))]).toEqual(['Agents', 'Tasks', 'Attention']);
-    expect(result.notice).toContain('Files unavailable');
+  test('an unsupported sixth tier stays open with an honest teaching notice', async () => {
+    const result = await createReferencesProvider({ sessionId: 'one' }).candidates(referenceContext(6, ''));
+    expect(result.candidates).toEqual([]);
+    expect(result.contextLabel).toContain('has no reference family');
+    expect(result.notice).toContain('one to five @ signs');
+    expect(requests).toEqual([]);
   });
 });
 

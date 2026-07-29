@@ -31,6 +31,17 @@ export const MAX_ATTENTION_SOURCE_REF_LEN = 512;
 export const ATTENTION_SOURCES = ['task', 'question', 'permission', 'agent-raised'] as const;
 export type AttentionSource = (typeof ATTENTION_SOURCES)[number];
 
+/** Stable identity shared by the shipped-reopen producer, its durable
+ * Attention item, and the compact resolution watermark. */
+export const TASK_REOPENED_ATTENTION_SOURCE_REF_PREFIX = 'task-reopened:';
+const TASK_REOPENED_TASK_ID = /^[BFIC][0-9]{1,9}$/u;
+
+export function taskIdFromReopenedAttentionSourceRef(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.startsWith(TASK_REOPENED_ATTENTION_SOURCE_REF_PREFIX)) return null;
+  const id = value.slice(TASK_REOPENED_ATTENTION_SOURCE_REF_PREFIX.length);
+  return TASK_REOPENED_TASK_ID.test(id) ? id : null;
+}
+
 /** Canonical ids stay sigil-free in storage and on the wire. Human-facing
  * references add `?`, so item A3 is written as `?A3` in messages. */
 export type AttentionId = `A${number}`;
@@ -105,6 +116,10 @@ export interface AttentionSnapshot {
    * empty list. Writers refuse to overwrite a file with parse errors. */
   parseErrors: number;
   updatedAt: string;
+  /** Additive, compact acknowledgement for append-only shipped-reopen
+   * activity. Unlike `resolved`, this is not a bounded display audit and may
+   * therefore prevent an explicitly cleared reopen from returning at restart. */
+  reopenResolvedAt?: Readonly<Record<string, string>>;
 }
 
 export type AttentionErrorCode =

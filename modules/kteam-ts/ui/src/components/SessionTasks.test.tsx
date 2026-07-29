@@ -313,10 +313,12 @@ test('the surface defaults to List and retains loading/version-safe controls', (
   expect(html).not.toContain('autofocus');
 });
 
-test('the task detail surface threads code-reference opens without owning Files state', async () => {
+test('the task detail surface threads every session opener without owning another surface', async () => {
   const source = await Bun.file(new URL('./SessionTasks.tsx', import.meta.url)).text();
   expect(source).toContain('onCodeReferenceOpen?:');
   expect(source).toContain('onCodeReferenceOpen={onCodeReferenceOpen}');
+  expect(source).toContain('onAttentionOpen={onAttentionOpen}');
+  expect(source).toContain('onPinOpen={onPinOpen}');
   expect(source).toContain('surfaceCwd={cwd}');
   expect(source).not.toContain('requestedCodeReference');
 });

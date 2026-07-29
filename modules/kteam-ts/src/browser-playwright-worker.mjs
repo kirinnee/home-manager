@@ -1,5 +1,6 @@
 import { createInterface } from 'node:readline';
 import { chromium } from 'playwright-core';
+import { createBrowserFrameGovernor } from './browser-frame-governor.mjs';
 
 const endpoint = process.argv[2];
 if (!endpoint) throw new Error('a CDP endpoint is required');
@@ -12,6 +13,7 @@ const CLICK_SETTLE_MS = 250;
 const CLICK_LOAD_TIMEOUT_MS = 5_000;
 const HISTORY_DOCUMENT_READY_TIMEOUT_MS = 5_000;
 const DOCUMENT_READY_POLL_MS = 50;
+const BROWSER_CLOSE_TIMEOUT_MS = 2_000;
 
 const write = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const safeError = error => {
@@ -29,7 +31,6 @@ let viewport = { width: 1280, height: 800 };
 let screencastConfig;
 let screencastPage;
 let screencastSession;
-let frameWritable = true;
 
 /**
  * The explicit page model. `activePage` is the single target for every verb,
@@ -44,6 +45,30 @@ const pageIds = new WeakMap();
 const pageStates = new WeakMap();
 /** Last observed context ordering, used for deterministic neighbour choice. */
 let knownOrder = [];
+
+const frameGovernor = createBrowserFrameGovernor({
+  writeFrame: frame =>
+    write({
+      type: 'screencast-frame',
+      dataBase64: frame.dataBase64,
+      width: frame.width,
+      height: frame.height,
+      pageId: frame.pageId,
+    }),
+  watchDrain: callback => {
+    process.stdout.once('drain', callback);
+    return () => process.stdout.off('drain', callback);
+  },
+  onAckRejected: session => {
+    if (session !== screencastSession || !screencastConfig) return;
+    // Acks run outside the serial queue. Recovery must not: reissuing the
+    // screencast command shares page/session mutation with normal actions.
+    void enqueue(async () => {
+      if (session !== screencastSession || !screencastConfig) return;
+      await refreshScreencast(true);
+    }).catch(() => undefined);
+  },
+});
 
 function pageId(page) {
   const existing = pageIds.get(page);
@@ -73,6 +98,13 @@ function markReadyUnlessError(page) {
   setPageState(page, 'ready');
 }
 
+function requestScreencastRebind(page) {
+  void enqueue(async () => {
+    if (!screencastConfig || page !== screencastPage || page.isClosed()) return;
+    await refreshScreencast(true);
+  }).catch(() => undefined);
+}
+
 function registerPage(page) {
   const id = pageIds.get(page);
   if (id) return id;
@@ -90,9 +122,18 @@ function registerPage(page) {
       // A request can outlive its frame; a lost coarse signal is acceptable.
     }
   });
-  page.on('domcontentloaded', () => markReadyUnlessError(page));
+  page.on('domcontentloaded', () => {
+    markReadyUnlessError(page);
+    // A real document commit may replace the renderer behind a stable Page.
+    // Same-document hash/pushState navigation does not fire DOMContentLoaded,
+    // so it must not churn the screencast session or reset the frame interval.
+    requestScreencastRebind(page);
+  });
   page.on('load', () => markReadyUnlessError(page));
-  page.on('crash', () => setPageState(page, 'error', 'the page crashed'));
+  page.on('crash', () => {
+    setPageState(page, 'error', 'the page crashed');
+    requestScreencastRebind(page);
+  });
   page.on('requestfailed', request => {
     try {
       if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) return;
@@ -250,27 +291,19 @@ async function stopScreencastSession() {
   const session = screencastSession;
   screencastSession = undefined;
   screencastPage = undefined;
+  frameGovernor.stop();
   if (!session) return;
   await session.send('Page.stopScreencast').catch(() => undefined);
   await session.detach().catch(() => undefined);
 }
 
 function emitFrame(event, session, framePageId) {
-  void session.send('Page.screencastFrameAck', { sessionId: event.sessionId }).catch(() => undefined);
-  if (!frameWritable || session !== screencastSession) return;
+  if (session !== screencastSession) return;
   const width = Math.max(1, Math.round(event.metadata?.deviceWidth ?? viewport.width));
   const height = Math.max(1, Math.round(event.metadata?.deviceHeight ?? viewport.height));
-  frameWritable = write({
-    type: 'screencast-frame',
-    dataBase64: event.data,
-    width,
-    height,
-    pageId: framePageId,
-  });
-  if (!frameWritable)
-    process.stdout.once('drain', () => {
-      frameWritable = true;
-    });
+  frameGovernor.capture(session, { dataBase64: event.data, width, height, pageId: framePageId }, () =>
+    session.send('Page.screencastFrameAck', { sessionId: event.sessionId }),
+  );
 }
 
 async function refreshScreencast(force = false) {
@@ -282,6 +315,7 @@ async function refreshScreencast(force = false) {
   const framePageId = pageId(page);
   screencastPage = page;
   screencastSession = session;
+  frameGovernor.bind(session);
   session.on('Page.screencastFrame', event => emitFrame(event, session, framePageId));
   await session.send('Page.enable');
   await session.send('Emulation.setDeviceMetricsOverride', {
@@ -297,6 +331,21 @@ async function refreshScreencast(force = false) {
     maxHeight: screencastConfig.height,
     everyNthFrame: screencastConfig.everyNthFrame,
   });
+}
+
+async function closeBrowserGracefully() {
+  const connectedBrowser = browser;
+  if (!connectedBrowser) return;
+  let browserSession;
+  const requestClose = (async () => {
+    browserSession = await connectedBrowser.newBrowserCDPSession();
+    await browserSession.send('Browser.close');
+  })();
+  // Browser.close commonly tears down the CDP connection before its response
+  // can arrive. That is success, not a reason to fall back to an abrupt kill.
+  await Promise.race([requestClose.catch(() => undefined), sleep(BROWSER_CLOSE_TIMEOUT_MS)]);
+  if (browserSession) await browserSession.detach().catch(() => undefined);
+  await Promise.race([connectedBrowser.close().catch(() => undefined), sleep(BROWSER_CLOSE_TIMEOUT_MS)]);
 }
 
 async function withPageSession(operation, target) {
@@ -545,7 +594,7 @@ async function run(message) {
     }
     case 'startScreencast':
       viewport = { width: params.width, height: params.height };
-      screencastConfig = { ...viewport, quality: 75, everyNthFrame: 1 };
+      screencastConfig = { ...viewport, quality: 50, everyNthFrame: 1 };
       await refreshScreencast(true);
       return {};
     case 'stopScreencast':
@@ -558,7 +607,7 @@ async function run(message) {
     case 'close':
       screencastConfig = undefined;
       await stopScreencastSession();
-      await browser.close();
+      await closeBrowserGracefully();
       return {};
     default:
       throw new Error(`unknown Playwright worker method: ${message.method}`);
@@ -620,6 +669,6 @@ lines.on('line', line => {
 process.stdin.on('end', () => {
   screencastConfig = undefined;
   void stopScreencastSession()
-    .then(() => browser?.close())
+    .then(() => closeBrowserGracefully())
     .finally(() => process.exit(0));
 });

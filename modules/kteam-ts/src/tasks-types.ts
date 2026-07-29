@@ -74,7 +74,8 @@ export const TASK_STATUSES: readonly TaskStatus[] = [
 
 /** The canonical v2 phase vocabulary. `built` is deliberately separate from
  * `live`: a completion claim can move build work to built, while deployment is
- * always its own explicit transition. */
+ * always its own explicit transition. `done` is the human-verified terminal for
+ * shipped work as well as an accepted investigation outcome. */
 export type TaskPhase = 'todo' | 'research' | 'design' | 'build' | 'built' | 'live' | 'done' | 'dropped';
 
 export const TASK_PHASES: readonly TaskPhase[] = [
@@ -100,11 +101,12 @@ export type TaskWorkflow = 'quick' | 'design-first' | 'research-first' | 'invest
 export const TASK_WORKFLOWS: readonly TaskWorkflow[] = ['quick', 'design-first', 'research-first', 'investigate'];
 
 /** Fixed sub-workflows. `built` is the completion checkpoint between active
- * build work and deployment; the human-facing shorthand remains build → live. */
+ * build work and deployment; `done` after `live` means the human verified the
+ * deployed result. Existing investigation rows keep their research → done path. */
 export const TASK_WORKFLOW_PATHS: Readonly<Record<TaskWorkflow, readonly TaskPhase[]>> = {
-  quick: ['todo', 'build', 'built', 'live'],
-  'design-first': ['todo', 'design', 'build', 'built', 'live'],
-  'research-first': ['todo', 'research', 'design', 'build', 'built', 'live'],
+  quick: ['todo', 'build', 'built', 'live', 'done'],
+  'design-first': ['todo', 'design', 'build', 'built', 'live', 'done'],
+  'research-first': ['todo', 'research', 'design', 'build', 'built', 'live', 'done'],
   investigate: ['todo', 'research', 'done'],
 };
 
@@ -453,12 +455,13 @@ export interface TaskCreateInput {
   actorName?: string | null;
 }
 
-/** The five mutations of design §7 (`status|note|link|assign|order`) plus
- *  `feedback`, which is a note the UI renders louder because it came from the
- *  user ("every time you get feedback, add to it"). */
+/** Task mutations. `reopen` is deliberately atomic: the related human ask and
+ *  its source are appended before the task moves back to build, under the same
+ *  store transaction. */
 export type TaskActionInput =
   | { action: 'status'; status: TaskStatus; reason?: string; note?: string }
   | { action: 'phase'; phase: TaskPhase; reason: string }
+  | { action: 'reopen'; reason: string; ask: string; source: string }
   | { action: 'note'; text: string }
   | { action: 'feedback'; text: string }
   | { action: 'clarify'; text: string; source: string }
@@ -473,6 +476,7 @@ export type TaskActionName = TaskActionInput['action'];
 export const TASK_ACTIONS: readonly TaskActionName[] = [
   'status',
   'phase',
+  'reopen',
   'note',
   'feedback',
   'clarify',

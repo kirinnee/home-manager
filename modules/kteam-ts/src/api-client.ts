@@ -385,9 +385,10 @@ export class ApiClient {
   }
 
   async upload(id: string, file: string): Promise<AttachmentView> {
-    const bytes = await Bun.file(file).arrayBuffer();
+    const source = Bun.file(file);
+    const bytes = await source.arrayBuffer();
     const form = new FormData();
-    form.set('file', new File([bytes], file.split('/').at(-1) ?? 'image', { type: Bun.file(file).type }));
+    form.set('file', new File([bytes], file.split('/').at(-1) ?? 'attachment', { type: source.type }));
     return this.request<AttachmentView>(`/v1/sessions/${encodeURIComponent(id)}/attachments`, {
       method: 'POST',
       body: form,

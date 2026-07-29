@@ -75,11 +75,13 @@ import {
   subscribeSidePanePreferences,
 } from '../lib/side-pane-preferences';
 import type { CodeReference, CodeReferenceOpenRequest } from '../lib/code-references';
+import type { AttentionId } from '../lib/attention';
+import type { PinReferenceLookup } from '../lib/remark-session-references';
 import { BottomSheet } from './SessionDetails';
 import { Button } from './Primitives';
 import { InAppBrowserContext, type BrowserDestination, type InAppBrowserHost } from './InAppBrowser';
 import { FilesTab } from './FilesTab';
-import { PinSurface } from './PinSheet';
+import { PinSurface, type PinOpenRequest } from './PinSheet';
 import { SessionTasksSurface, type TaskOpenRequest } from './SessionTasks';
 import { AnalyticsSurface } from './AnalyticsSurface';
 import { AttentionSurface } from './AttentionPanel';
@@ -223,6 +225,11 @@ export interface SidePaneHost {
   openTask: (taskId: string, opener?: HTMLElement | null) => void;
   /** Open a proven session file, optionally selecting one source line/range. */
   openCodeReference: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  /** Open one proven durable attention notice. Optional so standalone hosts and
+   * older fixtures do not have to invent a delivery capability. */
+  openAttention?: (attentionId: AttentionId, opener?: HTMLElement | null) => void;
+  /** Open one proven daemon pin in this session's pin surface. */
+  openPin?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
 }
 
 const SidePaneContext = createContext<SidePaneHost | null>(null);
@@ -301,10 +308,18 @@ function FilesSurface({
   onClose,
   requestedReference,
   onRequestedReferenceHandled,
+  onTaskOpen,
+  onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
 }: SurfaceProps & {
   cwd?: string;
   requestedReference?: CodeReferenceOpenRequest | null;
   onRequestedReferenceHandled?: (sequence: number) => void;
+  onTaskOpen?: SidePaneHost['openTask'];
+  onCodeReferenceOpen?: SidePaneHost['openCodeReference'];
+  onAttentionOpen?: NonNullable<SidePaneHost['openAttention']>;
+  onPinOpen?: NonNullable<SidePaneHost['openPin']>;
 }) {
   return (
     <>
@@ -324,6 +339,10 @@ function FilesSurface({
           cwd={cwd}
           requestedReference={requestedReference}
           onRequestedReferenceHandled={onRequestedReferenceHandled}
+          onTaskOpen={onTaskOpen}
+          onCodeReferenceOpen={onCodeReferenceOpen}
+          onAttentionOpen={onAttentionOpen}
+          onPinOpen={onPinOpen}
         />
       </div>
     </>
@@ -339,11 +358,15 @@ function TasksSurface({
   requestedTask,
   onRequestedTaskHandled,
   onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
 }: SurfaceProps & {
   cwd?: string;
   requestedTask?: TaskOpenRequest | null;
   onRequestedTaskHandled?: (sequence: number) => void;
   onCodeReferenceOpen?: SidePaneHost['openCodeReference'];
+  onAttentionOpen?: NonNullable<SidePaneHost['openAttention']>;
+  onPinOpen?: NonNullable<SidePaneHost['openPin']>;
 }) {
   return (
     <>
@@ -361,6 +384,8 @@ function TasksSurface({
         requestedTask={requestedTask}
         onRequestedTaskHandled={onRequestedTaskHandled}
         onCodeReferenceOpen={onCodeReferenceOpen}
+        onAttentionOpen={onAttentionOpen}
+        onPinOpen={onPinOpen}
       />
     </>
   );
@@ -428,8 +453,14 @@ function SurfaceBody({
   onRequestedTaskHandled,
   requestedCodeReference,
   onRequestedCodeReferenceHandled,
+  requestedAttention,
+  onRequestedAttentionHandled,
+  requestedPin,
+  onRequestedPinHandled,
   onTaskOpen,
   onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
 }: {
   surface: SidePaneSurface;
   sessionId: string;
@@ -444,8 +475,14 @@ function SurfaceBody({
   onRequestedTaskHandled?: (sequence: number) => void;
   requestedCodeReference?: CodeReferenceOpenRequest | null;
   onRequestedCodeReferenceHandled?: (sequence: number) => void;
+  requestedAttention?: { id: AttentionId; sequence: number } | null;
+  onRequestedAttentionHandled?: (sequence: number) => void;
+  requestedPin?: PinOpenRequest | null;
+  onRequestedPinHandled?: (sequence: number) => void;
   onTaskOpen?: SidePaneHost['openTask'];
   onCodeReferenceOpen?: SidePaneHost['openCodeReference'];
+  onAttentionOpen?: NonNullable<SidePaneHost['openAttention']>;
+  onPinOpen?: NonNullable<SidePaneHost['openPin']>;
 }) {
   switch (surface) {
     case 'browser':
@@ -469,6 +506,10 @@ function SurfaceBody({
           onClose={onClose}
           requestedReference={requestedCodeReference}
           onRequestedReferenceHandled={onRequestedCodeReferenceHandled}
+          onTaskOpen={onTaskOpen}
+          onCodeReferenceOpen={onCodeReferenceOpen}
+          onAttentionOpen={onAttentionOpen}
+          onPinOpen={onPinOpen}
         />
       );
     case 'tasks':
@@ -482,6 +523,8 @@ function SurfaceBody({
           requestedTask={requestedTask}
           onRequestedTaskHandled={onRequestedTaskHandled}
           onCodeReferenceOpen={onCodeReferenceOpen}
+          onAttentionOpen={onAttentionOpen}
+          onPinOpen={onPinOpen}
         />
       );
     case 'pins':
@@ -492,8 +535,12 @@ function SurfaceBody({
           presentation={presentation}
           titleId={titleId}
           onRequestClose={onClose}
+          requestedPin={requestedPin}
+          onRequestedPinHandled={onRequestedPinHandled}
           onTaskOpen={onTaskOpen}
           onCodeReferenceOpen={onCodeReferenceOpen}
+          onAttentionOpen={onAttentionOpen}
+          onPinOpen={onPinOpen}
         />
       );
     case 'skills':
@@ -531,6 +578,13 @@ function SurfaceBody({
           presentation={presentation}
           titleId={titleId}
           onRequestClose={onClose}
+          cwd={cwd}
+          requestedAttention={requestedAttention}
+          onRequestedAttentionHandled={onRequestedAttentionHandled}
+          onTaskOpen={onTaskOpen}
+          onCodeReferenceOpen={onCodeReferenceOpen}
+          onAttentionOpen={onAttentionOpen}
+          onPinOpen={onPinOpen}
         />
       );
     case 'mcp':
@@ -840,6 +894,10 @@ export function SidePaneWorkspace({
   // request can never make the next click repeat an id FilesTab has seen.
   const codeReferenceSequence = useRef(0);
   const [requestedCodeReference, setRequestedCodeReference] = useState<CodeReferenceOpenRequest | null>(null);
+  const attentionSequence = useRef(0);
+  const [requestedAttention, setRequestedAttention] = useState<{ id: AttentionId; sequence: number } | null>(null);
+  const pinSequence = useRef(0);
+  const [requestedPin, setRequestedPin] = useState<PinOpenRequest | null>(null);
   const paneWidth = previewWidth ?? storedPreferences.width;
   const commitPaneWidth = useCallback((width: number) => {
     setSidePaneWidth(width);
@@ -926,6 +984,26 @@ export function SidePaneWorkspace({
     [open],
   );
 
+  const openAttention = useCallback(
+    (attentionId: AttentionId, opener?: HTMLElement | null) => {
+      if (!/^A[1-9][0-9]*$/u.test(attentionId)) return;
+      setRequestedAttention({ id: attentionId, sequence: ++attentionSequence.current });
+      open('attention', opener);
+    },
+    [open],
+  );
+
+  const openPin = useCallback(
+    (reference: PinReferenceLookup, opener?: HTMLElement | null) => {
+      // Pin identity is session-scoped. Never reinterpret a valid pin from a
+      // different workspace as a missing pin in this one.
+      if (reference.sessionId !== sessionId) return;
+      setRequestedPin({ reference, sequence: ++pinSequence.current });
+      open('pins', opener);
+    },
+    [open, sessionId],
+  );
+
   // The browser surface's payload rides in the same per-session snapshot, so a
   // revisited session restores the page it was reading.
   const openDestination = useCallback(
@@ -954,8 +1032,32 @@ export function SidePaneWorkspace({
     [paneId, presentation, openDestination],
   );
   const host = useMemo<SidePaneHost>(
-    () => ({ paneId, presentation, surface: state.surface, cwd, open, close, toggle, openTask, openCodeReference }),
-    [paneId, presentation, state.surface, cwd, open, close, toggle, openTask, openCodeReference],
+    () => ({
+      paneId,
+      presentation,
+      surface: state.surface,
+      cwd,
+      open,
+      close,
+      toggle,
+      openTask,
+      openCodeReference,
+      openAttention,
+      openPin,
+    }),
+    [
+      paneId,
+      presentation,
+      state.surface,
+      cwd,
+      open,
+      close,
+      toggle,
+      openTask,
+      openCodeReference,
+      openAttention,
+      openPin,
+    ],
   );
 
   const surfaceOpen = state.surface !== null;
@@ -990,8 +1092,18 @@ export function SidePaneWorkspace({
         onRequestedCodeReferenceHandled={sequence =>
           setRequestedCodeReference(current => (current?.sequence === sequence ? null : current))
         }
+        requestedAttention={requestedAttention}
+        onRequestedAttentionHandled={sequence =>
+          setRequestedAttention(current => (current?.sequence === sequence ? null : current))
+        }
+        requestedPin={requestedPin}
+        onRequestedPinHandled={sequence =>
+          setRequestedPin(current => (current?.sequence === sequence ? null : current))
+        }
         onTaskOpen={openTask}
         onCodeReferenceOpen={openCodeReference}
+        onAttentionOpen={openAttention}
+        onPinOpen={openPin}
       />
     </div>
   );
@@ -1035,8 +1147,18 @@ export function SidePaneWorkspace({
             onRequestedCodeReferenceHandled={sequence =>
               setRequestedCodeReference(current => (current?.sequence === sequence ? null : current))
             }
+            requestedAttention={requestedAttention}
+            onRequestedAttentionHandled={sequence =>
+              setRequestedAttention(current => (current?.sequence === sequence ? null : current))
+            }
+            requestedPin={requestedPin}
+            onRequestedPinHandled={sequence =>
+              setRequestedPin(current => (current?.sequence === sequence ? null : current))
+            }
             onTaskOpen={openTask}
             onCodeReferenceOpen={openCodeReference}
+            onAttentionOpen={openAttention}
+            onPinOpen={openPin}
           />
         </div>
       ))

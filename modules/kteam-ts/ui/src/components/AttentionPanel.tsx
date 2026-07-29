@@ -3,7 +3,7 @@
 // and the resolution audit remains one disclosure away after an item leaves the
 // active list. It reuses the existing BottomSheet/side-pane presentation split.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Bot,
   Check,
@@ -29,12 +29,17 @@ import {
   attentionStore,
   attentionReference,
   type AttentionBy,
+  type AttentionId,
   type AttentionItem,
+  type AttentionSessionStatus,
   type AttentionSource,
   type ResolvedAttentionItem,
 } from '../lib/attention';
 import { cn } from '../lib/utils';
 import { HAS_TOKEN } from '../lib/api';
+import type { CodeReference } from '../lib/code-references';
+import type { PinReferenceLookup } from '../lib/remark-session-references';
+import { Markdown } from './Markdown';
 
 const SOURCE: Record<AttentionSource, { label: string; icon: typeof CircleAlert }> = {
   task: { label: 'Blocked task', icon: ListChecks },
@@ -64,6 +69,30 @@ export function waitingAgeCopy(waitingSince: string, at = Date.now()): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `waiting ${hours}h`;
   return `waiting ${Math.floor(hours / 24)}d`;
+}
+
+export interface AttentionOpenRequest {
+  id: AttentionId;
+  sequence: number;
+}
+
+export function attentionReferenceDomId(id: AttentionId): string {
+  return `attention-reference-${id}`;
+}
+
+export type AttentionRequestOutcome = 'pending' | 'active' | 'resolved' | 'missing' | 'unavailable';
+
+export function attentionRequestOutcome(
+  id: AttentionId,
+  status: AttentionSessionStatus,
+  items: readonly Pick<AttentionItem, 'id'>[],
+  resolutions: readonly Pick<ResolvedAttentionItem, 'id'>[],
+): AttentionRequestOutcome {
+  if (items.some(item => item.id === id)) return 'active';
+  if (resolutions.some(item => item.id === id)) return 'resolved';
+  if (status === 'error') return 'unavailable';
+  if (status === 'ready') return 'missing';
+  return 'pending';
 }
 
 export function AttentionTrigger({
@@ -114,11 +143,25 @@ export function AttentionSurface({
   presentation,
   titleId,
   onRequestClose,
+  cwd,
+  requestedAttention,
+  onRequestedAttentionHandled,
+  onTaskOpen,
+  onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
 }: {
   sessionId: string;
   presentation: 'pane' | 'sheet';
   titleId?: string;
   onRequestClose: () => void;
+  cwd?: string;
+  requestedAttention?: AttentionOpenRequest | null;
+  onRequestedAttentionHandled?: (sequence: number) => void;
+  onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
 }) {
   const status = useAttentionSession(sessionId);
   const items = useAttentionItems(sessionId);
@@ -127,6 +170,51 @@ export function AttentionSurface({
   const parseErrors = cache.sessions[sessionId]?.parseErrors ?? 0;
   const [pending, setPending] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
+  const [referenceNotice, setReferenceNotice] = useState<string | null>(null);
+  const [targetedId, setTargetedId] = useState<AttentionId | null>(null);
+
+  useEffect(() => {
+    if (!requestedAttention) return;
+    const outcome = attentionRequestOutcome(requestedAttention.id, status, items, resolutions);
+    if (outcome === 'pending') return;
+
+    if (outcome === 'missing' || outcome === 'unavailable') {
+      setTargetedId(null);
+      setReferenceNotice(
+        outcome === 'unavailable'
+          ? `Could not verify ${attentionReference(requestedAttention.id)} because the attention ledger is unavailable.`
+          : `${attentionReference(requestedAttention.id)} is no longer in this attention ledger.`,
+      );
+      onRequestedAttentionHandled?.(requestedAttention.sequence);
+      return;
+    }
+
+    setReferenceNotice(null);
+    setTargetedId(requestedAttention.id);
+    if (typeof document === 'undefined') {
+      onRequestedAttentionHandled?.(requestedAttention.sequence);
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      const target = document.getElementById(attentionReferenceDomId(requestedAttention.id));
+      if (target) {
+        const audit = target.closest('details');
+        if (audit instanceof HTMLDetailsElement) audit.open = true;
+        const scroller = target.closest<HTMLElement>('[data-attention-scroller]');
+        if (scroller) {
+          const scrollerBox = scroller.getBoundingClientRect();
+          const targetBox = target.getBoundingClientRect();
+          scroller.scrollTo({
+            top: Math.max(0, scroller.scrollTop + targetBox.top - scrollerBox.top - scroller.clientHeight / 3),
+          });
+        }
+      }
+      // Clear the request only after the landing work. Clearing it before this
+      // frame would run the effect cleanup and cancel the exact-target jump.
+      onRequestedAttentionHandled?.(requestedAttention.sequence);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [items, onRequestedAttentionHandled, requestedAttention, resolutions, status]);
 
   const resolve = async (item: AttentionItem): Promise<void> => {
     setPending(current => new Set(current).add(item.id));
@@ -191,7 +279,13 @@ export function AttentionSurface({
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
+      {referenceNotice && (
+        <div className="shrink-0 border-b border-warn/30 bg-warn/5 px-panel py-row-y text-meta text-warn" role="status">
+          {referenceNotice}
+        </div>
+      )}
+
+      <div data-attention-scroller="" className="min-h-0 flex-1 overflow-y-auto scroll-thin">
         <div className="mx-auto w-full max-w-2xl px-panel py-row-y">
           {status === 'loading' && items.length === 0 ? (
             <p role="status" className="flex items-center justify-center gap-xs py-8 text-cell text-muted">
@@ -214,13 +308,29 @@ export function AttentionSurface({
                   item={item}
                   oldest={index === 0}
                   pending={pending.has(item.id)}
+                  targeted={targetedId === item.id}
+                  sessionId={sessionId}
+                  cwd={cwd}
+                  onTaskOpen={onTaskOpen}
+                  onCodeReferenceOpen={onCodeReferenceOpen}
+                  onAttentionOpen={onAttentionOpen}
+                  onPinOpen={onPinOpen}
                   onResolve={() => void resolve(item)}
                 />
               ))}
             </ol>
           )}
 
-          <ResolutionAudit items={resolutions} />
+          <ResolutionAudit
+            items={resolutions}
+            targetedId={targetedId}
+            sessionId={sessionId}
+            cwd={cwd}
+            onTaskOpen={onTaskOpen}
+            onCodeReferenceOpen={onCodeReferenceOpen}
+            onAttentionOpen={onAttentionOpen}
+            onPinOpen={onPinOpen}
+          />
         </div>
       </div>
     </div>
@@ -231,20 +341,37 @@ function AttentionRow({
   item,
   oldest,
   pending,
+  targeted,
+  sessionId,
+  cwd,
+  onTaskOpen,
+  onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
   onResolve,
 }: {
   item: AttentionItem;
   oldest: boolean;
   pending: boolean;
+  targeted: boolean;
+  sessionId: string;
+  cwd?: string;
+  onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
   onResolve: () => void;
 }) {
   const source = SOURCE[item.source];
   const SourceIcon = source.icon;
   return (
     <li
+      id={attentionReferenceDomId(item.id)}
+      data-reference-target={targeted || undefined}
       className={cn(
         'relative overflow-hidden rounded-control border bg-surface px-cell-x py-row-y',
         oldest ? 'border-warn/50 shadow-[inset_3px_0_0_var(--warn)]' : 'border-border-soft',
+        targeted && 'ring-2 ring-accent ring-offset-2 ring-offset-surface',
       )}
     >
       <div className="flex min-w-0 items-start gap-sm">
@@ -260,11 +387,38 @@ function AttentionRow({
               <Clock3 size={11} aria-hidden="true" /> {waitingAgeCopy(item.waitingSince)}
             </span>
           </div>
-          <h3 className="m-0 mt-xs text-cell font-semibold leading-snug text-fg">{item.subject}</h3>
-          <p className="m-0 mt-xs text-cell leading-base text-muted">{item.why}</p>
+          <Markdown
+            text={item.subject}
+            sessionId={sessionId}
+            cwd={cwd}
+            onTaskOpen={onTaskOpen}
+            onCodeReferenceOpen={onCodeReferenceOpen}
+            onAttentionOpen={onAttentionOpen}
+            onPinOpen={onPinOpen}
+            className="mt-xs text-cell font-semibold leading-snug text-fg"
+          />
+          <Markdown
+            text={item.why}
+            sessionId={sessionId}
+            cwd={cwd}
+            onTaskOpen={onTaskOpen}
+            onCodeReferenceOpen={onCodeReferenceOpen}
+            onAttentionOpen={onAttentionOpen}
+            onPinOpen={onPinOpen}
+            className="mt-xs text-cell leading-base text-muted"
+          />
           <div className="mt-sm rounded-control border border-border-soft bg-surface-2 px-cell-x py-1.5">
             <span className="kt-label block text-faint">How to resolve</span>
-            <p className="m-0 mt-0.5 text-meta leading-base text-muted">{item.howToResolve}</p>
+            <Markdown
+              text={item.howToResolve}
+              sessionId={sessionId}
+              cwd={cwd}
+              onTaskOpen={onTaskOpen}
+              onCodeReferenceOpen={onCodeReferenceOpen}
+              onAttentionOpen={onAttentionOpen}
+              onPinOpen={onPinOpen}
+              className="mt-0.5 text-meta leading-base text-muted"
+            />
           </div>
           <p className="m-0 mt-sm text-meta text-faint">
             Raised by {actorLabel(item.raisedBy, item.raisedByName)} · {new Date(item.waitingSince).toLocaleString()}
@@ -296,7 +450,25 @@ function AttentionRow({
   );
 }
 
-function ResolutionAudit({ items }: { items: ResolvedAttentionItem[] }) {
+function ResolutionAudit({
+  items,
+  targetedId,
+  sessionId,
+  cwd,
+  onTaskOpen,
+  onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
+}: {
+  items: ResolvedAttentionItem[];
+  targetedId: AttentionId | null;
+  sessionId: string;
+  cwd?: string;
+  onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
+}) {
   return (
     <details className="group mt-md border-t border-border-soft pt-row-y">
       <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-sm rounded-control px-cell-x text-cell font-medium text-muted hover:bg-surface-2 hover:text-fg">
@@ -315,14 +487,39 @@ function ResolutionAudit({ items }: { items: ResolvedAttentionItem[] }) {
           {items.map(item => (
             <li
               key={`${item.id}:${item.resolvedAt}`}
-              className="border-l-2 border-border-soft pl-sm text-meta leading-base"
+              id={attentionReferenceDomId(item.id)}
+              data-reference-target={targetedId === item.id || undefined}
+              className={cn(
+                'border-l-2 border-border-soft pl-sm text-meta leading-base',
+                targetedId === item.id && 'rounded-control ring-2 ring-accent ring-offset-2 ring-offset-surface',
+              )}
             >
-              <p className="m-0 font-medium text-muted">{item.subject}</p>
+              <Markdown
+                text={item.subject}
+                sessionId={sessionId}
+                cwd={cwd}
+                onTaskOpen={onTaskOpen}
+                onCodeReferenceOpen={onCodeReferenceOpen}
+                onAttentionOpen={onAttentionOpen}
+                onPinOpen={onPinOpen}
+                className="font-medium text-muted"
+              />
               <p className="m-0 text-faint">
                 {attentionReference(item.id)} · Resolved by {actorLabel(item.resolvedBy, item.resolvedByName)} ·{' '}
                 {new Date(item.resolvedAt).toLocaleString()}
               </p>
-              {item.resolutionNote && <p className="m-0 text-faint">{item.resolutionNote}</p>}
+              {item.resolutionNote && (
+                <Markdown
+                  text={item.resolutionNote}
+                  sessionId={sessionId}
+                  cwd={cwd}
+                  onTaskOpen={onTaskOpen}
+                  onCodeReferenceOpen={onCodeReferenceOpen}
+                  onAttentionOpen={onAttentionOpen}
+                  onPinOpen={onPinOpen}
+                  className="text-faint"
+                />
+              )}
             </li>
           ))}
         </ul>

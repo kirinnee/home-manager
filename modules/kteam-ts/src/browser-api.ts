@@ -1,4 +1,4 @@
-import { parseActor } from './actor-context';
+import { isHumanAdminActor, parseActor } from './actor-context';
 import { isSafeSessionId } from './pins-store';
 import type { KTeamEvent } from './types';
 import { BrowserStreamBridge, type BrowserStreamDownstream } from './browser-stream';
@@ -14,6 +14,7 @@ import {
 
 const BROWSER_PATH = /^\/v1\/sessions\/([^/]+)\/browser\/?$/;
 const BROWSER_STREAM_PATH = /^\/v1\/sessions\/([^/]+)\/browser\/stream\/?$/;
+const BROWSER_LOGIN_PATH = /^\/v1\/browser\/login\/?$/;
 const MAX_SELECTOR_CHARS = 4_096;
 const MAX_TEXT_CHARS = 200_000;
 
@@ -21,10 +22,26 @@ export const isBrowserPath = (pathname: string): boolean => /^\/v1\/sessions\/[^
 
 export const isBrowserStreamPath = (pathname: string): boolean => BROWSER_STREAM_PATH.test(pathname);
 
+/** The daemon-global human login window. Anchored on purpose: it must cover
+ * `/v1/browser/login` and its trailing-slash form and NOTHING adjacent, so the
+ * denial below stays a statement about one route rather than a prefix land-grab
+ * over a namespace nobody has designed yet. */
+export const isBrowserLoginPath = (pathname: string): boolean => BROWSER_LOGIN_PATH.test(pathname);
+
 /** The entire surface is admin-only. This helper must run in api-server's
  * warden gate before its generic GET allowance; covering GET also covers the
- * screencast WebSocket upgrade. */
+ * screencast WebSocket upgrade.
+ *
+ * `/v1/browser/login` is covered here for a reason worth writing down. It is a
+ * TOP-LEVEL path, so it never matched `isBrowserPath`, and api-server's warden
+ * gate ends in `if (method === 'GET') return undefined` — every read not
+ * explicitly denied above that line is allowed. A warden GET on the login route
+ * would therefore have been served the live VNC port and its password. The
+ * placement of the `browserWardenDenial` call ABOVE that generic allowance is
+ * load-bearing, not incidental; api-server.test.ts pins it against a real
+ * server rather than against this helper. */
 export function browserWardenDenial(_method: string, pathname: string): string | null {
+  if (isBrowserLoginPath(pathname)) return 'use the human browser login window';
   return isBrowserPath(pathname) ? 'use the session browser' : null;
 }
 
@@ -252,4 +269,154 @@ export class BrowserApi {
 
 export function browserResult(value: unknown): BrowserActionResult {
   return value as BrowserActionResult;
+}
+
+// ---------------------------------------------------------------------------
+// The human browser login window: `/v1/browser/login`
+// ---------------------------------------------------------------------------
+
+/** Where a human points their VNC viewer. Present ONLY while the window is
+ * open — a stale port is worse than no port. */
+export interface BrowserLoginConnection {
+  host: string;
+  port: number;
+  /** Ephemeral, minted per window, never persisted and never journaled. */
+  password: string;
+  /** Rendered with the real port already substituted so nobody assembles it. */
+  sshTunnel: string;
+}
+
+/** One shape for GET and for every POST response, so a client has one renderer.
+ *
+ * `state: 'closed'` carries no `connection`, no `openedAt` and no `expiresAt`:
+ * absence renders as absence rather than as a zeroed countdown. */
+export interface BrowserLoginStatusView {
+  state: 'closed' | 'opening' | 'open' | 'closing' | 'error';
+  /** A marker that a human once signed this profile in. Never an assertion
+   * that the current window succeeded — a deadline expiry primes nothing. */
+  profilePrimed: boolean;
+  openedAt?: string;
+  expiresAt?: string;
+  connection?: BrowserLoginConnection;
+  /** Coarse, one line, only in state 'error'. */
+  error?: string;
+}
+
+/** The lifecycle seam, deliberately structural and four methods wide.
+ *
+ * `browser-login.ts` owns the processes, the lease, the deadline and the boot
+ * reconciliation; this file owns only the transport. Neither imports the other,
+ * so the route can be tested with a fake and the lifecycle can be tested with
+ * no HTTP at all. Anything with these four methods satisfies it. */
+export interface BrowserLoginLifecycle {
+  status(): Promise<BrowserLoginStatusView>;
+  start(options: { minutes?: number }): Promise<BrowserLoginStatusView>;
+  stop(options: { primed?: boolean }): Promise<BrowserLoginStatusView>;
+  confirm(): Promise<BrowserLoginStatusView>;
+}
+
+export type BrowserLoginAction =
+  | { action: 'start'; minutes?: number }
+  | { action: 'stop'; primed?: boolean }
+  | { action: 'confirm' };
+
+export const BROWSER_LOGIN_MAX_MINUTES = 60;
+
+export function parseBrowserLoginAction(value: unknown): BrowserLoginAction {
+  const raw = asObject(value);
+  switch (raw['action']) {
+    case 'start': {
+      const minutes = raw['minutes'];
+      if (minutes === undefined) return { action: 'start' };
+      if (
+        typeof minutes !== 'number' ||
+        !Number.isInteger(minutes) ||
+        minutes < 1 ||
+        minutes > BROWSER_LOGIN_MAX_MINUTES
+      )
+        throw new BrowserError(
+          'bad_request',
+          `minutes must be a whole number between 1 and ${BROWSER_LOGIN_MAX_MINUTES}`,
+          400,
+        );
+      return { action: 'start', minutes };
+    }
+    case 'stop': {
+      const primed = raw['primed'];
+      if (primed !== undefined && typeof primed !== 'boolean')
+        throw new BrowserError('bad_request', 'primed must be a boolean', 400);
+      return { action: 'stop', ...(primed === undefined ? {} : { primed }) };
+    }
+    case 'confirm':
+      return { action: 'confirm' };
+    default:
+      throw new BrowserError('bad_request', 'browser login action must be start, stop, or confirm', 400);
+  }
+}
+
+export interface BrowserLoginApiRequest {
+  method: string;
+  body?: unknown;
+  /** Resolved from token + headers by api-server; never accepted in the body,
+   * never read from a URL field. */
+  actor?: KTeamEvent['source'];
+}
+
+/** Transport for the daemon-global login window.
+ *
+ * TWO INDEPENDENT LAYERS gate this route, and they see different callers:
+ *
+ *  1. `browserWardenDenial` above, run by api-server's warden gate, excludes the
+ *     warden-scoped token before its generic GET allowance.
+ *  2. `isHumanAdminActor` here excludes `peer:<id>` — an ordinary teammate
+ *     holding the SHARED admin bearer, which layer 1 never sees at all.
+ *
+ * WHAT THAT HONESTLY BUYS. `isHumanAdminActor` is "an operational boundary for
+ * honest clients, not a cryptographic per-session capability"
+ * (actor-context.ts). Every agent on this box runs as the same user and can
+ * read the admin token from disk, so nothing here excludes a HOSTILE local
+ * process — and nothing in kteam currently does. What it does buy: a warden
+ * (different token, cannot escalate) is fully out; an honest teammate cannot
+ * stumble in; and a Cloudflare-tunnel visitor cannot reach the VNC port,
+ * because it is loopback-bound and there is no in-daemon proxy. */
+export class BrowserLoginApi {
+  constructor(readonly lifecycle: BrowserLoginLifecycle) {}
+
+  async handle(request: BrowserLoginApiRequest): Promise<BrowserApiResponse> {
+    try {
+      if (!isHumanAdminActor(request.actor)) {
+        // Name the likely cause. The CLI attaches `x-kteam-session-id` from the
+        // pane env, so running this from inside a kteam session resolves to
+        // `peer:<id>` and lands here — which is correct, and baffling unless
+        // the message says so.
+        throw new BrowserError(
+          'forbidden',
+          'the human browser login window is human-admin only; run it from your own shell, not from inside a kteam session',
+          403,
+        );
+      }
+      if (request.method === 'GET') return { status: 200, body: await this.lifecycle.status() };
+      if (request.method !== 'POST') {
+        return { status: 405, body: { error: 'browser login route accepts GET or POST', code: 'bad_request' } };
+      }
+      const action = parseBrowserLoginAction(request.body);
+      switch (action.action) {
+        case 'start':
+          return {
+            status: 200,
+            body: await this.lifecycle.start(action.minutes === undefined ? {} : { minutes: action.minutes }),
+          };
+        case 'stop':
+          return {
+            status: 200,
+            body: await this.lifecycle.stop(action.primed === undefined ? {} : { primed: action.primed }),
+          };
+        case 'confirm':
+          return { status: 200, body: await this.lifecycle.confirm() };
+      }
+    } catch (error) {
+      if (!isBrowserError(error)) throw error;
+      return { status: error.status, body: { error: error.message, code: error.code } };
+    }
+  }
 }

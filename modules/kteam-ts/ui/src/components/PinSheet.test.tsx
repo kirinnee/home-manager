@@ -11,10 +11,18 @@ import {
   noteCharsRemaining,
   PinNoteContent,
   PinProse,
+  pinReferenceDomId,
+  pinRequestNotice,
+  pinRequestOutcome,
   pinProvenanceLabel,
   pinsTriggerLabel,
   pinsUnreachableCopy,
 } from './PinSheet';
+
+const pinRequest = (sessionId = 'ms-pins', pinId = 'pin-one', sequence = 1) => ({
+  reference: { sessionId, pinId },
+  sequence,
+});
 
 describe('pinProvenanceLabel', () => {
   test('human pins carry no tag', () => {
@@ -63,8 +71,40 @@ describe('locatingLabel', () => {
   });
 });
 
+describe('exact pin reference delivery', () => {
+  test('distinguishes found, pending, missing, unavailable, and wrong-session requests', () => {
+    const pins = [{ id: 'pin-one' }];
+    expect(pinRequestOutcome(pinRequest(), 'ms-pins', 'ready', pins)).toBe('found');
+    expect(pinRequestOutcome(pinRequest('ms-pins', 'pin-two'), 'ms-pins', 'loading', pins)).toBe('pending');
+    expect(pinRequestOutcome(pinRequest('ms-pins', 'pin-two'), 'ms-pins', 'ready', pins)).toBe('missing');
+    expect(pinRequestOutcome(pinRequest('ms-pins', 'pin-two'), 'ms-pins', 'error', pins)).toBe('unavailable');
+    expect(pinRequestOutcome(pinRequest('ms-other'), 'ms-pins', 'ready', pins)).toBe('wrong-session');
+  });
+
+  test('uses addressable rows and honest negative-state copy', () => {
+    expect(pinReferenceDomId('ms-pins', 'pin-one')).toBe('pin-reference-ms-pins-pin-one');
+    expect(pinRequestNotice('missing')).toMatch(/no longer/i);
+    expect(pinRequestNotice('unavailable')).toMatch(/unavailable/i);
+    expect(pinRequestNotice('wrong-session')).toMatch(/another session/i);
+  });
+
+  test('lands inside only the pin-owned scroller and clears after the animation-frame scroll', async () => {
+    const source = await Bun.file(new URL('./PinSheet.tsx', import.meta.url)).text();
+    const frame = source.indexOf('window.requestAnimationFrame(() => {');
+    const scroll = source.indexOf('scroller.scrollTo({', frame);
+    const handled = source.indexOf('onRequestedPinHandled?.(requestedPin.sequence);', scroll);
+    expect(source).toContain('data-pin-scroller');
+    expect(source).toContain("scroller.querySelectorAll<HTMLElement>('[data-pin-id]')");
+    expect(source).toContain('row.dataset.pinId === requestedPin.reference.pinId');
+    expect(source).toContain('data-reference-target={targeted || undefined}');
+    expect(frame).toBeGreaterThan(-1);
+    expect(scroll).toBeGreaterThan(frame);
+    expect(handled).toBeGreaterThan(scroll);
+  });
+});
+
 describe('displayed pin prose', () => {
-  test('reuses Markdown for note/message prose and keeps unproved code hrefs inert', () => {
+  test('reuses Markdown for note/message prose and keeps unproved in-app hrefs inert', () => {
     const forged = codeReferenceHref({ path: 'missing.ts', line: 2 });
     const html = renderToStaticMarkup(
       <PinProse
@@ -75,7 +115,8 @@ describe('displayed pin prose', () => {
       />,
     );
     expect(html).toContain('<strong>Ready.</strong>');
-    expect(html).toContain('data-task-reference="F64"');
+    expect(html).toContain('See #F64');
+    expect(html).not.toContain('data-task-reference');
     expect(html).toContain('href="https://example.com/status"');
     expect(html).toContain('missing');
     expect(html).not.toContain('data-code-reference');

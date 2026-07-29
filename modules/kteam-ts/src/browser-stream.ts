@@ -10,7 +10,11 @@ import type { BrowserService, BrowserViewerAttachment, BrowserViewerTerminal } f
 const MAX_INPUT_MESSAGE_BYTES = 256 * 1024;
 const MAX_QUEUED_INPUT_BYTES = 1 * 1024 * 1024;
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
-const MAX_DOWNSTREAM_BUFFERED_BYTES = 4 * 1024 * 1024;
+// Frames are disposable state, not a replay stream. Admit no bytes behind an
+// already-buffered socket; one local latest envelope is enough to paint the
+// final state once polling observes recovery.
+const MAX_DOWNSTREAM_BUFFERED_BYTES = 0;
+const FRAME_RECOVERY_POLL_MS = 16;
 const MAX_KEY_CHARS = 128;
 const MAX_INSERT_TEXT_CHARS = 200_000;
 const FRAME_ENVELOPE_MAGIC = Uint8Array.of(0x4b, 0x42, 0x52, 0x46); // "KBRF"
@@ -27,6 +31,16 @@ export interface BrowserStreamDownstream {
   close(code?: number, reason?: string): void;
   getBufferedAmount?(): number;
 }
+
+export interface BrowserStreamScheduler {
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(timer: unknown): void;
+}
+
+const browserStreamScheduler: BrowserStreamScheduler = {
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: timer => clearTimeout(timer as ReturnType<typeof setTimeout>),
+};
 
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
@@ -141,18 +155,22 @@ export class BrowserStreamBridge {
   private queuedInputBytes = 0;
   private serial = Promise.resolve();
   private readonly pressedKeys = new Map<string, BrowserKeyInput>();
+  private pendingFrame?: Uint8Array;
+  private frameFlushTimer?: unknown;
 
   private constructor(
     private readonly service: BrowserService,
     private readonly sessionId: string,
     private readonly downstream: BrowserStreamDownstream,
     private readonly attachment: BrowserViewerAttachment,
+    private readonly scheduler: BrowserStreamScheduler,
   ) {}
 
   static async connect(
     service: BrowserService,
     sessionId: string,
     downstream: BrowserStreamDownstream,
+    scheduler: BrowserStreamScheduler = browserStreamScheduler,
   ): Promise<BrowserStreamBridge> {
     let bridge: BrowserStreamBridge | undefined;
     let pendingFrame: BrowserScreencastFrame | undefined;
@@ -168,7 +186,7 @@ export class BrowserStreamBridge {
         else pendingTerminal = terminal;
       },
     );
-    bridge = new BrowserStreamBridge(service, sessionId, downstream, attachment);
+    bridge = new BrowserStreamBridge(service, sessionId, downstream, attachment, scheduler);
     if (pendingTerminal) bridge.fromTerminal(pendingTerminal);
     else if (pendingFrame) bridge.fromFrame(pendingFrame);
     return bridge;
@@ -213,7 +231,6 @@ export class BrowserStreamBridge {
   private fromFrame(frame: BrowserScreencastFrame): void {
     if (this.closed) return;
     try {
-      if ((this.downstream.getBufferedAmount?.() ?? 0) > MAX_DOWNSTREAM_BUFFERED_BYTES) return;
       if (
         typeof frame.pageId !== 'string' ||
         frame.pageId.length === 0 ||
@@ -230,11 +247,51 @@ export class BrowserStreamBridge {
       }
       const envelope = encodeBrowserFrameEnvelope(frame.pageId, bytes);
       if (!envelope) return;
-      const sent = this.downstream.send(envelope);
-      if (typeof sent === 'number' && sent < 0) this.finish(1013, 'browser viewer unavailable');
+      // Replace, never queue: one slow viewer must never replay a growing
+      // history or affect another viewer's socket.
+      this.pendingFrame = envelope;
+      this.flushPendingFrame();
     } catch {
       this.finish(1011, 'browser display send failed');
     }
+  }
+
+  private flushPendingFrame(): void {
+    if (this.closed || !this.pendingFrame) return;
+    if ((this.downstream.getBufferedAmount?.() ?? 0) > MAX_DOWNSTREAM_BUFFERED_BYTES) {
+      this.schedulePendingFrameFlush();
+      return;
+    }
+    const envelope = this.pendingFrame;
+    this.pendingFrame = undefined;
+    try {
+      const sent = this.downstream.send(envelope);
+      if (sent === 0) {
+        // Bun dropped this frame rather than accepting it. Retain exactly this
+        // latest envelope until the transport becomes writable again.
+        this.pendingFrame = envelope;
+        this.schedulePendingFrameFlush();
+      }
+      // -1 is Bun's accepted-but-backpressured result. It is intentionally not
+      // retried (that would duplicate pixels) and never closes a healthy view.
+    } catch {
+      this.finish(1011, 'browser display send failed');
+    }
+  }
+
+  private schedulePendingFrameFlush(): void {
+    if (this.closed || !this.pendingFrame || this.frameFlushTimer !== undefined) return;
+    this.frameFlushTimer = this.scheduler.setTimeout(() => {
+      this.frameFlushTimer = undefined;
+      this.flushPendingFrame();
+    }, FRAME_RECOVERY_POLL_MS);
+  }
+
+  private clearPendingFrame(): void {
+    this.pendingFrame = undefined;
+    if (this.frameFlushTimer === undefined) return;
+    this.scheduler.clearTimeout(this.frameFlushTimer);
+    this.frameFlushTimer = undefined;
   }
 
   private fromTerminal(terminal: BrowserViewerTerminal): void {
@@ -248,6 +305,7 @@ export class BrowserStreamBridge {
   private finish(code: number, reason: string, closeDownstream = true): void {
     if (this.closed) return;
     this.closed = true;
+    this.clearPendingFrame();
     const releases = [...this.pressedKeys.values()].reverse().map(input => {
       const { text: _text, unmodifiedText: _unmodifiedText, ...rest } = input;
       return { ...rest, type: 'keyUp' as const, modifiers: 0, autoRepeat: false };

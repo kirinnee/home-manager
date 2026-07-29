@@ -81,7 +81,7 @@ describe('attachment API transport', () => {
     expect(String(captured.input)).toContain('after=-2000&limit=2000');
   });
 
-  test('authenticated attachment reads stay binary instead of becoming text', async () => {
+  test('authenticated image and document attachment reads stay binary instead of becoming text', async () => {
     const captured = await captureRequest(
       new Response(new Blob(['png'], { type: 'image/png' }), { headers: { 'content-type': 'image/png' } }),
       () => api.attachment('session', ATTACHMENT_ID),
@@ -89,6 +89,15 @@ describe('attachment API transport', () => {
     expect(captured.value).toBeInstanceOf(Blob);
     expect(captured.value.type).toBe('image/png');
     expect(String(captured.input)).toContain(`/attachments/${ATTACHMENT_ID}`);
+
+    const pdf = await captureRequest(
+      new Response(new Blob(['%PDF-1.7'], { type: 'application/pdf' }), {
+        headers: { 'content-type': 'application/pdf' },
+      }),
+      () => api.attachment('session', ATTACHMENT_ID),
+    );
+    expect(pdf.value).toBeInstanceOf(Blob);
+    expect(pdf.value.type).toBe('application/pdf');
   });
 });
 

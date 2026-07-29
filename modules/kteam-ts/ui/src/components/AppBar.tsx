@@ -2,7 +2,7 @@
 // banner when the daemon didn't substitute a token (i.e. we're on a non-loopback
 // origin).
 
-import { GraduationCap, RefreshCw, Search, Settings, ShieldCheck } from 'lucide-react';
+import { ChartNoAxesCombined, GraduationCap, RefreshCw, Search, Settings, ShieldCheck } from 'lucide-react';
 import { Link } from '../lib/router';
 import { ThemeToggle } from './ThemeToggle';
 import { HAS_TOKEN } from '../lib/api';
@@ -55,6 +55,11 @@ export const LEARNING_ENTRY = {
   title: 'Open fleet learning proposals',
 } as const;
 
+export const ANALYTICS_ENTRY = {
+  label: 'Analytics',
+  title: 'Query all sessions and graph daily usage',
+} as const;
+
 export function AppBar({
   crumbs,
   onOpenSidebar,
@@ -64,6 +69,7 @@ export function AppBar({
   settingsActive = false,
   wardenActive = false,
   learningActive = false,
+  analyticsActive = false,
   showTheme = true,
 }: {
   crumbs: Array<{ href?: string; label: string }>;
@@ -81,6 +87,7 @@ export function AppBar({
   settingsActive?: boolean;
   wardenActive?: boolean;
   learningActive?: boolean;
+  analyticsActive?: boolean;
   /** The flat Settings page owns theme controls while it is active. */
   showTheme?: boolean;
 }) {
@@ -149,6 +156,19 @@ export function AppBar({
             {UPDATE_CHIP[updateReady].label}
           </button>
         )}
+        {/* The fleet analytics destination stays visible at every width. It is
+            the explicit global counterpart to the session-scoped side pane,
+            not one of the secondary desktop-only administration links. */}
+        <Link
+          to="/analytics"
+          aria-current={analyticsActive ? 'page' : undefined}
+          aria-label={ANALYTICS_ENTRY.label}
+          title={ANALYTICS_ENTRY.title}
+          className="kt-btn kt-btn--sm shrink-0 items-center gap-xs"
+        >
+          <ChartNoAxesCombined size={14} aria-hidden="true" />
+          <span className="text-meta font-medium">Analytics</span>
+        </Link>
         {/* DISCOVERABILITY, NOT DECORATION. A keyboard-only feature that nothing
             on screen mentions is a feature only the person who built it has. This
             is a REAL button — clicking it opens the palette — so it is honest to

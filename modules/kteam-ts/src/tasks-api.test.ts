@@ -665,6 +665,62 @@ describe('v2 ask + workflow fields cross the transport', () => {
     expect(humanExit?.status).toBe(200);
     expect(humanExit?.body).toMatchObject({ phase: 'design' });
   });
+
+  test('live → done and reopening verified work are human-gated through the resolved API actor', async () => {
+    await create({ workflow: 'quick', status: 'live' });
+    const agentVerify = await api.handle({
+      method: 'POST',
+      url: url('/v1/tasks/F1'),
+      body: { action: 'phase', phase: 'done', reason: 'The agent thinks deployment worked.' },
+      actor,
+    });
+    expect(agentVerify?.status).toBe(403);
+    expect(agentVerify?.body).toMatchObject({ code: 'approval-required' });
+    expect((agentVerify?.body as { error: string }).error).toContain('leave it live for human verification');
+
+    const humanVerify = await api.handle({
+      method: 'POST',
+      url: url('/v1/tasks/F1'),
+      body: { action: 'phase', phase: 'done', reason: 'The human verified the deployed behavior.' },
+      actor: { actor: 'user', actorName: 'user' },
+    });
+    expect(humanVerify?.status).toBe(200);
+    expect(humanVerify?.body).toMatchObject({ phase: 'done', status: 'done' });
+
+    const reopenBody = {
+      action: 'reopen',
+      reason: 'The verified route regressed.',
+      ask: 'The route regressed after verification; repair it in this task.',
+      source: 'session:user#99',
+    };
+    const beforeAgentReopen = (await api.handle({ method: 'GET', url: url('/v1/tasks/F1') }))
+      ?.body as TaskDetailResponse;
+    const agentReopen = await api.handle({
+      method: 'POST',
+      url: url('/v1/tasks/F1'),
+      body: { ...reopenBody, actor: 'user', actorName: 'forged-human' },
+      actor,
+    });
+    expect(agentReopen?.status).toBe(403);
+    expect((agentReopen?.body as { error: string }).error).toContain('ask the human to reopen it');
+    let detail = (await api.handle({ method: 'GET', url: url('/v1/tasks/F1') }))?.body as TaskDetailResponse;
+    expect(detail).toEqual(beforeAgentReopen);
+
+    const humanReopen = await api.handle({
+      method: 'POST',
+      url: url('/v1/tasks/F1'),
+      body: reopenBody,
+      actor: { actor: 'user', actorName: 'user' },
+    });
+    expect(humanReopen?.status).toBe(200);
+    expect(humanReopen?.body).toMatchObject({ phase: 'build', status: 'in_progress' });
+    detail = (await api.handle({ method: 'GET', url: url('/v1/tasks/F1') }))?.body as TaskDetailResponse;
+    expect(detail.task.clarifications.at(-1)).toMatchObject({
+      text: 'The route regressed after verification; repair it in this task.',
+      source: 'session:user#99',
+    });
+    expect(detail.activity.slice(-2).map(entry => entry.type)).toEqual(['clarification', 'status']);
+  });
 });
 
 describe('derived liveness reaches the API', () => {

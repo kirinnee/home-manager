@@ -12,7 +12,7 @@ describe('transcript image presentation', () => {
     }));
     const html = renderToStaticMarkup(<TranscriptImageGallery images={images} initialLimit={4} />);
     expect(html.match(/loading="lazy"/g)).toHaveLength(4);
-    expect(html).toContain('Show 1 more image');
+    expect(html).toContain('Show 1 more attachment');
     expect(html).not.toContain('image-4');
   });
 
@@ -45,6 +45,36 @@ describe('transcript image presentation', () => {
     expect(html).toContain('loading="lazy"');
     expect(html).toContain('max-h-[280px]');
     expect(html).toContain('min-h-[44px]');
+  });
+
+  test('documents render a file card with honest extraction metadata, never an image', () => {
+    const html = renderToStaticMarkup(
+      <AttachmentImageProvider>
+        <TranscriptImageGallery
+          images={[
+            {
+              kind: 'attachment',
+              sessionId: 'ms1docs-12345678',
+              attachmentId: `att_${'b'.repeat(64)}`,
+              filename: 'brief.pdf',
+              mime: 'application/pdf',
+              size: 123_456,
+              textExtraction: { method: 'pdfjs', characters: 92, truncated: true },
+            },
+          ]}
+        />
+      </AttachmentImageProvider>,
+    );
+    expect(html).toContain('brief.pdf');
+    expect(html).toContain('PDF document');
+    expect(html).toContain('text extracted for agent · truncated');
+    expect(html).toContain('loading file…');
+    expect(html).toContain('aria-label="Open brief.pdf"');
+    expect(html).toContain('aria-label="Download brief.pdf"');
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain('rel="noopener noreferrer"');
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('/home/');
   });
 });
 

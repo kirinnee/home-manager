@@ -1,141 +1,103 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { AnalyticsRawResponse } from '../../../src/analytics-types';
+import type { AnalyticsAggregateResponse, AnalyticsRawResponse } from '../../../src/analytics-types';
 import { ApiError } from '../lib/api';
-import { buildLineage } from '../lib/lineage';
-import { peerMedianCost } from '../lib/lineage-costs';
-import type { ModelCost } from '../lib/model-cost';
-import type { SessionView } from '../types';
 import {
+  AnalyticsResponseView,
   AnalyticsSurface,
   analyticsErrorMessage,
   analyticsIdQuery,
-  analyticsRows,
-  analyticsStarterQueries,
-  analyticsTreeQuery,
-  boundedTreeQueries,
-  bucketCoverage,
-  formatUsdMicros,
-  ownCostCopy,
-  resolveLineageRoot,
-  type CostedRow,
+  sessionAnalyticsDefaultQuery,
+  sessionAnalyticsStarterQueries,
 } from './AnalyticsSurface';
 
-function session(id: string, parent?: string): SessionView {
-  return { config: { id, parent }, state: {}, directory: '/repo' } as unknown as SessionView;
-}
-
-const known: ModelCost = {
-  kind: 'known',
-  usdMicros: 1_250_000n,
-  pricingKey: 'openai:test',
-  pricingModel: 'gpt-5.6-terra',
+const index = {
+  schemaVersion: 6,
+  sessions: 1,
+  tokenSessions: 1,
+  transcriptSources: 1,
+  indexedTranscriptSources: 1,
+  pendingTranscriptSources: 0,
+  sourceErrors: 0,
+  refreshing: false,
 };
-const apiRow = { billing: 'api_metered', billingEvidence: { billing: 'api_metered' }, cost: known } as CostedRow;
 
-describe('analytics ledger facts', () => {
-  test('shows API dollars, subscriptions, and unknown billing without inventing a zero', () => {
-    expect(ownCostCopy(apiRow, { billing: 'api_metered' })).toBe('$1.25');
-    expect(ownCostCopy(undefined, { billing: 'subscription' })).toBe('Not billed per token');
-    expect(
-      ownCostCopy(
-        { ...apiRow, billing: 'unknown', billingEvidence: { billing: 'unknown', reason: 'stale_usage_feed' } },
-        { billing: 'unknown', reason: 'stale_usage_feed' },
-      ),
-    ).toContain('Billing is unknown');
-  });
-
-  test('labels mixed tree coverage and never calls skipped rows zero', () => {
-    expect(
-      bucketCoverage(
-        {
-          knownApiUsdMicros: 3n,
-          knownApiSessions: 1,
-          unknownApiSessions: 1,
-          subscriptionSessions: 2,
-          unknownBillingSessions: 1,
-        },
-        5,
-        8,
-      ),
-    ).toBe('1 API rows priced · 1 API costs unknown · 2 subscriptions · 1 billing-unknown · 3 unqueried');
-  });
-
-  test('uses safely escaped exact-id raw queries and preserves raw rows', () => {
+describe('session analytics query surface', () => {
+  test('the default visibly teaches aggregate, grouping, and exact session scope', () => {
     expect(analyticsIdQuery('session"a\\b')).toBe('{id="session\\"a\\\\b"}');
-    const response = { kind: 'raw', results: [{ id: 'a' }] } as unknown as AnalyticsRawResponse;
-    expect(analyticsRows(response).map(row => row.id)).toEqual(['a']);
-  });
-
-  test('formats bigint money without losing high-value micro precision', () => {
-    expect(formatUsdMicros(9_007_199_254_740_993n)).toBe('$9,007,199,254.740993');
-  });
-
-  test('reserves bounded-query evidence for a deep selected session', () => {
-    const ids = ['root', ...Array.from({ length: 40 }, (_, index) => `child-${index}`)];
-    const selected = boundedTreeQueries(ids, 'child-39');
-    expect(selected).toContain('root');
-    expect(selected).toContain('child-39');
-    expect(selected).toHaveLength(32);
-  });
-
-  test('requires five exact compatible peers before exposing a typical cost', () => {
-    const target = {
-      id: 'selected',
-      completed: true,
-      billing: 'api_metered' as const,
-      cost: known,
-      wrapper: 'codex',
-      harness: 'codex',
-    };
-    const peers = (count: number) => Array.from({ length: count }, (_, index) => ({ ...target, id: `peer-${index}` }));
-    expect(peerMedianCost(target, peers(4))).toBeUndefined();
-    expect(peerMedianCost(target, peers(5))?.sampleSize).toBe(5);
-  });
-
-  test('resolves the tree anchor through buildLineage rather than re-walking parents', () => {
-    const lineage = buildLineage([
-      session('root'),
-      session('mid', 'root'),
-      session('leaf', 'mid'),
-      // buildLineage already drops self-parents, dangling parents and cycles;
-      // this surface must inherit that judgement, not repeat it.
-      session('self', 'self'),
-      session('orphan', 'missing'),
-      session('cycle-a', 'cycle-b'),
-      session('cycle-b', 'cycle-a'),
+    expect(analyticsIdQuery('session-*')).toBe('{id=="session-*"}');
+    expect(sessionAnalyticsDefaultQuery('ms59')).toBe('sum by (model) {id="ms59"}');
+    expect(sessionAnalyticsStarterQueries('ms59').map(starter => starter.label)).toEqual([
+      'sum',
+      'avg',
+      'min',
+      'max',
+      'count',
     ]);
-    expect(resolveLineageRoot('leaf', lineage)).toBe('root');
-    expect(resolveLineageRoot('root', lineage)).toBe('root');
-    expect(resolveLineageRoot('self', lineage)).toBe('self');
-    expect(resolveLineageRoot('orphan', lineage)).toBe('orphan');
-    expect(resolveLineageRoot('cycle-a', lineage)).toBe('cycle-a');
-    expect(resolveLineageRoot('unindexed', lineage)).toBe('unindexed');
+    expect(sessionAnalyticsStarterQueries('ms59')[0]?.hint).toContain('equivalent API cost');
   });
 
-  test('starter queries teach the grammar and anchor the tree at the resolved root', () => {
-    expect(analyticsTreeQuery('ms1"a')).toBe('{tree="ms1\\"a"}');
-    const starters = analyticsStarterQueries('root-1');
-    expect(starters.map(starter => starter.query)).toEqual([
-      'sum by (id) {tree="root-1"}',
-      'sum {tree="root-1"}',
-      'sum by (wrapper)',
-      'sum by (model)',
-      'avg by (model)',
-      'count by (status)',
-    ]);
-    // Without a resolved lineage the tree starters are absent rather than
-    // pointed at the focused session and quietly mislabelled "whole tree".
-    expect(analyticsStarterQueries(null).map(starter => starter.id)).toEqual([
-      'by-wrapper',
-      'by-model',
-      'avg-model',
-      'count-status',
-    ]);
+  test('renders one query-driven section, with no independent summary/tree/comparison panels', () => {
+    const html = renderToStaticMarkup(<AnalyticsSurface sessionId="ms59" />);
+    expect(html).toContain('Query this session');
+    expect(html).toContain('sum by (model)');
+    expect(html.match(/<section/g)).toHaveLength(1);
+    expect(html).not.toContain('Resolved parent tree');
+    expect(html).not.toContain('Comparable completed sessions');
+    expect(html).not.toContain('Token ledger');
+    expect(html).not.toContain('Explore fleet');
   });
 
-  test('keeps the pre-load surface useful and explains a 503', () => {
-    expect(renderToStaticMarkup(<AnalyticsSurface sessionId="missing" />)).toContain('Loading session analytics');
+  test('aggregate output labels equivalent API cost and preserves unknown coverage', () => {
+    const response = {
+      kind: 'aggregate',
+      aggregation: 'sum',
+      query: 'sum by (model) {id=ms59}',
+      parsed: { aggregation: 'sum', groupBy: ['model'], matchers: [] },
+      scope: { allSessions: true, indexed: 1, matched: 1 },
+      index,
+      results: [
+        {
+          labels: { model: 'unpriced-model' },
+          sessions: 1,
+          rates: { stall: 0, failure: 0, completion: 0 },
+          tokens: { value: 12, known: 1, total: 1 },
+          inputTokens: { value: 10, known: 1, total: 1 },
+          outputTokens: { value: 2, known: 1, total: 1 },
+          cachedInputTokens: { value: 0, known: 1, total: 1 },
+          cacheWriteInputTokens: { value: 0, known: 1, total: 1 },
+          equivalentApiCostUsdMicros: { value: null, known: 0, total: 1 },
+          turns: { value: 1, known: 1, total: 1 },
+          durationMs: { value: null, known: 0, total: 1 },
+          timeToFirstOutputMs: { value: null, known: 0, total: 1 },
+          contextEndPercent: { value: null, known: 0, total: 1 },
+        },
+      ],
+    } as AnalyticsAggregateResponse;
+    const html = renderToStaticMarkup(<AnalyticsResponseView response={response} />);
+    expect(html).toContain('Equivalent API cost');
+    expect(html).toContain('Cost unknown');
+    expect(html).toContain('12');
+    expect(html).not.toContain('$0.00');
+  });
+
+  test('raw output calls absent pricing unknown rather than zero', () => {
+    const response = {
+      kind: 'raw',
+      query: '{id=ms59}',
+      parsed: { groupBy: [], matchers: [] },
+      scope: { allSessions: true, indexed: 1, matched: 1 },
+      index,
+      limit: 200,
+      truncated: false,
+      results: [{ id: 'ms59', status: 'running', tokens: 12, equivalentApiCostUsdMicros: null }],
+    } as unknown as AnalyticsRawResponse;
+    const html = renderToStaticMarkup(<AnalyticsResponseView response={response} />);
+    expect(html).toContain('Cost unknown');
+    expect(html).not.toContain('$0.00');
+  });
+
+  test('explains a transient unavailable index', () => {
     expect(analyticsErrorMessage(new ApiError(503, 'backfill'))).toContain('503');
   });
 });

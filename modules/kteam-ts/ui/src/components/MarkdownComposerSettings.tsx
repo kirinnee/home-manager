@@ -4,7 +4,7 @@
 import { MD_COMPOSE_DEFAULT, useMdComposePref, writeMdComposePref } from '../lib/md-compose';
 
 export const MARKDOWN_COMPOSER_EXPLANATION =
-  'Syntax highlighting only: Markdown markers stay visible. **bold** keeps its asterisks; fenced code, inline code, headings, links, lists, quotes and emphasis are coloured while you type.';
+  'Markdown markers stay visible in the native textarea. A separate bounded preview renders headings, lists, emphasis, code, links, and proven in-app references while you type.';
 
 export function MarkdownComposerSettings() {
   const pref = useMdComposePref();
@@ -39,8 +39,8 @@ export function MarkdownComposerSettings() {
       <p className="m-0 text-ui leading-base text-muted">{MARKDOWN_COMPOSER_EXPLANATION}</p>
       {MD_COMPOSE_DEFAULT === 'off' && (
         <p className="m-0 text-meta leading-base text-faint">
-          Off by default while this preview receives a real-device mobile Safari pass. Enabling it changes paint only;
-          the original textarea still owns input, selection, dictation, autocomplete and drafts.
+          Off by default while this experience receives a real-device mobile Safari pass. Enabling it changes
+          presentation only; the original textarea still owns input, selection, dictation, autocomplete and drafts.
         </p>
       )}
     </div>

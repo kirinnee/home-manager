@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
 import path from 'path';
-import { AttachmentStore, type StoredAttachment } from './attachments';
+import { AttachmentError, AttachmentStore, type StoredAttachment } from './attachments';
 import { listDirectory, readChanges, readDiff, readFileView } from './fs';
 import {
   startClaudeTranscriptWatcher,
@@ -2116,7 +2116,7 @@ export class SessionManager implements KTeamService {
     try {
       for (const attachment of request.initialAttachments ?? []) {
         if (attachment.base64.length > 28 * 1024 * 1024)
-          throw new Error('initial image exceeds the 20 MiB decoded limit');
+          throw new AttachmentError('attachment_too_large', 'initial attachment exceeds the 20 MiB decoded limit');
         const stored = await this.attachments.upload(id, Buffer.from(attachment.base64, 'base64'), {
           filename: attachment.filename,
           mime: attachment.mime,
@@ -7222,7 +7222,21 @@ export class SessionManager implements KTeamService {
   }
 
   private attachmentView(stored: {
-    manifest: { id: string; filename: string; mime: string; size: number; hash: string; time: string };
+    manifest: {
+      id: string;
+      filename: string;
+      mime: string;
+      size: number;
+      hash: string;
+      time: string;
+      textExtraction?: {
+        method: 'pdfjs' | 'docx-xml';
+        characters: number;
+        truncated: boolean;
+        totalPages?: number;
+        pagesRead?: number;
+      };
+    };
     path: string;
   }): AttachmentView {
     return {
@@ -7233,6 +7247,21 @@ export class SessionManager implements KTeamService {
       sha256: stored.manifest.hash,
       path: stored.path,
       createdAt: stored.manifest.time,
+      ...(stored.manifest.textExtraction
+        ? {
+            textExtraction: {
+              method: stored.manifest.textExtraction.method,
+              characters: stored.manifest.textExtraction.characters,
+              truncated: stored.manifest.textExtraction.truncated,
+              ...(stored.manifest.textExtraction.totalPages === undefined
+                ? {}
+                : { totalPages: stored.manifest.textExtraction.totalPages }),
+              ...(stored.manifest.textExtraction.pagesRead === undefined
+                ? {}
+                : { pagesRead: stored.manifest.textExtraction.pagesRead }),
+            },
+          }
+        : {}),
     };
   }
 

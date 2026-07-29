@@ -45,12 +45,15 @@ import {
   type MessagePin,
   type NotePin,
   type Pin as PinItem,
+  type PinSessionStatus,
 } from '../lib/pins';
 import { useSessionPins, usePinsSession } from '../hooks/usePins';
 import { requestJump, type JumpOutcome } from '../lib/pin-bridge';
 import { useInputModality } from '../hooks/useInputModality';
 import { cn, fmtClock } from '../lib/utils';
 import type { CodeReference } from '../lib/code-references';
+import type { AttentionId } from '../lib/attention';
+import type { PinReferenceLookup } from '../lib/remark-session-references';
 import { Markdown } from './Markdown';
 
 const UNDO_MS = 5_000;
@@ -92,6 +95,38 @@ export function locatingLabel(olderPagesLoaded: number): string {
   return olderPagesLoaded > 0
     ? `Locating… (loaded ${olderPagesLoaded}/${LOCATE_PAGE_CAP} older ${olderPagesLoaded === 1 ? 'page' : 'pages'})`
     : 'Locating…';
+}
+
+export interface PinOpenRequest {
+  reference: PinReferenceLookup;
+  sequence: number;
+}
+
+export type PinRequestOutcome = 'pending' | 'found' | 'missing' | 'unavailable' | 'wrong-session';
+
+/** Resolve only against the surface's own authoritative ledger. A pin id from
+ * another session must never land on a same-looking row in this one. */
+export function pinRequestOutcome(
+  request: PinOpenRequest,
+  surfaceSessionId: string,
+  status: PinSessionStatus,
+  pins: readonly Pick<PinItem, 'id'>[],
+): PinRequestOutcome {
+  if (request.reference.sessionId !== surfaceSessionId) return 'wrong-session';
+  if (pins.some(pin => pin.id === request.reference.pinId)) return 'found';
+  if (status === 'error') return 'unavailable';
+  if (status === 'ready') return 'missing';
+  return 'pending';
+}
+
+export function pinReferenceDomId(sessionId: string, pinId: string): string {
+  return `pin-reference-${sessionId}-${pinId}`;
+}
+
+export function pinRequestNotice(outcome: Exclude<PinRequestOutcome, 'pending' | 'found'>): string {
+  if (outcome === 'wrong-session') return 'This pin belongs to another session and was not opened here.';
+  if (outcome === 'unavailable') return 'Could not verify this pin because the pin ledger is unavailable.';
+  return "This pin is no longer in this session's pin ledger.";
 }
 
 const BLOCK_KIND_LABEL: Record<MessagePin['blockKind'], string> = {
@@ -158,8 +193,12 @@ export function PinSurface({
   titleId,
   onRequestClose,
   cwd,
+  requestedPin,
+  onRequestedPinHandled,
   onTaskOpen,
   onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
 }: {
   sessionId: string;
   presentation: 'pane' | 'sheet';
@@ -167,8 +206,12 @@ export function PinSurface({
   /** Called when a pin action wants the surface gone (a successful jump). */
   onRequestClose: () => void;
   cwd?: string;
+  requestedPin?: PinOpenRequest | null;
+  onRequestedPinHandled?: (sequence: number) => void;
   onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
 }) {
   const pins = useSessionPins(sessionId);
   const status = usePinsSession(sessionId);
@@ -181,6 +224,9 @@ export function PinSurface({
   const [editError, setEditError] = useState<string | null>(null);
   const [undo, setUndo] = useState<{ pin: PinItem } | null>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pinScrollerRef = useRef<HTMLDivElement | null>(null);
+  const [referenceNotice, setReferenceNotice] = useState<string | null>(null);
+  const [targetedId, setTargetedId] = useState<string | null>(null);
   const [jumpState, setJumpState] = useState<{
     id: string;
     phase: 'locating' | 'done';
@@ -199,7 +245,52 @@ export function PinSurface({
     setNoteError(null);
     setEditingId(null);
     setUndo(null);
+    setReferenceNotice(null);
+    setTargetedId(null);
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!requestedPin) return;
+    const outcome = pinRequestOutcome(requestedPin, sessionId, status, pins);
+    if (outcome === 'pending') return;
+
+    if (outcome !== 'found') {
+      setTargetedId(null);
+      setReferenceNotice(pinRequestNotice(outcome));
+      onRequestedPinHandled?.(requestedPin.sequence);
+      return;
+    }
+
+    setReferenceNotice(null);
+    setTargetedId(requestedPin.reference.pinId);
+    if (typeof window === 'undefined') {
+      onRequestedPinHandled?.(requestedPin.sequence);
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const scroller = pinScrollerRef.current;
+      const target = scroller
+        ? [...scroller.querySelectorAll<HTMLElement>('[data-pin-id]')].find(
+            row => row.dataset.pinId === requestedPin.reference.pinId,
+          )
+        : undefined;
+      if (scroller && target) {
+        const scrollerBox = scroller.getBoundingClientRect();
+        const targetBox = target.getBoundingClientRect();
+        scroller.scrollTo({
+          top: Math.max(0, scroller.scrollTop + targetBox.top - scrollerBox.top - scroller.clientHeight / 3),
+          behavior: 'smooth',
+        });
+      } else {
+        setTargetedId(null);
+        setReferenceNotice('Could not locate this pin in the visible pin list.');
+      }
+      // Clearing before this frame would cancel the exact-target landing when
+      // the parent removes the request prop.
+      onRequestedPinHandled?.(requestedPin.sequence);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [onRequestedPinHandled, pins, requestedPin, sessionId, status]);
 
   // SHEET ONLY, desktop pointer only: land focus in the add-note field on
   // open. The sheet is a focus-trapped dialog, so focus is already being
@@ -329,6 +420,12 @@ export function PinSurface({
         )}
       </div>
 
+      {referenceNotice && (
+        <div className="shrink-0 border-b border-warn/30 bg-warn/5 px-panel py-row-y text-meta text-warn" role="status">
+          {referenceNotice}
+        </div>
+      )}
+
       {/* Add-note form, pinned above the list so it never needs a scroll. */}
       <div className="shrink-0 border-b border-border-soft">
         <form
@@ -371,7 +468,7 @@ export function PinSurface({
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
+      <div ref={pinScrollerRef} data-pin-scroller="" className="min-h-0 flex-1 overflow-y-auto scroll-thin">
         <div className="mx-auto w-full max-w-2xl px-panel py-row-y">
           {undo && (
             <div className="mb-sm flex items-center justify-between gap-sm rounded-control border border-border-soft bg-surface-2 px-cell-x py-1.5 text-cell text-muted">
@@ -412,8 +509,11 @@ export function PinSurface({
                     onDelete={() => deleteWithUndo(pin)}
                     sessionId={sessionId}
                     cwd={cwd}
+                    targeted={targetedId === pin.id}
                     onTaskOpen={onTaskOpen}
                     onCodeReferenceOpen={onCodeReferenceOpen}
+                    onAttentionOpen={onAttentionOpen}
+                    onPinOpen={onPinOpen}
                   />
                 ) : (
                   <MessageRow
@@ -424,8 +524,11 @@ export function PinSurface({
                     onDelete={() => deleteWithUndo(pin)}
                     sessionId={sessionId}
                     cwd={cwd}
+                    targeted={targetedId === pin.id}
                     onTaskOpen={onTaskOpen}
                     onCodeReferenceOpen={onCodeReferenceOpen}
+                    onAttentionOpen={onAttentionOpen}
+                    onPinOpen={onPinOpen}
                   />
                 ),
               )}
@@ -453,6 +556,8 @@ export function PinSheet({
   cwd,
   onTaskOpen,
   onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
 }: {
   id: string;
   sessionId: string;
@@ -462,6 +567,8 @@ export function PinSheet({
   cwd?: string;
   onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
 }) {
   return (
     <BottomSheet
@@ -481,6 +588,8 @@ export function PinSheet({
           onRequestClose={onClose}
           onTaskOpen={onTaskOpen}
           onCodeReferenceOpen={onCodeReferenceOpen}
+          onAttentionOpen={onAttentionOpen}
+          onPinOpen={onPinOpen}
         />
       )}
     </BottomSheet>
@@ -528,9 +637,27 @@ function ProvenanceTag({ pin }: { pin: Pick<PinItem, 'by' | 'createdByName'> }) 
   );
 }
 
-function RowShell({ children }: { children: React.ReactNode }) {
+function RowShell({
+  children,
+  sessionId,
+  pinId,
+  targeted = false,
+}: {
+  children: React.ReactNode;
+  sessionId: string;
+  pinId: string;
+  targeted?: boolean;
+}) {
   return (
-    <li className="rounded-control border border-border-soft bg-surface px-cell-x py-1.5">
+    <li
+      id={pinReferenceDomId(sessionId, pinId)}
+      data-pin-id={pinId}
+      data-reference-target={targeted || undefined}
+      className={cn(
+        'rounded-control border border-border-soft bg-surface px-cell-x py-1.5',
+        targeted && 'ring-2 ring-accent ring-offset-2 ring-offset-surface',
+      )}
+    >
       <div className="flex min-w-0 items-start gap-sm">{children}</div>
     </li>
   );
@@ -582,8 +709,11 @@ function NoteRow({
   onDelete,
   sessionId,
   cwd,
+  targeted,
   onTaskOpen,
   onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
 }: {
   note: NotePin;
   editing: boolean;
@@ -600,12 +730,15 @@ function NoteRow({
   onDelete: () => void;
   sessionId: string;
   cwd?: string;
+  targeted: boolean;
   onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
 }) {
   if (editing) {
     return (
-      <RowShell>
+      <RowShell sessionId={sessionId} pinId={note.id} targeted={targeted}>
         <form
           className="min-w-0 flex-1"
           onSubmit={event => {
@@ -644,7 +777,7 @@ function NoteRow({
 
   const locating = jump?.phase === 'locating';
   return (
-    <RowShell>
+    <RowShell sessionId={sessionId} pinId={note.id} targeted={targeted}>
       <div className="min-w-0 flex-1">
         <div className="break-words text-cell text-fg-soft">
           <PinNoteContent
@@ -653,6 +786,8 @@ function NoteRow({
             cwd={cwd}
             onTaskOpen={onTaskOpen}
             onCodeReferenceOpen={onCodeReferenceOpen}
+            onAttentionOpen={onAttentionOpen}
+            onPinOpen={onPinOpen}
           />
         </div>
         {/* Provenance, only when this note was pinned FROM A SELECTION and still
@@ -691,6 +826,8 @@ export function PinProse({
   cwd,
   onTaskOpen,
   onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
   className,
 }: {
   text: string;
@@ -698,6 +835,8 @@ export function PinProse({
   cwd?: string;
   onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
   className?: string;
 }) {
   return (
@@ -708,6 +847,8 @@ export function PinProse({
       cwd={cwd}
       onTaskOpen={onTaskOpen}
       onCodeReferenceOpen={onCodeReferenceOpen}
+      onAttentionOpen={onAttentionOpen}
+      onPinOpen={onPinOpen}
     />
   );
 }
@@ -721,12 +862,16 @@ export function PinNoteContent({
   cwd,
   onTaskOpen,
   onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
 }: {
   text: string;
   sessionId: string;
   cwd?: string;
   onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
 }) {
   const pr = parseGithubPr(text);
   if (!pr)
@@ -737,6 +882,8 @@ export function PinNoteContent({
         cwd={cwd}
         onTaskOpen={onTaskOpen}
         onCodeReferenceOpen={onCodeReferenceOpen}
+        onAttentionOpen={onAttentionOpen}
+        onPinOpen={onPinOpen}
         className="whitespace-pre-wrap break-words text-cell text-fg-soft"
       />
     );
@@ -765,8 +912,11 @@ function MessageRow({
   onDelete,
   sessionId,
   cwd,
+  targeted,
   onTaskOpen,
   onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
 }: {
   pin: MessagePin;
   jump: JumpSlice | null;
@@ -774,13 +924,16 @@ function MessageRow({
   onDelete: () => void;
   sessionId: string;
   cwd?: string;
+  targeted: boolean;
   onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
 }) {
   const locating = jump?.phase === 'locating';
   const clock = pin.ts ? fmtClock(pin.ts) : '';
   return (
-    <RowShell>
+    <RowShell sessionId={sessionId} pinId={pin.id} targeted={targeted}>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-xs text-meta text-faint">
           <span className="kt-label">{BLOCK_KIND_LABEL[pin.blockKind]}</span>
@@ -792,6 +945,8 @@ function MessageRow({
           cwd={cwd}
           onTaskOpen={onTaskOpen}
           onCodeReferenceOpen={onCodeReferenceOpen}
+          onAttentionOpen={onAttentionOpen}
+          onPinOpen={onPinOpen}
           className="m-0 mt-0.5 line-clamp-3 break-words text-cell text-fg-soft"
         />
         <ProvenanceTag pin={pin} />

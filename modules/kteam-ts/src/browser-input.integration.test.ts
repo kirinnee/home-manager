@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { BrowserDisplayService } from './browser-display';
 import { BrowserRuntime, resolveChromeExecutable } from './browser-runtime';
 import type { BrowserScreencastFrame } from './browser-types';
 
@@ -22,8 +23,10 @@ const chromeExecutable = (() => {
 
 let server: ReturnType<typeof Bun.serve>;
 let fixtureUrl = '';
+const displayService = new BrowserDisplayService();
+let browserDisplay: string | undefined;
 
-beforeAll(() => {
+beforeAll(async () => {
   server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
@@ -86,6 +89,8 @@ beforeAll(() => {
                        width: ${FIELD.width}px; height: ${FIELD.height}px; }
               #log { position: absolute; top: 340px; }
               #value { position: absolute; top: 370px; }
+              #fingerprint { position: absolute; top: 400px; }
+              #cookie { position: absolute; top: 430px; }
               #popup { position: absolute; left: 520px; top: 125px; width: 160px; height: 60px; }
             </style>
           </head>
@@ -95,6 +100,8 @@ beforeAll(() => {
             <input id="field" aria-label="Known field" />
             <output id="log">idle</output>
             <output id="value"></output>
+            <output id="fingerprint"></output>
+            <output id="cookie"></output>
             <output id="page">${historyPage ?? 'input'}</output>
             <script>
               document.querySelector('#hit').addEventListener('click', () => {
@@ -106,18 +113,34 @@ beforeAll(() => {
               document.querySelector('#popup').addEventListener('click', () => {
                 window.open('/popup', '_blank');
               });
+              const canvas = document.createElement('canvas');
+              const gl = canvas.getContext('webgl');
+              const debug = gl?.getExtension('WEBGL_debug_renderer_info');
+              document.querySelector('#fingerprint').textContent = JSON.stringify({
+                userAgent: navigator.userAgent,
+                webdriver: navigator.webdriver,
+                webglRenderer: gl && debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : null,
+              });
+              document.querySelector('#cookie').textContent = document.cookie;
             </script>
           </body>
         </html>`,
-        { headers: { 'content-type': 'text/html; charset=utf-8' } },
+        {
+          headers: {
+            'content-type': 'text/html; charset=utf-8',
+            ...(url.pathname === '/cookie' ? { 'set-cookie': 'b31=durable; Max-Age=3600; Path=/; SameSite=Lax' } : {}),
+          },
+        },
       );
     },
   });
   fixtureUrl = `http://127.0.0.1:${server.port}`;
+  if (chromeExecutable) browserDisplay = (await displayService.start()).display;
 });
 
-afterAll(() => {
+afterAll(async () => {
   server.stop(true);
+  await displayService.close();
 });
 
 async function firstFrame(
@@ -196,12 +219,67 @@ function startNoStoreHistoryServer(): ReturnType<typeof Bun.serve> {
 }
 
 describe.skipIf(!chromeExecutable)('real Chrome browser input and page identity', () => {
+  test('is genuinely headed and keeps explicit SwiftShader WebGL', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'kteam-browser-fingerprint-'));
+    let runtime: BrowserRuntime | undefined;
+    try {
+      runtime = await BrowserRuntime.launch('browser-fingerprint-integration', root, VIEWPORT, {
+        chromeExecutable: chromeExecutable!,
+        ...(browserDisplay ? { display: browserDisplay } : {}),
+      });
+      await runtime.navigate(fixtureUrl);
+      const fingerprint = JSON.parse((await runtime.read('#fingerprint')).text) as {
+        userAgent: string;
+        webdriver: boolean;
+        webglRenderer: string | null;
+      };
+      expect(fingerprint.userAgent).toContain('Chrome/');
+      expect(fingerprint.userAgent).not.toContain('HeadlessChrome');
+      expect(fingerprint.webdriver).toBe(false);
+      expect(fingerprint.webglRenderer).toContain('SwiftShader');
+    } finally {
+      await runtime?.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test('reuses one durable cookie profile across different session runtimes', async () => {
+    const base = await mkdtemp(path.join(tmpdir(), 'kteam-browser-durable-profile-'));
+    const profile = path.join(base, 'shared-profile');
+    let first: BrowserRuntime | undefined;
+    let second: BrowserRuntime | undefined;
+    try {
+      first = await BrowserRuntime.launch('browser-profile-first', path.join(base, 'first'), VIEWPORT, {
+        chromeExecutable: chromeExecutable!,
+        ...(browserDisplay ? { display: browserDisplay } : {}),
+        profile,
+      });
+      await first.navigate(`${fixtureUrl}/cookie`);
+      expect((await first.read('#cookie')).text).toContain('b31=durable');
+      await first.close();
+      first = undefined;
+
+      second = await BrowserRuntime.launch('browser-profile-second', path.join(base, 'second'), VIEWPORT, {
+        chromeExecutable: chromeExecutable!,
+        ...(browserDisplay ? { display: browserDisplay } : {}),
+        profile,
+      });
+      await second.navigate(fixtureUrl);
+      expect((await second.read('#cookie')).text).toContain('b31=durable');
+    } finally {
+      await first?.close();
+      await second?.close();
+      await rm(base, { recursive: true, force: true });
+    }
+  }, 45_000);
+
   test('returns coherent ready snapshots promptly across redirect-backed history traversal', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'kteam-browser-history-'));
     let runtime: BrowserRuntime | undefined;
     try {
       runtime = await BrowserRuntime.launch('browser-history-integration', root, VIEWPORT, {
         chromeExecutable: chromeExecutable!,
+        ...(browserDisplay ? { display: browserDisplay } : {}),
       });
       const pageA = await runtime.navigate(`${fixtureUrl}/a`);
       expect(pageA).toMatchObject({
@@ -284,6 +362,7 @@ describe.skipIf(!chromeExecutable)('real Chrome browser input and page identity'
       delayedHistoryRequests.B = 0;
       runtime = await BrowserRuntime.launch('browser-delayed-history-integration', root, VIEWPORT, {
         chromeExecutable: chromeExecutable!,
+        ...(browserDisplay ? { display: browserDisplay } : {}),
       });
       const pageA = await runtime.navigate(`${fixtureUrl}/delayed-a`);
       const pageB = await runtime.navigate(`${fixtureUrl}/delayed-b`);
@@ -348,6 +427,7 @@ describe.skipIf(!chromeExecutable)('real Chrome browser input and page identity'
         const origin = `http://127.0.0.1:${unavailable.port}`;
         runtime = await BrowserRuntime.launch(`browser-${direction}-failure-integration`, root, VIEWPORT, {
           chromeExecutable: chromeExecutable!,
+          ...(browserDisplay ? { display: browserDisplay } : {}),
         });
         await runtime.navigate(`${origin}/a`);
         await runtime.navigate(`${origin}/b`);
@@ -378,6 +458,7 @@ describe.skipIf(!chromeExecutable)('real Chrome browser input and page identity'
     try {
       runtime = await BrowserRuntime.launch('browser-input-integration', root, VIEWPORT, {
         chromeExecutable: chromeExecutable!,
+        ...(browserDisplay ? { display: browserDisplay } : {}),
       });
       const initial = await runtime.navigate(fixtureUrl);
       expect(initial.actedPageId).toBe(initial.activePageId);

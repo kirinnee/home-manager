@@ -493,7 +493,13 @@ program
   .option('--cwd <dir>', '', process.cwd())
   .option(
     '-i, --image <file>',
-    'attach an initial image; repeatable',
+    'attach an initial image (compatibility alias for --file); repeatable',
+    (value, values: string[]) => [...values, value],
+    [],
+  )
+  .option(
+    '-f, --file <file>',
+    'attach an initial supported image or document; repeatable',
     (value, values: string[]) => [...values, value],
     [],
   )
@@ -521,15 +527,17 @@ program
   .option('--json')
   .action(async (parts: string[], options: Record<string, string | number | boolean | undefined>, command: Command) => {
     const initialAttachments = await Promise.all(
-      ((options.image as unknown as string[]) ?? []).map(async filename => {
-        const file = Bun.file(filename);
-        const bytes = await file.arrayBuffer();
-        return {
-          filename: path.basename(filename),
-          ...(file.type.startsWith('image/') ? { mime: file.type } : {}),
-          base64: Buffer.from(bytes).toString('base64'),
-        };
-      }),
+      [...((options.image as unknown as string[]) ?? []), ...((options.file as unknown as string[]) ?? [])].map(
+        async filename => {
+          const file = Bun.file(filename);
+          const bytes = await file.arrayBuffer();
+          return {
+            filename: path.basename(filename),
+            ...(file.type.startsWith('image/') ? { mime: file.type } : {}),
+            base64: Buffer.from(bytes).toString('base64'),
+          };
+        },
+      ),
     );
     const filePrompt = options.promptFile ? (await readFile(String(options.promptFile), 'utf8')).trim() : '';
     const argPrompt = parts.join(' ').trim();
@@ -690,7 +698,18 @@ program
   .command('send')
   .argument('<id>')
   .argument('[message...]')
-  .option('-i, --image <file>', 'attach image; repeatable', (value, values: string[]) => [...values, value], [])
+  .option(
+    '-i, --image <file>',
+    'attach image (compatibility alias for --file); repeatable',
+    (value, values: string[]) => [...values, value],
+    [],
+  )
+  .option(
+    '-f, --file <file>',
+    'attach a supported image or document; repeatable',
+    (value, values: string[]) => [...values, value],
+    [],
+  )
   .option('--message-file <file>', 'read the message from a file (use for long messages)')
   .option(
     '--now',
@@ -705,12 +724,12 @@ program
     async (
       id: string,
       parts: string[],
-      options: { image: string[]; messageFile?: string; now?: boolean; ask?: boolean; until?: string },
+      options: { image: string[]; file: string[]; messageFile?: string; now?: boolean; ask?: boolean; until?: string },
     ) => {
       const api = await client();
       const fileMessage = options.messageFile ? (await readFile(options.messageFile, 'utf8')).trim() : '';
       const message = [parts.join(' ').trim(), fileMessage].filter(Boolean).join('\n\n');
-      const attachments = await Promise.all(options.image.map(file => api.upload(id, file)));
+      const attachments = await Promise.all([...options.image, ...options.file].map(file => api.upload(id, file)));
       // PEER MESSAGING: a send issued from inside a teammate pane is a message
       // from THAT SESSION, not from the human. The daemon uses this only to
       // label the message (and to route the reply for --ask); authorization is

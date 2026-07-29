@@ -22,7 +22,7 @@ import type {
 } from './tasks';
 import { TerminalApi } from './terminal-api';
 import type { TerminalService } from './terminal-service';
-import { BrowserApi } from './browser-api';
+import { BrowserApi, BrowserLoginApi, type BrowserLoginStatusView } from './browser-api';
 import { BrowserService, type ManagedBrowserRuntime } from './browser-service';
 import {
   BROWSER_MAX_PAGE_ID_LENGTH,
@@ -33,6 +33,7 @@ import {
 } from './browser-types';
 import { createPaths } from './paths';
 import { RuntimeModelsApi } from './runtime-models-api';
+import { AttachmentError } from './attachments';
 
 const view: SessionView = {
   directory: '/tmp/kteam/s1',
@@ -110,7 +111,12 @@ class FakeService implements KTeamService {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   };
-  addAttachment = async (): Promise<AttachmentView> => ({
+  addAttachment = async (
+    _id: string,
+    _filename: string,
+    _mime: string,
+    _bytes: Uint8Array,
+  ): Promise<AttachmentView> => ({
     id: 'att_x',
     filename: 'x.png',
     mime: 'image/png',
@@ -119,7 +125,10 @@ class FakeService implements KTeamService {
     path: '/tmp/x',
     createdAt: '2026-01-01T00:00:00Z',
   });
-  getAttachment = async () => ({ attachment: await this.addAttachment(), bytes: new Uint8Array([1, 2]) });
+  getAttachment = async () => ({
+    attachment: await this.addAttachment('s1', 'x.png', 'image/png', new Uint8Array([1, 2])),
+    bytes: new Uint8Array([1, 2]),
+  });
   fsList = async (_id: string, relativePath?: string): Promise<FsListing> => ({
     root: '/tmp',
     path: relativePath ?? '',
@@ -293,6 +302,78 @@ describe('kteam daemon API', () => {
       headers: { authorization: 'Bearer secret' },
     });
     expect(snap.headers.get('x-kteam-version')).toBeTruthy();
+  });
+
+  test('uploads and serves document bytes with extraction metadata and safe download headers', async () => {
+    const service = new FakeService();
+    let uploaded: { filename: string; mime: string; bytes: number[] } | undefined;
+    const document: AttachmentView = {
+      id: `att_${'a'.repeat(64)}`,
+      filename: 'quarterly-report.pdf',
+      mime: 'application/pdf',
+      size: 5,
+      sha256: 'a'.repeat(64),
+      path: '/daemon-only/quarterly-report.pdf',
+      createdAt: '2026-07-28T12:00:00.000Z',
+      textExtraction: {
+        method: 'pdfjs',
+        characters: 18,
+        truncated: false,
+        totalPages: 1,
+        pagesRead: 1,
+      },
+    };
+    service.addAttachment = async (_id, filename, mime, bytes) => {
+      uploaded = { filename, mime, bytes: Array.from(bytes) };
+      return document;
+    };
+    service.getAttachment = async () => ({ attachment: document, bytes: new TextEncoder().encode('%PDF') });
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}/v1/sessions/s1/attachments`;
+    const form = new FormData();
+    form.set('file', new File([new TextEncoder().encode('%PDF')], 'quarterly report.pdf', { type: 'application/pdf' }));
+    const upload = await fetch(base, {
+      method: 'POST',
+      headers: { authorization: 'Bearer secret' },
+      body: form,
+    });
+    expect(upload.status).toBe(201);
+    expect((await upload.json()) as AttachmentView).toEqual(document);
+    expect(uploaded).toEqual({
+      filename: 'quarterly report.pdf',
+      mime: 'application/pdf',
+      bytes: Array.from(new TextEncoder().encode('%PDF')),
+    });
+
+    const download = await fetch(`${base}/${document.id}`, { headers: { authorization: 'Bearer secret' } });
+    expect(download.status).toBe(200);
+    expect(download.headers.get('content-type')).toBe('application/pdf');
+    expect(download.headers.get('content-disposition')).toBe('attachment; filename="quarterly-report.pdf"');
+    expect(download.headers.get('cache-control')).toBe('no-store');
+    expect(download.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(new TextEncoder().encode('%PDF'));
+  });
+
+  test('returns the real typed attachment failure instead of a generic conflict', async () => {
+    const service = new FakeService();
+    service.addAttachment = async () => {
+      throw new AttachmentError('no_extractable_text', 'PDF has no extractable text; it looks like a scan');
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const form = new FormData();
+    form.set('file', new File(['%PDF'], 'scan.pdf', { type: 'application/pdf' }));
+    const response = await fetch(`http://127.0.0.1:${server.port}/v1/sessions/s1/attachments`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer secret' },
+      body: form,
+    });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({
+      error: 'PDF has no extractable text; it looks like a scan',
+      code: 'no_extractable_text',
+    });
   });
 
   test('serves the four read-only filesystem routes with their frozen wire shapes', async () => {
@@ -2272,5 +2353,203 @@ describe('create idempotency (exit-143 spawn timeouts, 2026-07-23/24)', () => {
     });
     expect(wrong.status).toBe(404);
     expect(service.starts).toBe(1);
+  });
+});
+
+describe('the human browser login window, mounted (#B31)', () => {
+  /** Structural stand-in for browser-login.ts: the route must be provable
+   *  without Chrome, x11vnc, or the shared profile lease. */
+  class Lifecycle {
+    calls: string[] = [];
+    open: BrowserLoginStatusView = {
+      state: 'open',
+      profilePrimed: false,
+      openedAt: '2026-07-28T23:10:00.000Z',
+      expiresAt: '2026-07-28T23:25:00.000Z',
+      connection: {
+        host: '127.0.0.1',
+        port: 5951,
+        password: 'Sq7fXk2p',
+        sshTunnel: 'ssh -N -L 5951:127.0.0.1:5951 kirin@box',
+      },
+    };
+    async status() {
+      this.calls.push('status');
+      return this.open;
+    }
+    async start(options: { minutes?: number }) {
+      this.calls.push(`start:${options.minutes ?? 'default'}`);
+      return this.open;
+    }
+    async stop(options: { primed?: boolean }) {
+      this.calls.push(`stop:${options.primed === undefined ? 'default' : options.primed}`);
+      return { state: 'closed' as const, profilePrimed: options.primed === true };
+    }
+    async confirm() {
+      this.calls.push('confirm');
+      return { ...this.open, profilePrimed: true };
+    }
+  }
+
+  function loginServer() {
+    const lifecycle = new Lifecycle();
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      wardenToken: 'warden',
+      service: new FakeService(),
+      browserLogin: new BrowserLoginApi(lifecycle),
+    });
+    servers.push(server);
+    return { lifecycle, base: `http://127.0.0.1:${server.port}` };
+  }
+
+  const LOGIN = '/v1/browser/login';
+  const json = { 'content-type': 'application/json' };
+
+  // THE REGRESSION TEST FOR THE LIVE GAP, against a REAL server rather than the
+  // helper. `browserWardenDenial` being right is not proof that api-server calls
+  // it ABOVE its generic `if (method === 'GET') return undefined` allowance —
+  // and that ordering is the entire fix. GET is the dangerous verb here: it is
+  // what would have handed a warden the live VNC port and password.
+  test('a warden-scoped token is 403 on GET, start, and stop — and reaches no lifecycle', async () => {
+    const { lifecycle, base } = loginServer();
+    const warden = { authorization: 'Bearer warden' };
+
+    const read = await fetch(`${base}${LOGIN}`, { headers: warden });
+    expect(read.status).toBe(403);
+    expect(((await read.json()) as { error: string }).error).toContain('human browser login window');
+
+    for (const action of ['start', 'stop'] as const) {
+      const denied = await fetch(`${base}${LOGIN}`, {
+        method: 'POST',
+        headers: { ...warden, ...json },
+        body: JSON.stringify({ action }),
+      });
+      expect(denied.status).toBe(403);
+    }
+    // Denied at the gate: the window was never asked about, let alone opened.
+    expect(lifecycle.calls).toEqual([]);
+  });
+
+  // The warden gate never sees this caller. A peer presents the SAME shared
+  // admin bearer the human does; only the server-resolved actor separates them.
+  test('a peer holding the shared admin bearer is 403 on every verb', async () => {
+    const { lifecycle, base } = loginServer();
+    const peer = { authorization: 'Bearer secret', 'x-kteam-session-id': 'ms59odix-781028bb' };
+
+    expect((await fetch(`${base}${LOGIN}`, { headers: peer })).status).toBe(403);
+    for (const action of ['start', 'stop', 'confirm'] as const) {
+      const denied = await fetch(`${base}${LOGIN}`, {
+        method: 'POST',
+        headers: { ...peer, ...json },
+        body: JSON.stringify({ action }),
+      });
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toMatchObject({ code: 'forbidden' });
+    }
+
+    // Refused BEFORE the body is parsed: a denied caller must be told it was
+    // denied, not that its JSON was malformed.
+    const malformed = await fetch(`${base}${LOGIN}`, {
+      method: 'POST',
+      headers: { ...peer, ...json },
+      body: 'not json',
+    });
+    expect(malformed.status).toBe(403);
+    expect(lifecycle.calls).toEqual([]);
+  });
+
+  test('a human admin — UI or CLI — drives it, and the actor is never read from the request', async () => {
+    const { lifecycle, base } = loginServer();
+    // No self-identification header at all => admin-ui (the SPA).
+    const ui = await fetch(`${base}${LOGIN}`, { headers: { authorization: 'Bearer secret' } });
+    expect(ui.status).toBe(200);
+    expect(await ui.json()).toMatchObject({ state: 'open', connection: { port: 5951 } });
+
+    const cli = await fetch(`${base}${LOGIN}`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer secret', 'x-kteam-client': 'cli', ...json },
+      body: JSON.stringify({ action: 'start', minutes: 5 }),
+    });
+    expect(cli.status).toBe(200);
+
+    // A body/query that CLAIMS to be the human changes nothing: the actor comes
+    // from resolveApiActor, and this caller is still a peer.
+    const spoofed = await fetch(`${base}${LOGIN}?actor=admin-cli`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer secret', 'x-kteam-session-id': 'sneaky', ...json },
+      body: JSON.stringify({ action: 'start', actor: 'admin-cli' }),
+    });
+    expect(spoofed.status).toBe(403);
+
+    const closed = await fetch(`${base}${LOGIN}`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer secret', ...json },
+      body: JSON.stringify({ action: 'stop', primed: true }),
+    });
+    expect(closed.status).toBe(200);
+    expect(await closed.json()).toEqual({ state: 'closed', profilePrimed: true });
+    expect(lifecycle.calls).toEqual(['status', 'start:5', 'stop:true']);
+  });
+
+  // The body carries a live VNC credential. The policy is per-ROUTE: GET, POST,
+  // and every error shape alike, so it cannot depend on which branch answered.
+  test('every response is no-store, including the 403s and the 400s', async () => {
+    const { base } = loginServer();
+    const responses = [
+      await fetch(`${base}${LOGIN}`, { headers: { authorization: 'Bearer secret' } }),
+      await fetch(`${base}${LOGIN}`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer secret', ...json },
+        body: JSON.stringify({ action: 'start' }),
+      }),
+      await fetch(`${base}${LOGIN}`, { headers: { authorization: 'Bearer warden' } }),
+      await fetch(`${base}${LOGIN}`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer secret', ...json },
+        body: JSON.stringify({ action: 'restart' }),
+      }),
+    ];
+    expect(responses.map(response => response.status)).toEqual([200, 200, 403, 400]);
+    for (const response of responses) expect(response.headers.get('cache-control')).toBe('no-store');
+  });
+
+  // `/v1/sessions` IS warden-readable — it survives the generic GET allowance
+  // by design. Folding the window's state into it (let alone its port) would
+  // hand a warden exactly what the separately-gated route exists to withhold,
+  // through a payload nobody would think to re-audit.
+  test('the open window never leaks into the warden-readable fleet payload', async () => {
+    const { base } = loginServer();
+    const admin = { authorization: 'Bearer secret' };
+    const before = await (await fetch(`${base}/v1/sessions`, { headers: admin })).text();
+
+    const opened = await fetch(`${base}${LOGIN}`, {
+      method: 'POST',
+      headers: { ...admin, ...json },
+      body: JSON.stringify({ action: 'start' }),
+    });
+    expect(opened.status).toBe(200);
+
+    const after = await (await fetch(`${base}/v1/sessions`, { headers: admin })).text();
+    expect(after).toBe(before);
+    for (const secret of ['5951', 'Sq7fXk2p', 'sshTunnel', 'browserLogin', 'profilePrimed']) {
+      expect(after).not.toContain(secret);
+    }
+    // ...and a warden reading the fleet sees the same bytes, not a redaction.
+    const warden = await fetch(`${base}/v1/sessions`, { headers: { authorization: 'Bearer warden' } });
+    expect(warden.status).toBe(200);
+    expect(await warden.text()).toBe(before);
+  });
+
+  test('an unmounted login window is a truthful 404, not a confident "closed"', async () => {
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service: new FakeService() });
+    servers.push(server);
+    const response = await fetch(`http://127.0.0.1:${server.port}${LOGIN}`, {
+      headers: { authorization: 'Bearer secret' },
+    });
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ code: 'unknown_route', path: LOGIN });
   });
 });

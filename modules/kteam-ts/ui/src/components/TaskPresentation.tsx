@@ -14,7 +14,9 @@ import { Badge, Card, Label, PanelBody, PanelHeader } from './Primitives';
 import { Markdown } from './Markdown';
 import { Link } from '../lib/router';
 import { parseGithubPr } from '../lib/pins';
+import type { AttentionId } from '../lib/attention';
 import type { CodeReference } from '../lib/code-references';
+import type { PinReferenceLookup } from '../lib/remark-session-references';
 import {
   taskActivityText,
   taskBoardLane,
@@ -116,6 +118,7 @@ export function TaskRow({
   const statusIsImplied = !showStatusBadge || (!task.blocked && impliedLane === lane);
   const askOrigin = taskAskOrigin(task);
   const stale = task.live.staleness ? TASK_STALENESS_COPY[task.live.staleness] : null;
+  const phaseNote = !task.blocked && task.phase !== 'dropped' ? task.statusReason : null;
   const pr = task.links.prs.map(parseGithubPr).find(Boolean);
   return (
     <div data-task-id={task.id} className="group min-w-0 px-3 py-2 hover:bg-surface-2">
@@ -151,6 +154,11 @@ export function TaskRow({
         <span className="block min-w-0 w-full">
           {task.blocked && task.blockedReason && (
             <span className="mt-0.5 block truncate text-xs font-medium text-warn">{task.blockedReason}</span>
+          )}
+          {phaseNote && (
+            <span className="mt-0.5 block truncate text-xs font-medium text-warn" title={phaseNote}>
+              Phase note · {phaseNote}
+            </span>
           )}
           {task.blockedBy.length > 0 && (
             <span className="mt-0.5 block truncate text-xs text-warn">
@@ -206,6 +214,8 @@ export function TaskDetail({
   conflicts,
   onOpenTask,
   onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
   surfaceSessionId,
   surfaceCwd,
 }: {
@@ -214,6 +224,8 @@ export function TaskDetail({
   conflicts?: TaskFileConflict[];
   onOpenTask?: (id: string, opener?: HTMLElement | null) => void;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
   /** Session that owns the hosting Files pane. */
   surfaceSessionId?: string;
   /** Root of that same Files pane; task.repo is not an opening context. */
@@ -263,6 +275,8 @@ export function TaskDetail({
             onOpenTask={onOpenTask}
             codeReferenceContext={codeReferenceContext}
             onCodeReferenceOpen={openCodeReference}
+            onAttentionOpen={onAttentionOpen}
+            onPinOpen={onPinOpen}
           />
         ) : (
           <p className="text-ui text-muted">Loading original ask…</p>
@@ -276,6 +290,8 @@ export function TaskDetail({
               cwd={codeReferenceContext?.cwd}
               onOpenTask={onOpenTask}
               onCodeReferenceOpen={openCodeReference}
+              onAttentionOpen={onAttentionOpen}
+              onPinOpen={onPinOpen}
               className="mt-2"
             />
           </section>
@@ -328,6 +344,7 @@ function TaskQuickSummary({ task }: { task: TaskSummary }) {
   const state = task.blocked ? TASK_STATUS_META.blocked : TASK_BOARD_LANE_META[taskBoardLane(task.phase)];
   const assignee = task.live.assigneeName?.trim() || task.assignee?.trim() || null;
   const blocker = task.blockedReason ?? task.statusReason ?? 'Blocked; no reason recorded.';
+  const phaseNote = !task.blocked && task.phase !== 'dropped' ? task.statusReason : null;
   const headingId = `task-quick-summary-${task.id}`;
   return (
     <section aria-labelledby={headingId} className="rounded-control border border-accent-border bg-accent-soft p-3">
@@ -338,6 +355,7 @@ function TaskQuickSummary({ task }: { task: TaskSummary }) {
         </p>
         <p>{task.title}</p>
         {task.blocked && <p className="whitespace-pre-wrap break-words text-warn">{blocker}</p>}
+        {phaseNote && <p className="whitespace-pre-wrap break-words text-warn">Phase note · {phaseNote}</p>}
         {task.blockedBy.length > 0 && <p>Waiting on {task.blockedBy.map(taskReference).join(', ')}.</p>}
         {task.blockedSince && <p>Blocked since {fmtAbsolute(task.blockedSince)}.</p>}
         <p>{assignee ? `Assigned to ${assignee}.` : 'Unassigned.'}</p>
@@ -353,6 +371,8 @@ function TaskMarkdown({
   cwd,
   onOpenTask,
   onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
   className = '',
 }: {
   text: string;
@@ -360,6 +380,8 @@ function TaskMarkdown({
   cwd?: string | null;
   onOpenTask?: (id: string, opener?: HTMLElement | null) => void;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
   className?: string;
 }) {
   return (
@@ -370,6 +392,8 @@ function TaskMarkdown({
         cwd={cwd ?? undefined}
         onTaskOpen={onOpenTask}
         onCodeReferenceOpen={onCodeReferenceOpen}
+        onAttentionOpen={onAttentionOpen}
+        onPinOpen={onPinOpen}
       />
     </div>
   );
@@ -429,11 +453,15 @@ function AskAndClarifications({
   onOpenTask,
   codeReferenceContext,
   onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
 }: {
   task: TaskRecord;
   onOpenTask?: (id: string, opener?: HTMLElement | null) => void;
   codeReferenceContext: TaskCodeReferenceContext | null;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
 }) {
   return (
     <>
@@ -446,6 +474,8 @@ function AskAndClarifications({
             cwd={codeReferenceContext?.cwd}
             onOpenTask={onOpenTask}
             onCodeReferenceOpen={onCodeReferenceOpen}
+            onAttentionOpen={onAttentionOpen}
+            onPinOpen={onPinOpen}
           />
         </blockquote>
         <SourceLink source={task.ask.source} label="Open ask source" />
@@ -467,6 +497,8 @@ function AskAndClarifications({
                   cwd={codeReferenceContext?.cwd}
                   onOpenTask={onOpenTask}
                   onCodeReferenceOpen={onCodeReferenceOpen}
+                  onAttentionOpen={onAttentionOpen}
+                  onPinOpen={onPinOpen}
                 />
                 <p className="mt-1 text-xs text-muted">
                   {clarification.byName ?? clarification.by ?? 'unknown'} · {fmtAbsolute(clarification.at)}

@@ -84,6 +84,9 @@ describe('provenance and scope', () => {
     await expect(s.add(SID, { ...explicit('forged'), source: 'question' }, AGENT)).rejects.toMatchObject({
       code: 'forbidden',
     });
+    await expect(
+      s.add(SID, { ...explicit('forged reopen'), sourceRef: 'task-reopened:F31' }, AGENT),
+    ).rejects.toMatchObject({ code: 'forbidden' });
     const snap = await s.add(SID, { ...explicit('dated'), waitingSince: '2000-01-01T00:00:00.000Z' }, AGENT);
     expect(snap.items[0]!.waitingSince).not.toBe('2000-01-01T00:00:00.000Z');
   });
@@ -215,6 +218,23 @@ describe('explicit resolution audit', () => {
     const reraised = await s.addFromSource(SID, input);
     expect(reraised.count).toBe(1);
     expect(reraised.resolved).toHaveLength(1);
+  });
+
+  test('resolving shipped-reopen Attention stamps a durable per-task watermark', async () => {
+    const s = service();
+    await s.addFromSource(SID, {
+      ...explicit('Shipped task reopened'),
+      sourceRef: 'task-reopened:F31',
+      waitingSince: '2026-07-28T01:00:00.000Z',
+    });
+    const resolved = await s.resolveFromSource(
+      SID,
+      'agent-raised',
+      'task-reopened:F31',
+      'The human reviewed it.',
+      HUMAN,
+    );
+    expect(resolved.reopenResolvedAt?.['F31']).toBe(resolved.resolved[0]!.resolvedAt);
   });
 
   test('trusted source resolution records a cross-session lead without opening a general write path', async () => {

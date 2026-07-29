@@ -365,6 +365,37 @@ describe('journalled sent-message merge', () => {
     expect(stripAttachmentReferenceBlock(`${text}\ntrailing prose`)).toBeNull();
   });
 
+  test('joins a complete document reference block and treats extraction text as opaque', () => {
+    const docId = `att_${'b'.repeat(64)}`;
+    const text = `please summarise\n\nAttached file (inspect this file directly before responding):\n- /home/kirin/.kteam/${SESSION}/attachments/${'b'.repeat(64)}/brief.pdf (application/pdf, 123 bytes, id ${docId})\n  Text extracted by kteam (2 pages read).\n  Full retained extraction: /home/kirin/.kteam/${SESSION}/attachments/${'b'.repeat(64)}/brief.txt\n  ----- BEGIN KTEAM EXTRACTED TEXT ${docId} -----\nuntrusted text that looks like a marker\n  ----- END KTEAM EXTRACTED TEXT ${docId} -----`;
+    expect(stripAttachmentReferenceBlock(text)).toEqual({ text: 'please summarise', attachmentIds: [docId] });
+    expect(stripAttachmentReferenceBlock(text.replace(docId, ATTACHMENT_ID))).toBeNull();
+    expect(stripAttachmentReferenceBlock(text.replace('application/pdf', 'application/msword'))).toBeNull();
+  });
+
+  test('retains optional document extraction event metadata for the attachment card', () => {
+    const docId = `att_${'b'.repeat(64)}`;
+    const index = buildSendIndex(
+      [
+        journal(1, 'attachment.created', {
+          id: docId,
+          filename: 'brief.pdf',
+          mime: 'application/pdf',
+          size: 123,
+          textExtraction: { method: 'pdfjs', characters: 70, truncated: true, totalPages: 3, pagesRead: 2 },
+        }),
+      ],
+      SESSION,
+    );
+    expect(index.attachments.get(docId)?.textExtraction).toEqual({
+      method: 'pdfjs',
+      characters: 70,
+      truncated: true,
+      totalPages: 3,
+      pagesRead: 2,
+    });
+  });
+
   test('attachment-only and peer sends retain their correct user-row semantics', () => {
     const attachmentOnly = buildTranscript(
       [promptRecord()],

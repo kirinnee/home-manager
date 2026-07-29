@@ -11,11 +11,12 @@ describe('MarkdownComposerSettings', () => {
     expect(html).toContain('Highlight Markdown syntax');
   });
 
-  test('says syntax highlighting, not WYSIWYG', () => {
-    expect(MARKDOWN_COMPOSER_EXPLANATION).toContain('Syntax highlighting only');
+  test('promises a separate preview without replacing the native editor', () => {
+    expect(MARKDOWN_COMPOSER_EXPLANATION).toContain('separate bounded preview');
     expect(MARKDOWN_COMPOSER_EXPLANATION).toContain('markers stay visible');
-    expect(MARKDOWN_COMPOSER_EXPLANATION).toContain('**bold** keeps its asterisks');
+    expect(MARKDOWN_COMPOSER_EXPLANATION).toContain('proven in-app references');
     expect(html).toContain('real-device mobile Safari pass');
+    expect(html).toContain('original textarea still owns input, selection, dictation, autocomplete and drafts');
   });
 
   test('does not introduce a second editing surface or summon focus', () => {

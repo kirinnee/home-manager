@@ -10,6 +10,8 @@ import { navigate } from '../lib/router';
 import { useFleetEvents } from '../lib/store';
 import { useLayoutMode } from '../hooks/useLayoutMode';
 import type { CodeReference } from '../lib/code-references';
+import type { AttentionId } from '../lib/attention';
+import type { PinReferenceLookup } from '../lib/remark-session-references';
 import { isUnknownRoute } from './files-api';
 import { TaskDetail, TaskRow, sessionHref, taskAskOrigin } from './TaskPresentation';
 import { TaskDagGraph } from './TaskDagGraph';
@@ -289,6 +291,8 @@ export function SessionTasksSurface({
   requestedTask,
   onRequestedTaskHandled,
   onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
 }: {
   sessionId: string;
   /** Files-pane root owned by the hosting session. */
@@ -296,6 +300,8 @@ export function SessionTasksSurface({
   requestedTask?: TaskOpenRequest | null;
   onRequestedTaskHandled?: (sequence: number) => void;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
 }) {
   const compact = useLayoutMode() === 'drawer';
   const [state, setState] = useState<LoadState>('loading');
@@ -422,6 +428,8 @@ export function SessionTasksSurface({
             conflicts={conflicts.get(selected.id)}
             onOpenTask={id => void openDetail(id)}
             onCodeReferenceOpen={onCodeReferenceOpen}
+            onAttentionOpen={onAttentionOpen}
+            onPinOpen={onPinOpen}
             surfaceSessionId={sessionId}
             surfaceCwd={cwd}
           />

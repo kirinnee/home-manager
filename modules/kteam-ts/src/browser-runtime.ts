@@ -34,6 +34,12 @@ export interface BrowserRuntimeOptions {
   automationFactory?: (endpoint: string) => Promise<BrowserAutomation>;
   now?: () => number;
   chromeExecutable?: string;
+  /** Explicit X display owned by the daemon. Ambient DISPLAY is never inherited. */
+  display?: string;
+  /** Durable shared profile or the caller-selected per-session fallback. */
+  profile?: string;
+  /** Called immediately after the direct Chrome child exists, before CDP attach. */
+  onChromeSpawn?: (pid: number) => Promise<void> | void;
 }
 
 export interface BrowserRuntimeMetadata {
@@ -128,7 +134,10 @@ async function terminate(child: BrowserChild | undefined): Promise<void> {
   } catch {}
 }
 
-function browserEnvironment(): Record<string, string | undefined> {
+export function browserEnvironment(
+  display?: string,
+  source: NodeJS.ProcessEnv = process.env,
+): Record<string, string | undefined> {
   // Daemon bearer tokens and teammate capabilities must never reach Chrome.
   const env: Record<string, string | undefined> = {};
   for (const key of [
@@ -142,8 +151,11 @@ function browserEnvironment(): Record<string, string | undefined> {
     'XDG_RUNTIME_DIR',
     'DBUS_SESSION_BUS_ADDRESS',
   ]) {
-    if (process.env[key] !== undefined) env[key] = process.env[key];
+    if (source[key] !== undefined) env[key] = source[key];
   }
+  // Never inherit DISPLAY from the daemon. Linux Chrome is allowed onto only
+  // the Xvfb instance BrowserService explicitly owns.
+  if (display !== undefined) env.DISPLAY = display;
   return env;
 }
 
@@ -175,31 +187,59 @@ export function resolveChromeExecutable(
   );
 }
 
+/** Read the exact installed Chrome version without exposing daemon credentials
+ *  to the helper process. Profile compatibility is checked before launch. */
+export async function readChromeExecutableVersion(executable: string): Promise<string> {
+  const child = Bun.spawn([executable, '--version'], {
+    env: browserEnvironment(),
+    stdin: 'ignore',
+    stdout: 'pipe',
+    stderr: 'ignore',
+  });
+  const [code, output] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+  const version = output.trim().slice(0, 200);
+  if (code !== 0 || !version) {
+    throw new BrowserError('launch_failed', `could not read the Chrome version from ${executable}`, 503);
+  }
+  return version;
+}
+
+export interface ChromeLaunchArgumentOptions {
+  /** Human login runs with CDP entirely absent; automation defaults to true. */
+  cdp?: boolean;
+  initialUrl?: string;
+}
+
 export function chromeLaunchArguments(
   executable: string,
   profile: string,
   cdpPort: number,
   viewport: BrowserViewport,
   platform: NodeJS.Platform = process.platform,
+  options: ChromeLaunchArgumentOptions = {},
 ): string[] {
+  const cdp = options.cdp !== false;
   const argv = [
     executable,
-    '--headless=new',
+    ...(platform === 'linux' ? [] : ['--headless=new']),
     `--user-data-dir=${profile}`,
-    '--remote-debugging-address=127.0.0.1',
-    `--remote-debugging-port=${cdpPort}`,
-    '--remote-allow-origins=*',
+    ...(cdp
+      ? ['--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${cdpPort}`, '--remote-allow-origins=*']
+      : []),
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-background-mode',
     '--disable-component-update',
     '--disable-features=Translate,MediaRouter',
     '--disable-dev-shm-usage',
+    ...(platform === 'linux'
+      ? ['--ozone-platform=x11', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
+      : []),
     '--force-device-scale-factor=1',
     `--window-size=${viewport.width},${viewport.height}`,
-    'about:blank',
+    options.initialUrl ?? 'about:blank',
   ];
-  // Headless Linux often has no Secret Service/keyring. `basic` keeps durable
+  // The daemon X display has no Secret Service/keyring. `basic` keeps durable
   // cookies in the already-private 0700 profile; macOS keeps Keychain-backed
   // storage by using Chrome's platform default.
   if (platform === 'linux') argv.splice(argv.length - 1, 0, '--password-store=basic');
@@ -237,7 +277,8 @@ export function normalizeBrowserUrl(input: string): string {
   return url.href;
 }
 
-/** One cross-platform headless Chrome and the Playwright/CDP worker attached to it. */
+/** One Chrome and the Playwright/CDP worker attached to it. Linux is genuinely
+ *  headful on the daemon-owned Xvfb; macOS retains its existing headless path. */
 export class BrowserRuntime {
   private closed = false;
   private shutdownPromise: Promise<void> | undefined;
@@ -279,21 +320,27 @@ export class BrowserRuntime {
     const spawn = options.spawn ?? defaultSpawn;
     const automationFactory = options.automationFactory ?? (endpoint => PlaywrightWorkerClient.connect(endpoint));
     const now = options.now ?? Date.now;
-    const profile = path.join(root, 'profile');
+    const profile = options.profile ?? path.join(root, 'profile');
     const runtimeFile = path.join(root, 'runtime.json');
+    await mkdir(root, { recursive: true, mode: 0o700 });
     await mkdir(profile, { recursive: true, mode: 0o700 });
     await chmod(root, 0o700).catch(() => undefined);
     await chmod(profile, 0o700).catch(() => undefined);
-    await rm(path.join(profile, 'DevToolsActivePort'), { force: true });
 
     let chrome: BrowserChild | undefined;
     let automation: BrowserAutomation | undefined;
     try {
       const cdpPort = await freeLoopbackPort();
       const executable = options.chromeExecutable ?? resolveChromeExecutable();
-      chrome = spawn(chromeLaunchArguments(executable, profile, cdpPort, viewport), { env: browserEnvironment() });
+      if (process.platform === 'linux' && !options.display) {
+        throw new BrowserError('launch_failed', 'the daemon X display is not available', 503);
+      }
+      chrome = spawn(chromeLaunchArguments(executable, profile, cdpPort, viewport), {
+        env: browserEnvironment(options.display),
+      });
+      await options.onChromeSpawn?.(chrome.pid);
       if (!(await waitForChrome(cdpPort, chrome, now() + LAUNCH_TIMEOUT_MS))) {
-        throw new BrowserError('launch_failed', 'headless Chrome did not expose its loopback CDP endpoint', 503);
+        throw new BrowserError('launch_failed', 'headed Chrome did not expose its loopback CDP endpoint', 503);
       }
       automation = await automationFactory(`http://127.0.0.1:${cdpPort}`);
       await automation.resize(viewport);

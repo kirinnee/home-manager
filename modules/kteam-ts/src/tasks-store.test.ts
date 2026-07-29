@@ -254,6 +254,39 @@ describe('v2 fields parse additively and round-trip exactly', () => {
     expect(parsed).toEqual(full);
   });
 
+  test('adding human verification is defensive for every existing phase and legacy done inference', () => {
+    const existing = [
+      { workflow: 'quick', phase: 'todo', status: 'todo' },
+      { workflow: 'quick', phase: 'build', status: 'in_progress' },
+      { workflow: 'quick', phase: 'built', status: 'built' },
+      { workflow: 'quick', phase: 'live', status: 'live' },
+      { workflow: 'design-first', phase: 'design', status: 'designed' },
+      { workflow: 'research-first', phase: 'research', status: 'researched' },
+      { workflow: 'investigate', phase: 'done', status: 'done' },
+      { workflow: 'quick', phase: 'dropped', status: 'dropped', statusReason: 'not possible' },
+    ] as const;
+    for (const fields of existing) expect(parseTaskRecord(record(fields))).not.toBeNull();
+
+    // New explicit ship records may end in done in every build workflow
+    // without a schema rewrite.
+    for (const workflow of ['quick', 'design-first', 'research-first'] as const) {
+      expect(parseTaskRecord(record({ workflow, phase: 'done', status: 'done' }))).toMatchObject({
+        workflow,
+        phase: 'done',
+        status: 'done',
+      });
+    }
+    // Old rows without workflow/phase retain the prior defensive interpretation.
+    const legacyDone: Record<string, unknown> = { ...record({ status: 'done' }) };
+    delete legacyDone['workflow'];
+    delete legacyDone['phase'];
+    expect(parseTaskRecord(legacyDone)).toMatchObject({
+      workflow: 'investigate',
+      phase: 'done',
+      status: 'done',
+    });
+  });
+
   test('a clarification missing its provenance is dropped, not half-stored', () => {
     const parsed = parseTaskRecord({
       ...record(),

@@ -70,36 +70,86 @@ export function taskWorkflowPath(workflow: TaskWorkflow): readonly TaskPhase[] {
 export function assertTaskPhaseInWorkflow(workflow: TaskWorkflow, phase: TaskPhase): void {
   if (phase === 'dropped') return;
   if (!TASK_WORKFLOW_PATHS[workflow].includes(phase)) {
-    throw new TaskError('transition', `phase ${phase} is not part of the ${workflow} workflow`);
+    throw new TaskError(
+      'transition',
+      `phase ${phase} is not part of the ${workflow} workflow; choose ${TASK_WORKFLOW_PATHS[workflow].join(', ')}, or dropped`,
+    );
   }
 }
 
-/** Enforce one adjacent phase edge. Research and design are human approval
- * gates: an agent may enter/work in them, but only the human can exit them. */
+/** True only for a target earlier in this task's own workflow. Invalid phases
+ * and the orthogonal dropped terminal are never misclassified as a rewind. */
+export function taskPhaseMovesBackward(task: Task, to: TaskPhase): boolean {
+  if (to === 'dropped') return false;
+  const path = TASK_WORKFLOW_PATHS[task.workflow];
+  const fromIndex = path.indexOf(task.phase);
+  const toIndex = path.indexOf(to);
+  return fromIndex >= 0 && toIndex >= 0 && toIndex < fromIndex;
+}
+
+/** Enforce an adjacent move forward or an explicit move to any earlier phase.
+ * Research/design may be backed out of, but only a human can approve forward
+ * progress beyond them. Likewise, only a human can verify live → done or reopen
+ * work that the human already verified as done. */
 export function assertTaskPhaseTransition(task: Task, to: TaskPhase, human: boolean): void {
   const from = task.phase;
   if (from === to) throw new TaskError('transition', `${taskReference(task.id)} is already in ${to}`);
-  if (from === 'dropped') throw new TaskError('transition', `${taskReference(task.id)} was dropped and cannot advance`);
+  if (from === 'dropped') {
+    throw new TaskError(
+      'transition',
+      `${taskReference(task.id)} was dropped and cannot move; create a new task if the work is needed again`,
+    );
+  }
   if (to === 'dropped') return;
   const path = TASK_WORKFLOW_PATHS[task.workflow];
   const fromIndex = path.indexOf(from);
   const toIndex = path.indexOf(to);
-  if (fromIndex < 0 || toIndex !== fromIndex + 1) {
-    const expected = fromIndex >= 0 ? path[fromIndex + 1] : undefined;
+  if (fromIndex < 0) {
+    throw new TaskError(
+      'transition',
+      `${taskReference(task.id)} has phase ${from}, which is not part of its ${task.workflow} workflow; repair the task before moving it`,
+    );
+  }
+  if (toIndex < 0) {
+    throw new TaskError(
+      'transition',
+      `${taskReference(task.id)} cannot move ${from} → ${to} in ${task.workflow}; choose ${path.join(', ')}, or dropped`,
+    );
+  }
+  if (toIndex < fromIndex) {
+    if (from === 'done' && !human) {
+      throw new TaskError(
+        'approval-required',
+        `${taskReference(task.id)} is human-verified done; ask the human to reopen it, or create a follow-up task`,
+      );
+    }
+    return;
+  }
+  if (toIndex !== fromIndex + 1) {
+    const expected = path[fromIndex + 1];
     const expectedCopy =
       expected === undefined
         ? 'no further phase'
         : `${expected}${taskBoardLaneFromPhase(expected) !== expected ? ` (${taskBoardLaneFromPhase(expected)} on board)` : ''}`;
+    const earlier = path.slice(0, fromIndex);
+    const rewindCopy =
+      earlier.length === 0 ? '' : ` To defer or reopen it, move it back to ${earlier.join(', ')} with --reason.`;
     throw new TaskError(
       'transition',
-      `${taskReference(task.id)} cannot move ${from} → ${to} in ${task.workflow}; expected ${expectedCopy}`,
+      `${taskReference(task.id)} cannot skip forward ${from} → ${to} in ${task.workflow}; move it to ${expectedCopy} first.${rewindCopy}`,
+    );
+  }
+  if (from === 'live' && !human) {
+    throw new TaskError(
+      'approval-required',
+      `${taskReference(task.id)} cannot move live → done until the human verifies the deployed work; leave it live for human verification`,
     );
   }
   if ((from === 'research' || from === 'design') && !human) {
     const boardLane = taskBoardLaneFromPhase(from);
     throw new TaskError(
       'approval-required',
-      `${taskReference(task.id)} cannot leave ${from} (${boardLane} on board) until the human approves it`,
+      `${taskReference(task.id)} cannot advance past ${from} (${boardLane} on board) until the human approves it; keep it in ${from} or move it backward with --reason`,
     );
   }
 }

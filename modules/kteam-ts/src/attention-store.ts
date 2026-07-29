@@ -20,6 +20,7 @@ import {
   AttentionError,
   emptyAttentionSnapshot,
   parseAttentionId,
+  taskIdFromReopenedAttentionSourceRef,
   type AttentionBy,
   type AttentionItem,
   type AttentionSnapshot,
@@ -44,6 +45,9 @@ export interface AttentionFile {
   nextId: number;
   items: AttentionItem[];
   resolved: ResolvedAttentionItem[];
+  /** One compact durable acknowledgement per reopened task. Optional because
+   * v1 files predate it; parsing and the next write materialise the map. */
+  reopenResolvedAt?: Record<string, string>;
   count: number;
   updatedAt: string;
 }
@@ -63,6 +67,7 @@ export interface AttentionState {
   nextId: number;
   items: AttentionItem[];
   resolved: ResolvedAttentionItem[];
+  reopenResolvedAt?: Record<string, string>;
 }
 
 export interface AttentionMutation {
@@ -73,7 +78,16 @@ export interface AttentionMutation {
 }
 
 function emptyFile(sessionId: string, at = now()): AttentionFile {
-  return { v: ATTENTION_SCHEMA_VERSION, sessionId, nextId: 1, items: [], resolved: [], count: 0, updatedAt: at };
+  return {
+    v: ATTENTION_SCHEMA_VERSION,
+    sessionId,
+    nextId: 1,
+    items: [],
+    resolved: [],
+    reopenResolvedAt: {},
+    count: 0,
+    updatedAt: at,
+  };
 }
 
 const isSource = (value: unknown): value is AttentionSource =>
@@ -92,6 +106,42 @@ const optionalText = (value: unknown, max: number): string | null | undefined =>
 
 const iso = (value: unknown): string | null =>
   typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null;
+
+function parseReopenResolvedAt(value: unknown): { value: Record<string, string>; errors: string[] } {
+  if (value === undefined) return { value: {}, errors: [] };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { value: {}, errors: ['<reopenResolvedAt>'] };
+  }
+  const valid: Array<[string, string]> = [];
+  const errors: string[] = [];
+  for (const [id, rawAt] of Object.entries(value as Record<string, unknown>)) {
+    const taskId = taskIdFromReopenedAttentionSourceRef(`task-reopened:${id}`);
+    const at = iso(rawAt);
+    if (taskId !== id || at === null) {
+      errors.push(`<reopenResolvedAt:${id}>`);
+      continue;
+    }
+    valid.push([id, at]);
+  }
+  return { value: Object.fromEntries(valid), errors };
+}
+
+function mergeResolvedReopenWatermarks(
+  base: Record<string, string>,
+  resolved: readonly ResolvedAttentionItem[],
+): Record<string, string> {
+  const merged = { ...base };
+  for (const item of resolved) {
+    if (item.source !== 'agent-raised') continue;
+    const taskId = taskIdFromReopenedAttentionSourceRef(item.sourceRef);
+    if (taskId === null) continue;
+    const previous = merged[taskId];
+    if (previous === undefined || Date.parse(item.resolvedAt) > Date.parse(previous)) {
+      merged[taskId] = item.resolvedAt;
+    }
+  }
+  return merged;
+}
 
 /** Parse one active item. Every required field is checked independently. */
 export function parseAttentionItem(value: unknown): AttentionItem | null {
@@ -234,6 +284,9 @@ export function parseAttentionFile(rawText: string | null, expectedSessionId: st
   }
   if (resolved.length > MAX_ATTENTION_RESOLUTIONS) parseErrorIds.push('<resolution-cap>');
 
+  const reopenResolvedAt = parseReopenResolvedAt(raw['reopenResolvedAt']);
+  parseErrorIds.push(...reopenResolvedAt.errors);
+
   const updatedAt = iso(raw['updatedAt']);
   if (updatedAt === null) parseErrorIds.push('<updatedAt>');
   return {
@@ -243,6 +296,7 @@ export function parseAttentionFile(rawText: string | null, expectedSessionId: st
       nextId: Number.isSafeInteger(nextId) ? (nextId as number) : 1,
       items,
       resolved,
+      reopenResolvedAt: mergeResolvedReopenWatermarks(reopenResolvedAt.value, resolved),
       count: items.length,
       updatedAt: updatedAt ?? now(),
     },
@@ -285,6 +339,7 @@ export function serializeAttentionFile(file: AttentionFile): AttentionFile {
     nextId: file.nextId,
     items: file.items.map(serializeAttentionItem),
     resolved: file.resolved.map(serializeResolvedAttentionItem),
+    reopenResolvedAt: { ...(file.reopenResolvedAt ?? {}) },
     count: file.items.length,
     updatedAt: file.updatedAt,
   };
@@ -301,6 +356,10 @@ function validateState(state: AttentionState): AttentionState {
     if (parsed === null) throw new AttentionError('invalid', `refusing to write invalid resolution ${item.id}`);
     return parsed;
   });
+  const reopenResolvedAt = parseReopenResolvedAt(state.reopenResolvedAt);
+  if (reopenResolvedAt.errors.length > 0) {
+    throw new AttentionError('invalid', 'refusing to write invalid reopen resolution watermark');
+  }
   const ids = new Set<string>();
   let maxId = 0;
   for (const item of [...items, ...resolved]) {
@@ -322,7 +381,12 @@ function validateState(state: AttentionState): AttentionState {
   }
   items.sort(compareOpen);
   resolved.sort(compareResolved);
-  return { nextId: state.nextId, items, resolved: resolved.slice(0, MAX_ATTENTION_RESOLUTIONS) };
+  return {
+    nextId: state.nextId,
+    items,
+    resolved: resolved.slice(0, MAX_ATTENTION_RESOLUTIONS),
+    reopenResolvedAt: mergeResolvedReopenWatermarks(reopenResolvedAt.value, resolved),
+  };
 }
 
 export type AttentionStoreRole = 'daemon' | 'reader';
@@ -389,6 +453,7 @@ export class AttentionStore {
       sessionId,
       items: read.file.items,
       resolved: read.file.resolved,
+      reopenResolvedAt: { ...(read.file.reopenResolvedAt ?? {}) },
       count: read.file.count,
       parseErrors: read.parseErrors,
       updatedAt: read.file.updatedAt,
@@ -448,6 +513,7 @@ export class AttentionStore {
         nextId: read.file.nextId,
         items: read.file.items,
         resolved: read.file.resolved,
+        reopenResolvedAt: { ...(read.file.reopenResolvedAt ?? {}) },
       };
       const transformed = await transform(current);
       if (transformed === current) {
@@ -457,6 +523,7 @@ export class AttentionStore {
             sessionId,
             items: read.file.items,
             resolved: read.file.resolved,
+            reopenResolvedAt: { ...(read.file.reopenResolvedAt ?? {}) },
             count: read.file.count,
             parseErrors: 0,
             updatedAt: read.file.updatedAt,
@@ -472,6 +539,7 @@ export class AttentionStore {
         nextId: state.nextId,
         items: state.items,
         resolved: state.resolved,
+        reopenResolvedAt: state.reopenResolvedAt,
         count: state.items.length,
         updatedAt,
       };
@@ -482,6 +550,7 @@ export class AttentionStore {
           sessionId: file.sessionId,
           items: file.items,
           resolved: file.resolved,
+          reopenResolvedAt: { ...(file.reopenResolvedAt ?? {}) },
           count: file.count,
           parseErrors: 0,
           updatedAt: file.updatedAt,

@@ -7,7 +7,15 @@ import {
   type ParsedAnalyticsQuery,
 } from './analytics-types';
 
-export const DEFAULT_ANALYTICS_QUERY = 'count by (status)';
+/** Fleet-wide default: one row per day with sessions, tokens, and equivalent
+ * API cost. This is also the global UI's chart query, so the no-argument API
+ * and the first visible surface teach the same useful aggregate. */
+export const DEFAULT_ANALYTICS_QUERY = 'sum by (day)';
+/** A single session still benefits from a grouping clause: it makes the model
+ * attribution visible and demonstrates aggregate + group + matcher syntax in
+ * the one query most readers will ever run. The exact id is appended by
+ * {@link scopeAnalyticsQuery}. */
+export const DEFAULT_SESSION_ANALYTICS_QUERY = 'sum by (model)';
 export const MAX_ANALYTICS_QUERY_CHARS = 2_048;
 export const MAX_ANALYTICS_GROUP_LABELS = 4;
 
@@ -38,7 +46,7 @@ function splitMatchers(source: string): string[] {
     }
     if (char === '"' || char === "'") {
       if (quote === char) quote = undefined;
-      else if (quote === undefined && /^\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:=~|=)\s*$/.test(source.slice(start, index)))
+      else if (quote === undefined && /^\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:==|=~|=)\s*$/.test(source.slice(start, index)))
         quote = char;
       continue;
     }
@@ -78,16 +86,21 @@ function parseMatchers(source: string): AnalyticsMatcher[] {
   return splitMatchers(source).flatMap(raw => {
     const part = raw.trim();
     if (!part) return [];
-    const match = part.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(=~|=)\s*(.+)$/s);
+    const match = part.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(==|=~|=)\s*(.+)$/s);
     if (!match) throw new AnalyticsQueryError(`could not parse filter matcher ${JSON.stringify(part)}`);
     const label = match[1]!;
     if (!labels.has(label))
       throw new AnalyticsQueryError(
         `unknown analytics label ${JSON.stringify(label)} (choose ${ANALYTICS_LABELS.join(', ')})`,
       );
-    const op = match[2] as '=' | '=~';
+    // `==` is the exact spelling for values that themselves contain the
+    // grammar's `*` / `?` glob characters. It normalizes to the existing `=`
+    // matcher shape while preserving `wildcard: false` through a canonical
+    // serialize/parse round trip.
+    const syntaxOp = match[2] as '==' | '=' | '=~';
+    const op = syntaxOp === '=~' ? '=~' : '=';
     const value = parseValue(match[3]!);
-    const wildcard = op === '=~' || /[*?]/.test(value);
+    const wildcard = syntaxOp !== '==' && (op === '=~' || /[*?]/.test(value));
     // A subtree of every glob match is both expensive and ambiguous; an honest
     // error beats silently walking an unbounded number of lineages.
     if (label === 'tree' && wildcard)
@@ -104,9 +117,36 @@ function canonical(parsed: Omit<ParsedAnalyticsQuery, 'source' | 'canonical'>): 
   const aggregation = parsed.aggregation ?? '';
   const grouping = parsed.groupBy.length ? ` by (${parsed.groupBy.join(', ')})` : '';
   const filters = parsed.matchers.length
-    ? ` {${parsed.matchers.map(matcher => `${matcher.label}${matcher.op}${quoteValue(matcher.value)}`).join(', ')}}`
+    ? ` {${parsed.matchers
+        .map(matcher => {
+          const operator = matcher.op === '=' && !matcher.wildcard && /[*?]/.test(matcher.value) ? '==' : matcher.op;
+          return `${matcher.label}${operator}${quoteValue(matcher.value)}`;
+        })
+        .join(', ')}}`
     : '';
   return `${aggregation}${grouping}${filters}`.trim();
+}
+
+/**
+ * Force a query onto one exact session while keeping the query language
+ * editable. Any caller-supplied `id` matcher is replaced, never combined or
+ * trusted; every other filter remains an additional constraint.
+ *
+ * The returned string is canonical and includes the enforced matcher. That is
+ * important UI truthfulness: the box shows the query the server actually ran.
+ */
+export function scopeAnalyticsQuery(input: string | undefined, sessionId: string): string {
+  const id = sessionId.trim();
+  if (!id) throw new AnalyticsQueryError('session analytics scope needs an exact session id');
+  const parsed = parseAnalyticsQuery((input ?? '').trim() || DEFAULT_SESSION_ANALYTICS_QUERY);
+  return canonical({
+    aggregation: parsed.aggregation,
+    groupBy: parsed.groupBy,
+    matchers: [
+      ...parsed.matchers.filter(matcher => matcher.label !== 'id'),
+      { label: 'id', op: '=', value: id, wildcard: false },
+    ],
+  });
 }
 
 /**

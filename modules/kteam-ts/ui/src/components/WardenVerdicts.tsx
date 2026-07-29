@@ -17,6 +17,9 @@ import { api } from '../lib/api';
 import { useDialogFocus } from '../hooks/useDialogFocus';
 import type { WardenSpawnInfo, WardenVerdict, WardenVerdictKind } from '../types';
 import { displayCallsign } from '../lib/callsign';
+import type { CodeReference } from '../lib/code-references';
+import type { AttentionId } from '../lib/attention';
+import type { PinReferenceLookup } from '../lib/remark-session-references';
 // LAZY. Expanding the list only renders rows, so the markdown + syntax
 // highlighting stack is still not needed to see it. The chunk arrives when a
 // REPORT is opened, which most readers never do — so defaulting the list to
@@ -91,7 +94,12 @@ function WardenVerdictsPanel() {
   const [verdicts, setVerdicts] = useState<WardenVerdict[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [open, setOpen] = useState(true);
-  const [report, setReport] = useState<{ path: string; title: string; body: string | null } | null>(null);
+  const [report, setReport] = useState<{
+    path: string;
+    title: string;
+    body: string | null;
+    sessionId?: string;
+  } | null>(null);
   const timer = useRef<number | null>(null);
   // Stable, so the modal's Escape listener is not torn down and re-added on
   // every poll tick of this component.
@@ -122,11 +130,12 @@ function WardenVerdictsPanel() {
 
   async function openReport(v: WardenVerdict) {
     const title = v.reportPath.split('/').pop() ?? 'report';
-    setReport({ path: v.reportPath, title, body: null });
+    const report = { path: v.reportPath, title, sessionId: v.targetSession };
+    setReport({ ...report, body: null });
     try {
-      setReport({ path: v.reportPath, title, body: await api.wardenReport(v.reportPath) });
+      setReport({ ...report, body: await api.wardenReport(v.reportPath) });
     } catch {
-      setReport({ path: v.reportPath, title, body: '_Could not load this report._' });
+      setReport({ ...report, body: '_Could not load this report._' });
     }
   }
 
@@ -158,6 +167,7 @@ function WardenVerdictsPanel() {
         open={report !== null}
         title={report?.title ?? ''}
         body={report?.body ?? null}
+        sessionId={report?.sessionId}
         onClose={closeReport}
       />
     </div>
@@ -224,11 +234,23 @@ export function ReportModal({
   open,
   title,
   body,
+  sessionId,
+  cwd,
+  onTaskOpen,
+  onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
   onClose,
 }: {
   open: boolean;
   title: string;
   body: string | null;
+  sessionId?: string;
+  cwd?: string;
+  onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
   onClose: () => void;
 }) {
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -278,7 +300,15 @@ export function ReportModal({
             <div className="text-[13px] text-muted">loading report…</div>
           ) : (
             <Suspense fallback={<div className="text-[13px] text-muted">rendering report…</div>}>
-              <Markdown text={body} />
+              <Markdown
+                text={body}
+                sessionId={sessionId}
+                cwd={cwd}
+                onTaskOpen={onTaskOpen}
+                onCodeReferenceOpen={onCodeReferenceOpen}
+                onAttentionOpen={onAttentionOpen}
+                onPinOpen={onPinOpen}
+              />
             </Suspense>
           )}
         </div>

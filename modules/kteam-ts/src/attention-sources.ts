@@ -5,9 +5,19 @@
 
 import type { SessionView } from './service';
 import type { KTeamEvent, PendingQuestion } from './types';
-import type { ScopedTaskSummary, SessionTaskListResponse } from './tasks-types';
+import {
+  TASK_WORKFLOW_PATHS,
+  type ScopedTaskSummary,
+  type SessionTaskListResponse,
+  type TaskActivity,
+  type TaskWorkflow,
+} from './tasks-types';
 import type { AddAttentionInput, AttentionService } from './attention-service';
-import type { AttentionActor } from './attention-types';
+import {
+  TASK_REOPENED_ATTENTION_SOURCE_REF_PREFIX,
+  type AttentionActor,
+  type AttentionSnapshot,
+} from './attention-types';
 import type { WardenAnomaly } from './warden-detect';
 import { parseWardenAnomalyKind, wardenVerdictSourceRef } from './warden-verdicts';
 
@@ -22,6 +32,18 @@ export interface AttentionSessionSource {
 
 export interface AttentionTaskSource {
   sessionTaskList(sessionId: string): Promise<SessionTaskListResponse>;
+  /** One bounded read of the per-session task file. Optional for compatibility
+   *  with narrow test/read adapters; TaskService supplies it in the daemon so
+   *  startup can recover a reopen committed just before event delivery. */
+  sessionTaskActivityBaselines?(sessionId: string): Promise<{
+    tasks: Array<{
+      id: string;
+      workflow: TaskWorkflow;
+      activity: readonly TaskActivity[];
+      activityParseErrors: number;
+    }>;
+    parseErrors: number;
+  }>;
   subscribe(listener: (event: KTeamEvent) => void): () => void;
 }
 
@@ -78,6 +100,54 @@ function taskInput(task: ScopedTaskSummary, state: TaskAttentionState): AddAtten
     waitingSince: state.since,
     howToResolve: `Resolve the blocking condition for #${task.id}.`,
   };
+}
+
+/** A shipped rewind is important but does not block the agent doing the repair,
+ * so it is a durable explicit Attention item rather than a derived task blocker.
+ * One stable item per task refreshes on repeated unacknowledged reopens; the
+ * append-only task activity retains every individual round trip. */
+function reopenedTaskInputFrom(raw: Record<string, unknown>, waitingSince: string): AddAttentionInput | null {
+  const id = textFrom(raw, ['id']);
+  const from = textFrom(raw, ['phaseFrom', 'from']);
+  const to = textFrom(raw, ['phaseTo', 'to']);
+  const reason = textFrom(raw, ['reason']);
+  if (id === null || (from !== 'live' && from !== 'done') || to === null || reason === null) return null;
+  return {
+    source: 'agent-raised',
+    sourceRef: `${TASK_REOPENED_ATTENTION_SOURCE_REF_PREFIX}${id}`,
+    subject: `#${id}: shipped work reopened from ${from}`,
+    why: reason,
+    waitingSince,
+    howToResolve: `Review #${id}'s reopened ask, then explicitly resolve this item. After the repair returns to live, only the human should move it to done after verification.`,
+  };
+}
+
+function reopenedTaskInput(event: KTeamEvent): AddAttentionInput | null {
+  return reopenedTaskInputFrom(record(event.data), event.time);
+}
+
+/** The activity log is the durable side of task.reopened. Recover only the
+ * latest valid shipped rewind for a task; an unreadable activity stream is
+ * handled by the caller as untrusted rather than replaying stale evidence. */
+function latestReopenedTaskInput(
+  id: string,
+  workflow: TaskWorkflow,
+  activity: readonly TaskActivity[],
+): AddAttentionInput | null {
+  const path = TASK_WORKFLOW_PATHS[workflow];
+  for (let index = activity.length - 1; index >= 0; index -= 1) {
+    const entry = activity[index]!;
+    if (entry.type !== 'status' || entry.data['reopened'] !== true) continue;
+    if (entry.data['backward'] !== true) continue;
+    const from = textFrom(entry.data, ['phaseFrom']);
+    const to = textFrom(entry.data, ['phaseTo']);
+    const fromIndex = path.findIndex(phase => phase === from);
+    const toIndex = path.findIndex(phase => phase === to);
+    if (fromIndex < 0 || toIndex < 0 || toIndex >= fromIndex) continue;
+    const input = reopenedTaskInputFrom({ ...entry.data, id }, entry.time);
+    if (input !== null) return input;
+  }
+  return null;
 }
 
 function questionInput(question: PendingQuestion, waitingSince: string): AddAttentionInput {
@@ -290,6 +360,52 @@ export class AttentionSources {
       await this.reconcileTaskSnapshot(id, snapshot, { actor: 'daemon' }, canReconcile).catch(error =>
         this.report(id, 'task baseline', error),
       );
+      if (canReconcile && snapshot.parseErrors === 0 && persisted !== null) {
+        await this.reconcileShippedReopens(id, persisted).catch(error =>
+          this.report(id, 'task reopen baseline', error),
+        );
+      }
+    }
+  }
+
+  /** Reconcile the durable task activity with the durable Attention board.
+   * This closes the commit→event-delivery crash window without resurrecting a
+   * reopen that was explicitly resolved after its latest activity entry. */
+  private async reconcileShippedReopens(sessionId: string, persisted: AttentionSnapshot): Promise<void> {
+    if (!this.tasks.sessionTaskActivityBaselines) return;
+    const baseline = await this.tasks.sessionTaskActivityBaselines(sessionId);
+    if (baseline.parseErrors > 0) return;
+    for (const task of baseline.tasks) {
+      if (task.activityParseErrors > 0) continue;
+      const input = latestReopenedTaskInput(task.id, task.workflow, task.activity);
+      const sourceRef = input?.sourceRef ?? null;
+      if (input === null || sourceRef === null) continue;
+
+      const active = persisted.items.some(item => item.source === 'agent-raised' && item.sourceRef === sourceRef);
+      if (active) {
+        // Refresh the one stable item when a newer shipped rewind changed the
+        // reason while the older request remained unresolved.
+        await this.attention
+          .addFromSource(sessionId, input)
+          .catch(error => this.report(sessionId, `task reopen refresh ${task.id}`, error));
+        continue;
+      }
+
+      const reopenedAt = Date.parse(input.waitingSince ?? '');
+      const durableResolution = persisted.reopenResolvedAt?.[task.id];
+      const resolvedAfterReopen =
+        (durableResolution !== undefined && Date.parse(durableResolution) >= reopenedAt) ||
+        persisted.resolved.some(
+          item =>
+            item.source === 'agent-raised' &&
+            item.sourceRef === sourceRef &&
+            Number.isFinite(reopenedAt) &&
+            Date.parse(item.resolvedAt) >= reopenedAt,
+        );
+      if (resolvedAfterReopen) continue;
+      await this.attention
+        .addFromSource(sessionId, input)
+        .catch(error => this.report(sessionId, `task reopen recovery ${task.id}`, error));
     }
   }
 
@@ -309,6 +425,12 @@ export class AttentionSources {
       if (snapshot && snapshot.sessionId === event.sessionId && Array.isArray(snapshot.tasks)) {
         await this.reconcileTaskSnapshot(event.sessionId, snapshot, eventActor(event), true);
       }
+      return;
+    }
+
+    if (event.type === 'task.reopened') {
+      const input = reopenedTaskInput(event);
+      if (input !== null) await this.attention.addFromSource(event.sessionId, input);
       return;
     }
 

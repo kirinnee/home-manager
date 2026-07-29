@@ -36,7 +36,14 @@ describe('composer autocomplete trigger detection', () => {
   });
 
   test('@ opens anywhere in the whitespace-free token at the caret', () => {
-    expect(detectComposerTrigger('@', caret(1))).toMatchObject({ trigger: '@', query: '', start: 0, end: 1 });
+    expect(detectComposerTrigger('@', caret(1))).toMatchObject({
+      trigger: '@',
+      triggerText: '@',
+      referenceTier: 1,
+      query: '',
+      start: 0,
+      end: 1,
+    });
     expect(detectComposerTrigger('read @src/app.ts', caret(16))).toMatchObject({
       trigger: '@',
       query: 'src/app.ts',
@@ -52,18 +59,30 @@ describe('composer autocomplete trigger detection', () => {
   });
 
   test.each([
-    { value: '@', query: '', start: 0 },
-    { value: '@ott', query: 'ott', start: 0 },
-    { value: 'see @F12', query: 'F12', start: 4 },
-    { value: 'resolve @?A3', query: '?A3', start: 8 },
-    { value: 'line\n@#B2', query: '#B2', start: 5 },
-  ])('$value opens the unified reference picker', ({ value, query, start }) => {
+    { value: '@', triggerText: '@', tier: 1, query: '', start: 0 },
+    { value: '@src/app', triggerText: '@', tier: 1, query: 'src/app', start: 0 },
+    { value: '@@ott', triggerText: '@@', tier: 2, query: 'ott', start: 0 },
+    { value: 'see @@@F12', triggerText: '@@@', tier: 3, query: 'F12', start: 4 },
+    { value: 'resolve @@@@A3', triggerText: '@@@@', tier: 4, query: 'A3', start: 8 },
+    { value: 'line\n@@@@@pin', triggerText: '@@@@@', tier: 5, query: 'pin', start: 5 },
+  ])('$value opens its repetition-selected reference tier', ({ value, triggerText, tier, query, start }) => {
     expect(detectComposerTrigger(value, caret(value.length))).toMatchObject({
       trigger: '@',
+      triggerText,
+      referenceTier: tier,
       query,
       start,
       end: value.length,
     });
+  });
+
+  test('an extra @ changes tier without breaking the active token', () => {
+    expect(detectComposerTrigger('@@', caret(2))).toMatchObject({ referenceTier: 2, query: '' });
+    expect(detectComposerTrigger('@@ott', caret(5))).toMatchObject({ referenceTier: 2, query: 'ott' });
+    expect(detectComposerTrigger('@@@ott', caret(6))).toMatchObject({ referenceTier: 3, query: 'ott' });
+    // Unknown future runs still open so the always-visible legend can teach the
+    // five supported families instead of making the sixth sigil look broken.
+    expect(detectComposerTrigger('@@@@@@', caret(6))).toMatchObject({ referenceTier: 6, query: '' });
   });
 
   test.each([
@@ -135,7 +154,6 @@ describe('composer autocomplete trigger detection', () => {
 
     test('a sigil glued to a word is not a mention', () => {
       expect(detectComposerTrigger('foo@bar', caret(7))).toBeNull();
-      expect(detectComposerTrigger('@@x', caret(3))).toBeNull();
       expect(detectComposerTrigger('dir/x@y', caret(7))).toBeNull();
     });
 
@@ -193,15 +211,15 @@ describe('composer autocomplete token replacement', () => {
     });
   });
 
-  test('one @ trigger can insert canonical task and attention references', () => {
-    const task = detectComposerTrigger('track @F1', caret(9));
-    expect(replaceComposerTrigger('track @F1', task!, '#F12')).toEqual({
+  test('task and attention tiers insert their canonical reference syntax', () => {
+    const task = detectComposerTrigger('track @@@F1', caret(11));
+    expect(replaceComposerTrigger('track @@@F1', task!, '#F12')).toEqual({
       value: 'track #F12 ',
       selection: { start: 11, end: 11 },
     });
 
-    const attention = detectComposerTrigger('resolve @A', caret(10));
-    expect(replaceComposerTrigger('resolve @A', attention!, '?A3')).toEqual({
+    const attention = detectComposerTrigger('resolve @@@@A', caret(13));
+    expect(replaceComposerTrigger('resolve @@@@A', attention!, '?A3')).toEqual({
       value: 'resolve ?A3 ',
       selection: { start: 12, end: 12 },
     });

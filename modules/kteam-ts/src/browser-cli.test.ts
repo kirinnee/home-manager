@@ -1,6 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import path from 'node:path';
-import { browserCliRequest, browserScreenshotBytes, parseBrowserCli, renderBrowserCli } from './browser-cli';
+import { BROWSER_LOGIN_MAX_MINUTES } from './browser-api';
+import {
+  BROWSER_CLI_USAGE,
+  BROWSER_LOGIN_CLI_MAX_MINUTES,
+  browserCliRequest,
+  browserScreenshotBytes,
+  parseBrowserCli,
+  renderBrowserCli,
+} from './browser-cli';
 import type { BrowserActionResult, BrowserStatusView } from './browser-types';
 
 const SID = 'ms3moxcz-352c6078';
@@ -130,5 +138,126 @@ describe('browser CLI root registration', () => {
     expect(code).toBe(0);
     expect(output).toContain('Usage: kteam browser');
     expect(output).toContain('new-page [url]');
+  });
+});
+
+describe('browser login CLI', () => {
+  test('parses the four actions and their options', () => {
+    expect(parseBrowserCli(['login', 'status'])).toEqual({ command: 'login', action: 'status' });
+    expect(parseBrowserCli(['login', 'start'])).toEqual({ command: 'login', action: 'start' });
+    expect(parseBrowserCli(['login', 'start', '--minutes', '30'])).toEqual({
+      command: 'login',
+      action: 'start',
+      minutes: 30,
+    });
+    expect(parseBrowserCli(['login', 'start', '--minutes=45'])).toEqual({
+      command: 'login',
+      action: 'start',
+      minutes: 45,
+    });
+    expect(parseBrowserCli(['login', 'stop'])).toEqual({ command: 'login', action: 'stop' });
+    expect(parseBrowserCli(['login', 'stop', '--primed'])).toEqual({
+      command: 'login',
+      action: 'stop',
+      primed: true,
+    });
+    expect(parseBrowserCli(['login', 'confirm'])).toEqual({ command: 'login', action: 'confirm' });
+  });
+
+  test('refuses to guess: no bare action, no misapplied option, no unbounded deadline', () => {
+    // "browser login" reads as "show me" to one person and "open it" to
+    // another. Guessing either way is a lie about what happened.
+    expect(() => parseBrowserCli(['login'])).toThrow(/start, status, stop, or confirm/);
+    expect(() => parseBrowserCli(['login', 'reopen'])).toThrow(/unknown browser login action/);
+    // Accepting and ignoring an option reports success for something that
+    // never happened.
+    expect(() => parseBrowserCli(['login', 'stop', '--minutes', '5'])).toThrow(/--minutes applies only/);
+    expect(() => parseBrowserCli(['login', 'start', '--primed'])).toThrow(/--primed applies only/);
+    expect(() => parseBrowserCli(['status', '--primed'])).toThrow(/apply only to "browser login"/);
+    for (const bad of ['0', '61', '1.5', 'soon', '-5']) {
+      expect(() => parseBrowserCli(['login', 'start', '--minutes', bad])).toThrow(/between 1 and 60/);
+    }
+  });
+
+  test('the deadline cap the CLI enforces is the one the daemon enforces', () => {
+    // Mirrored rather than imported (browser-api drags in Playwright), so pin
+    // them together here instead of letting them drift apart silently.
+    expect(BROWSER_LOGIN_CLI_MAX_MINUTES).toBe(BROWSER_LOGIN_MAX_MINUTES);
+  });
+
+  test('targets the daemon-global route and needs no session id at all', () => {
+    // The window is about the ONE shared profile. Demanding a session id would
+    // be a lie about what it targets — and the human runs this from their own
+    // shell, where KTEAM_SESSION_ID does not exist.
+    expect(browserCliRequest(parseBrowserCli(['login', 'status']), undefined)).toEqual({
+      method: 'GET',
+      path: '/v1/browser/login',
+    });
+    expect(browserCliRequest(parseBrowserCli(['login', 'start', '--minutes', '5']), undefined)).toEqual({
+      method: 'POST',
+      path: '/v1/browser/login',
+      body: { action: 'start', minutes: 5 },
+    });
+    expect(browserCliRequest(parseBrowserCli(['login', 'start']), SID).body).toEqual({ action: 'start' });
+    expect(browserCliRequest(parseBrowserCli(['login', 'stop']), SID).body).toEqual({ action: 'stop' });
+    expect(browserCliRequest(parseBrowserCli(['login', 'stop', '--primed']), SID).body).toEqual({
+      action: 'stop',
+      primed: true,
+    });
+    expect(browserCliRequest(parseBrowserCli(['login', 'confirm']), SID).body).toEqual({ action: 'confirm' });
+  });
+
+  test('an open window prints the tunnel, the port, and the one-shot password', () => {
+    const output = renderBrowserCli(parseBrowserCli(['login', 'status']), {
+      state: 'open',
+      profilePrimed: false,
+      openedAt: '2026-07-28T23:10:00.000Z',
+      expiresAt: '2026-07-28T23:25:00.000Z',
+      connection: {
+        host: '127.0.0.1',
+        port: 5951,
+        password: 'Sq7fXk2p',
+        sshTunnel: 'ssh -N -L 5951:127.0.0.1:5951 kirin@box',
+      },
+    });
+    expect(output).toContain('browser login window: open');
+    expect(output).toContain('closes 2026-07-28T23:25:00.000Z');
+    expect(output).toContain('tunnel: ssh -N -L 5951:127.0.0.1:5951 kirin@box');
+    expect(output).toContain('point a VNC viewer at 127.0.0.1:5951');
+    expect(output).toContain('password: Sq7fXk2p');
+    expect(output).toContain('profile primed: no');
+  });
+
+  test('a closed window prints no stale port, deadline, or password', () => {
+    const output = renderBrowserCli(parseBrowserCli(['login', 'status']), { state: 'closed', profilePrimed: true });
+    expect(output).toBe('browser login window: closed\nprofile primed: yes\n');
+  });
+
+  test('ABSENCE RENDERS AS UNKNOWN, never as a confident "closed"', () => {
+    // A daemon that did not answer has not told us the window shut. Printing
+    // "closed" here is the most dangerous lie this feature can tell: the human
+    // walks away from a live sign-in window believing it is gone.
+    const output = renderBrowserCli(parseBrowserCli(['login', 'status']), {});
+    expect(output).toContain('browser login window: unknown');
+    expect(output).toContain('profile primed: unknown');
+    expect(output).not.toContain('closed');
+    expect(renderBrowserCli(parseBrowserCli(['login', 'status']), undefined)).toContain('unknown');
+  });
+
+  test('an error state is surfaced, not swallowed', () => {
+    const output = renderBrowserCli(parseBrowserCli(['login', 'start']), {
+      state: 'error',
+      profilePrimed: false,
+      error: 'x11vnc did not start',
+    });
+    expect(output).toContain('browser login window: error');
+    expect(output).toContain('error: x11vnc did not start');
+  });
+
+  test('the usage text documents the window and how to reach it', () => {
+    expect(BROWSER_CLI_USAGE).toContain('login start [--minutes N]');
+    expect(BROWSER_CLI_USAGE).toContain('login stop [--primed]');
+    expect(BROWSER_CLI_USAGE).toContain('login confirm');
+    expect(BROWSER_CLI_USAGE).toContain('human-admin only');
   });
 });

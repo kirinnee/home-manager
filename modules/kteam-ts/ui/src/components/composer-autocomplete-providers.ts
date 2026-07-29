@@ -1,22 +1,24 @@
 // Candidate providers for the single composer trigger engine.
 //
 // `/` merges harness-valid built-in commands with the exact session account's
-// discovered skills. `@` is the one reference browser: agents, tasks and
-// attention come from already-live stores, while Files reuses the existing
-// cwd-contained, secrets-filtered listing endpoint and lazily navigates one
-// path segment at a time.
+// discovered skills. A repeated `@` run chooses ONE reference family: Files,
+// Agents, Tasks, Attention, then Pins. Store-backed families reuse their live
+// snapshots; Files keeps the existing cwd-contained, secrets-filtered listing
+// endpoint and lazily navigates one path segment at a time.
 
 import { ApiError, HAS_TOKEN, TOKEN } from '../lib/api';
 import { agentMentionReference } from '../lib/agent-mentions';
 import { attentionReference, type AttentionItem } from '../lib/attention';
 import { rankSessions, recentSessions, type SessionEntry } from '../lib/fuzzy';
 import { taskReference, TASK_STATUS_META, type TaskSummary } from '../lib/tasks';
+import { resolvedPinReference } from '../lib/pin-reference-context';
+import { pinReferenceMarkdown } from '../lib/remark-session-references';
 import { TERMINAL_STATUSES } from '../lib/utils';
 import type { SessionView } from '../types';
 import { fsApi, type FsListing } from './files-api';
 import { isOpenableName, joinRel, normalizeRel, UNOPENABLE_NAME_REASON } from './files-model';
 import {
-  MAX_AUTOCOMPLETE_RESULTS,
+  COMPOSER_REFERENCE_TIERS,
   type ComposerAutocompleteCandidate,
   type ComposerAutocompleteProvider,
   type ComposerProviderResult,
@@ -48,13 +50,28 @@ export const COMPOSER_BUILTIN_COMMANDS: readonly ComposerBuiltinCommand[] = [
 
 export type ComposerTaskSummary = Pick<TaskSummary, 'id' | 'title' | 'status'>;
 export type ComposerAttentionItem = Pick<AttentionItem, 'id' | 'subject' | 'source'>;
+export interface ComposerPinSummary {
+  id: string;
+  kind: string;
+  text?: string;
+  preview?: string;
+  title?: string;
+  label?: string;
+  caption?: string;
+  alt?: string;
+  /** Present only after the daemon has stamped the authoritative snapshot. */
+  by?: 'human' | 'agent';
+  createdByName?: string | null;
+}
 
 const EMPTY_SESSIONS: readonly SessionView[] = [];
 const EMPTY_TASKS: readonly ComposerTaskSummary[] = [];
 const EMPTY_ATTENTION: readonly ComposerAttentionItem[] = [];
+const EMPTY_PINS: readonly ComposerPinSummary[] = [];
 const noSessions = () => EMPTY_SESSIONS;
 const noTasks = () => EMPTY_TASKS;
 const noAttention = () => EMPTY_ATTENTION;
+const noPins = () => EMPTY_PINS;
 
 /** Exactly what `listSkills()` in `modules/kteam-ts/src/skills.ts` produces —
  *  no more. An earlier draft of this client expected `scope`, `invocation` and
@@ -284,10 +301,7 @@ export function createSkillsProvider(sessionId: string, harness?: ComposerHarnes
 /** Project the current store snapshot on every query. Provider identity stays
  * stable while the getter sees live data, so there is no request, stale clone,
  * or cache to invalidate. */
-const NAMED_REFERENCE_PRIORITY = 1;
 const MAX_AGENT_RESULTS = 8;
-const BARE_FILE_RESULT_RESERVE = 4;
-const BARE_NAMED_RESULT_BUDGET = MAX_AUTOCOMPLETE_RESULTS - BARE_FILE_RESULT_RESERVE;
 const TEAMMATE_NAME = /^[a-z][a-z0-9-]{0,31}$/iu;
 
 interface RankedAgentSession extends SessionEntry {
@@ -360,7 +374,6 @@ function agentCandidates(sessions: readonly SessionView[], query: string): Compo
         .join(' '),
       group: 'Agents',
       badge: view.state.status.replaceAll('_', ' '),
-      rankPriority: NAMED_REFERENCE_PRIORITY,
       replacement: agentMentionReference(teammate, view.config.id),
       append: 'space',
     } satisfies ComposerAutocompleteCandidate;
@@ -378,7 +391,6 @@ function taskCandidates(tasks: readonly ComposerTaskSummary[]): ComposerAutocomp
       keywords: `${task.id} ${task.title} ${task.status}`,
       group: 'Tasks',
       badge: TASK_STATUS_META[task.status].label,
-      rankPriority: NAMED_REFERENCE_PRIORITY,
       replacement: reference,
       append: 'space',
     } satisfies ComposerAutocompleteCandidate;
@@ -399,43 +411,33 @@ function attentionCandidates(items: readonly ComposerAttentionItem[]): ComposerA
       keywords: `${item.id} ${item.subject} ${item.source}`,
       group: 'Attention',
       badge: item.source,
-      rankPriority: NAMED_REFERENCE_PRIORITY,
       replacement: reference,
       append: 'space',
     } satisfies ComposerAutocompleteCandidate;
   });
 }
 
-/** Keep every available named group discoverable within the bounded bare-`@`
- * list. Taking one round from each group at a time gives small groups all their
- * rows and shares the remainder between large groups; flattening afterward
- * preserves the required Agents -> Tasks -> Attention order. */
-function balancedNamedCandidates(
-  groups: readonly (readonly ComposerAutocompleteCandidate[])[],
-  limit: number,
-): ComposerAutocompleteCandidate[] {
-  const counts = groups.map(() => 0);
-  let remaining = Math.max(0, Math.trunc(limit));
-  while (remaining > 0) {
-    let progressed = false;
-    for (const [index, group] of groups.entries()) {
-      if (counts[index]! >= group.length) continue;
-      counts[index] += 1;
-      remaining -= 1;
-      progressed = true;
-      if (remaining === 0) break;
-    }
-    if (!progressed) break;
-  }
-  return groups.flatMap((group, index) => group.slice(0, counts[index]));
-}
-
-/** Name/id-shaped input can refer to any small named set. A slash, dot, line
- * selector, or other path punctuation is definitive Files grammar. Leading
- * `#`/`?` remain accepted as optional narrowing hints even though `@` is the
- * only trigger. */
-export function isNamedReferenceQuery(query: string): boolean {
-  return /^(?:[A-Za-z0-9-]*|[#?][A-Za-z0-9-]*)$/u.test(query);
+function pinCandidates(sessionId: string, pins: readonly ComposerPinSummary[]): ComposerAutocompleteCandidate[] {
+  return pins.flatMap(pin => {
+    const reference = resolvedPinReference(sessionId, pin);
+    if (!reference) return [];
+    const kind = pin.kind === 'message' ? 'Message pin' : pin.kind === 'note' ? 'Note pin' : `${pin.kind} pin`;
+    const provenance =
+      pin.by === 'agent' ? (pin.createdByName ? `Pinned by ${pin.createdByName}` : 'Pinned by an agent') : '';
+    return [
+      {
+        id: `pin:${sessionId}:${pin.id}`,
+        kind: 'pin',
+        label: `pin: ${reference.label}`,
+        detail: [kind, provenance].filter(Boolean).join(' · '),
+        keywords: `${pin.id} ${reference.label} ${pin.kind} ${pin.createdByName ?? ''}`,
+        group: 'Pins',
+        badge: pin.kind,
+        replacement: pinReferenceMarkdown(reference),
+        append: 'space',
+      } satisfies ComposerAutocompleteCandidate,
+    ];
+  });
 }
 
 export function createFilesProvider(sessionId: string): ComposerAutocompleteProvider {
@@ -504,91 +506,106 @@ export function createReferencesProvider({
   getSessions = noSessions,
   getTasks = noTasks,
   getAttentionItems = noAttention,
+  getPins = noPins,
   waitForTasks,
   waitForAttentionItems,
+  waitForPins,
 }: {
   sessionId: string;
   getSessions?: () => readonly SessionView[];
   getTasks?: () => readonly ComposerTaskSummary[];
   getAttentionItems?: () => readonly ComposerAttentionItem[];
+  getPins?: () => readonly ComposerPinSummary[];
   waitForTasks?: () => Promise<void> | undefined;
   waitForAttentionItems?: () => Promise<void> | undefined;
+  waitForPins?: () => Promise<void> | undefined;
 }): ComposerAutocompleteProvider {
   const files = createFilesProvider(sessionId);
   let previousSessions: readonly SessionView[] | undefined;
   let previousTasks: readonly ComposerTaskSummary[] | undefined;
   let previousAttention: readonly ComposerAttentionItem[] | undefined;
+  let previousPins: readonly ComposerPinSummary[] | undefined;
   let snapshotToken = {};
 
-  const named = (query: string, limit?: number): ComposerAutocompleteCandidate[] => {
-    if (!isNamedReferenceQuery(query)) return [];
-    const groups = [
-      agentCandidates(getSessions(), query),
-      taskCandidates(getTasks()),
-      attentionCandidates(getAttentionItems()),
-    ];
-    return limit === undefined ? groups.flat() : balancedNamedCandidates(groups, limit);
+  const tierResult = (tier: number, query: string): ComposerProviderResult => {
+    if (tier === 2)
+      return {
+        candidates: agentCandidates(getSessions(), query),
+        filterQuery: query,
+        contextLabel: '@@ fleet agents',
+      };
+    if (tier === 3)
+      return {
+        candidates: taskCandidates(getTasks()),
+        filterQuery: query,
+        contextLabel: '@@@ fleet tasks',
+      };
+    if (tier === 4)
+      return {
+        candidates: attentionCandidates(getAttentionItems()),
+        filterQuery: query,
+        contextLabel: '@@@@ unresolved attention',
+      };
+    if (tier === 5) {
+      const candidates = pinCandidates(sessionId, getPins());
+      return {
+        candidates,
+        filterQuery: query,
+        contextLabel: '@@@@@ session pins',
+        notice: candidates.length === 0 ? 'No proven pins are available for this session yet.' : undefined,
+      };
+    }
+    return {
+      candidates: [],
+      filterQuery: query,
+      contextLabel: `${'@'.repeat(Math.min(tier, 8))} has no reference family`,
+      notice: 'Use one to five @ signs. The legend above shows every available tier.',
+    };
   };
 
   return {
     id: `references:${sessionId}`,
     trigger: '@',
     label: 'References',
+    legend: COMPOSER_REFERENCE_TIERS,
     get snapshotKey() {
       const sessions = getSessions();
       const tasks = getTasks();
       const attention = getAttentionItems();
-      if (sessions !== previousSessions || tasks !== previousTasks || attention !== previousAttention) {
+      const pins = getPins();
+      if (
+        sessions !== previousSessions ||
+        tasks !== previousTasks ||
+        attention !== previousAttention ||
+        pins !== previousPins
+      ) {
         previousSessions = sessions;
         previousTasks = tasks;
         previousAttention = attention;
+        previousPins = pins;
         snapshotToken = {};
       }
       return snapshotToken;
     },
     reset: files.reset,
     initialCandidates: context =>
-      isNamedReferenceQuery(context.query)
-        ? {
-            candidates: named(context.query, context.query === '' ? BARE_NAMED_RESULT_BUDGET : undefined),
-            filterQuery: context.query,
-            contextLabel: 'Fleet references · files loading',
-          }
-        : undefined,
+      context.match.referenceTier === 1 ? undefined : tierResult(context.match.referenceTier ?? 0, context.query),
     async candidates(context): Promise<ComposerProviderResult> {
-      const namedQuery = isNamedReferenceQuery(context.query);
-      const warmups = namedQuery
-        ? [waitForTasks?.(), waitForAttentionItems?.()].filter(
-            (pending): pending is Promise<void> => pending !== undefined,
-          )
-        : [];
-      const warmed = Promise.all(warmups.map(pending => pending.catch(() => undefined)));
-      let fileResult: ComposerProviderResult;
-      try {
-        fileResult = await files.candidates(context);
-      } catch (error) {
-        await warmed;
-        if ((error as { name?: string })?.name === 'AbortError') throw error;
-        const candidates = named(context.query, context.query === '' ? MAX_AUTOCOMPLETE_RESULTS : undefined);
-        if (candidates.length === 0) throw error;
-        return {
-          candidates,
-          filterQuery: context.query,
-          contextLabel: 'Fleet references',
-          notice: `Files unavailable: ${error instanceof Error ? error.message : String(error)}.`,
-        };
+      const tier = context.match.referenceTier ?? 0;
+      if (tier === 1) return files.candidates(context);
+      if (tier === 3) {
+        const pending = waitForTasks?.();
+        if (pending) await pending.catch(() => undefined);
       }
-      await warmed;
-      const namedLimit =
-        context.query === ''
-          ? MAX_AUTOCOMPLETE_RESULTS - Math.min(BARE_FILE_RESULT_RESERVE, fileResult.candidates.length)
-          : undefined;
-      const candidates = named(context.query, namedLimit);
-      return {
-        ...fileResult,
-        candidates: [...candidates, ...fileResult.candidates],
-        contextLabel: candidates.length > 0 ? `Fleet · ${fileResult.contextLabel ?? 'files'}` : fileResult.contextLabel,
-      };
+      if (tier === 4) {
+        const pending = waitForAttentionItems?.();
+        if (pending) await pending.catch(() => undefined);
+      }
+      if (tier === 5) {
+        const pending = waitForPins?.();
+        if (pending) await pending.catch(() => undefined);
+      }
+      return tierResult(tier, context.query);
     },
   };
 }
@@ -599,16 +616,20 @@ export function createComposerAutocompleteProviders({
   getSessions = noSessions,
   getTasks = noTasks,
   getAttentionItems = noAttention,
+  getPins = noPins,
   waitForTasks,
   waitForAttentionItems,
+  waitForPins,
 }: {
   sessionId: string;
   harness?: ComposerHarness;
   getSessions?: () => readonly SessionView[];
   getTasks?: () => readonly ComposerTaskSummary[];
   getAttentionItems?: () => readonly ComposerAttentionItem[];
+  getPins?: () => readonly ComposerPinSummary[];
   waitForTasks?: () => Promise<void> | undefined;
   waitForAttentionItems?: () => Promise<void> | undefined;
+  waitForPins?: () => Promise<void> | undefined;
 }): ComposerAutocompleteProvider[] {
   return [
     createSkillsProvider(sessionId, harness),
@@ -617,8 +638,10 @@ export function createComposerAutocompleteProviders({
       getSessions,
       getTasks,
       getAttentionItems,
+      getPins,
       waitForTasks,
       waitForAttentionItems,
+      waitForPins,
     }),
   ];
 }

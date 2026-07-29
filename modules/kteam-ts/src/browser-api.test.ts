@@ -1,14 +1,20 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
   BrowserApi,
+  BrowserLoginApi,
   browserWardenDenial,
+  isBrowserLoginPath,
   isBrowserPath,
   isBrowserStreamPath,
   matchBrowserRoute,
   parseBrowserAction,
+  parseBrowserLoginAction,
+  type BrowserLoginLifecycle,
+  type BrowserLoginStatusView,
 } from './browser-api';
 import { BrowserService, type ManagedBrowserRuntime } from './browser-service';
 import { createPaths } from './paths';
+import { BrowserError } from './browser-types';
 import type {
   BrowserInputEvent,
   BrowserPageActionSnapshot,
@@ -89,6 +95,41 @@ class Runtime implements ManagedBrowserRuntime {
   async close() {}
 }
 
+/** Stands in for browser-login.ts. It implements the seam STRUCTURALLY and
+ * imports nothing from it, which is the point of the seam: the route is
+ * testable with no Chrome, no x11vnc, and no lease. */
+class Lifecycle implements BrowserLoginLifecycle {
+  calls: string[] = [];
+  view: BrowserLoginStatusView = { state: 'closed', profilePrimed: false };
+  async status() {
+    this.calls.push('status');
+    return this.view;
+  }
+  async start(options: { minutes?: number }) {
+    this.calls.push(`start:${options.minutes ?? 'default'}`);
+    return {
+      state: 'open' as const,
+      profilePrimed: false,
+      openedAt: '2026-07-28T23:10:00.000Z',
+      expiresAt: '2026-07-28T23:25:00.000Z',
+      connection: {
+        host: '127.0.0.1',
+        port: 5951,
+        password: 'Sq7fXk2p',
+        sshTunnel: 'ssh -N -L 5951:127.0.0.1:5951 kirin@box',
+      },
+    };
+  }
+  async stop(options: { primed?: boolean }) {
+    this.calls.push(`stop:${options.primed === undefined ? 'default' : options.primed}`);
+    return { state: 'closed' as const, profilePrimed: options.primed === true };
+  }
+  async confirm() {
+    this.calls.push('confirm');
+    return { ...this.view, profilePrimed: true };
+  }
+}
+
 let service: BrowserService | undefined;
 
 function harness() {
@@ -123,6 +164,32 @@ describe('browser routing and warden gate', () => {
     expect(browserWardenDenial('POST', `/v1/sessions/${SID}/browser`)).toBe('use the session browser');
     expect(browserWardenDenial('GET', `/v1/sessions/${SID}/browser/stream`)).toBe('use the session browser');
     expect(browserWardenDenial('GET', '/v1/health')).toBeNull();
+  });
+
+  // THE REGRESSION TEST FOR A LIVE GAP. `/v1/browser/login` is a TOP-LEVEL
+  // path, so it never matched `isBrowserPath`, and api-server's warden gate
+  // ends in a generic "every other GET is fine" allowance. Before this denial
+  // existed, a warden-scoped token could GET the window's live VNC port and
+  // its password. GET is the whole secret here; POST already fell to the
+  // catch-all.
+  test('warden is denied the daemon-global login window, GET most of all', () => {
+    expect(browserWardenDenial('GET', '/v1/browser/login')).toBe('use the human browser login window');
+    expect(browserWardenDenial('POST', '/v1/browser/login')).toBe('use the human browser login window');
+    expect(browserWardenDenial('GET', '/v1/browser/login/')).toBe('use the human browser login window');
+    expect(isBrowserLoginPath('/v1/browser/login')).toBe(true);
+  });
+
+  // ANCHORED, not a prefix land-grab. The denial is a statement about one
+  // route; it must not silently swallow neighbours nobody has designed yet.
+  test('the login denial does not swallow adjacent paths', () => {
+    expect(browserWardenDenial('GET', '/v1/browser')).toBeNull();
+    expect(browserWardenDenial('GET', '/v1/browser/loginx')).toBeNull();
+    expect(browserWardenDenial('GET', '/v1/browser/login/extra')).toBeNull();
+    expect(isBrowserLoginPath('/v1/browser/loginx')).toBe(false);
+    // ...and the login path is not mistaken for a session browser route, which
+    // would send it to BrowserApi and a session lookup that cannot exist.
+    expect(isBrowserPath('/v1/browser/login')).toBe(false);
+    expect(matchBrowserRoute('/v1/browser/login')).toBeNull();
   });
 });
 
@@ -225,6 +292,23 @@ describe('server-resolved ownership and idempotency', () => {
     expect(runtime.calls.filter(call => call === 'click:#once')).toHaveLength(1);
   });
 
+  test('login route rejects a peer holding the shared admin bearer', async () => {
+    // The warden gate never sees this caller: a `peer:<id>` presents the SAME
+    // admin token the human does and is separated only by the server-resolved
+    // actor. That is what this second layer is for.
+    const api = new BrowserLoginApi(new Lifecycle());
+    for (const actor of [`peer:${SID}`, `warden:${SID}`, 'warden'] as const) {
+      expect(await api.handle({ method: 'GET', actor })).toMatchObject({ status: 403, body: { code: 'forbidden' } });
+      expect(await api.handle({ method: 'POST', body: { action: 'start' }, actor })).toMatchObject({
+        status: 403,
+        body: { code: 'forbidden' },
+      });
+      expect(await api.handle({ method: 'POST', body: { action: 'stop' }, actor })).toMatchObject({ status: 403 });
+    }
+    // An unauthenticated/absent actor is refused too, rather than defaulting in.
+    expect(await api.handle({ method: 'GET' })).toMatchObject({ status: 403 });
+  });
+
   test('human activity provenance cannot be spoofed by an agent body', async () => {
     const { api } = harness();
     await api.handle({
@@ -240,5 +324,113 @@ describe('server-resolved ownership and idempotency', () => {
       actor: `peer:${SID}`,
     });
     expect(response?.status).toBe(403);
+  });
+});
+
+describe('human login window route', () => {
+  test('parses the three actions and refuses anything else', () => {
+    expect(parseBrowserLoginAction({ action: 'start' })).toEqual({ action: 'start' });
+    expect(parseBrowserLoginAction({ action: 'start', minutes: 30 })).toEqual({ action: 'start', minutes: 30 });
+    expect(parseBrowserLoginAction({ action: 'stop' })).toEqual({ action: 'stop' });
+    expect(parseBrowserLoginAction({ action: 'stop', primed: true })).toEqual({ action: 'stop', primed: true });
+    expect(parseBrowserLoginAction({ action: 'confirm' })).toEqual({ action: 'confirm' });
+    expect(() => parseBrowserLoginAction({ action: 'restart' })).toThrow(/start, stop, or confirm/);
+    expect(() => parseBrowserLoginAction({})).toThrow(/start, stop, or confirm/);
+  });
+
+  test('bounds the deadline instead of trusting the caller', () => {
+    for (const minutes of [0, -5, 61, 1.5, '30', null]) {
+      expect(() => parseBrowserLoginAction({ action: 'start', minutes })).toThrow(/between 1 and 60/);
+    }
+    expect(parseBrowserLoginAction({ action: 'start', minutes: 1 })).toEqual({ action: 'start', minutes: 1 });
+    expect(parseBrowserLoginAction({ action: 'start', minutes: 60 })).toEqual({ action: 'start', minutes: 60 });
+    expect(() => parseBrowserLoginAction({ action: 'stop', primed: 'yes' })).toThrow(/primed must be a boolean/);
+  });
+
+  test('a human admin drives every action, and priming rides on stop', async () => {
+    const lifecycle = new Lifecycle();
+    const api = new BrowserLoginApi(lifecycle);
+    for (const actor of ['admin-ui', 'admin-cli'] as const) {
+      expect(await api.handle({ method: 'GET', actor })).toMatchObject({ status: 200 });
+    }
+    const started = await api.handle({ method: 'POST', body: { action: 'start', minutes: 5 }, actor: 'admin-cli' });
+    expect(started.status).toBe(200);
+    expect(started.body).toMatchObject({ state: 'open', connection: { port: 5951 } });
+
+    // markPrimed() requires the lease, which only the open window holds — so
+    // priming is an argument to stop, never a later call.
+    expect(
+      await api.handle({ method: 'POST', body: { action: 'stop', primed: true }, actor: 'admin-ui' }),
+    ).toMatchObject({ status: 200, body: { profilePrimed: true } });
+    expect(await api.handle({ method: 'POST', body: { action: 'confirm' }, actor: 'admin-ui' })).toMatchObject({
+      status: 200,
+      body: { profilePrimed: true },
+    });
+    expect(lifecycle.calls).toEqual(['status', 'status', 'start:5', 'stop:true', 'confirm']);
+  });
+
+  test('a bare stop leaves priming alone and unknown methods are refused', async () => {
+    const lifecycle = new Lifecycle();
+    const api = new BrowserLoginApi(lifecycle);
+    expect(await api.handle({ method: 'POST', body: { action: 'stop' }, actor: 'admin-cli' })).toMatchObject({
+      body: { profilePrimed: false },
+    });
+    expect(lifecycle.calls).toEqual(['stop:default']);
+    expect(await api.handle({ method: 'DELETE', actor: 'admin-cli' })).toMatchObject({ status: 405 });
+  });
+
+  test('a closed window reports no connection, no deadline, and no password', async () => {
+    const api = new BrowserLoginApi(new Lifecycle());
+    const closed = await api.handle({ method: 'GET', actor: 'admin-ui' });
+    expect(closed.body).toEqual({ state: 'closed', profilePrimed: false });
+    // Assert on the PARSED object: absence must be absence, not a zeroed port
+    // or a stale countdown a client would happily render.
+    const body = closed.body as Record<string, unknown>;
+    expect(body['connection']).toBeUndefined();
+    expect(body['expiresAt']).toBeUndefined();
+    expect(Object.keys(body)).toEqual(['state', 'profilePrimed']);
+  });
+
+  test('a lifecycle failure is surfaced verbatim, never downgraded', async () => {
+    const lifecycle = new Lifecycle();
+    // profile_busy means a session browser holds the shared lease. Falling back
+    // to an ephemeral profile here would silently sign the human into a profile
+    // that is then thrown away — the worst outcome in this design.
+    lifecycle.start = async () => {
+      throw new BrowserError('profile_busy', 'the shared browser profile is in use', 409);
+    };
+    const api = new BrowserLoginApi(lifecycle);
+    expect(await api.handle({ method: 'POST', body: { action: 'start' }, actor: 'admin-cli' })).toEqual({
+      status: 409,
+      body: { error: 'the shared browser profile is in use', code: 'profile_busy' },
+    });
+  });
+
+  // Every code browser-login.ts raises must arrive at the client as ITSELF.
+  // Flattening these to one generic 500 — or worse, to a cheerful "closed" —
+  // is the failure the house rules name: a 503 shown as a stopped browser
+  // teaches the human to trust something that is lying.
+  test('every lifecycle error code and status reaches the client unflattened', async () => {
+    const cases = [
+      { code: 'launch_failed', status: 503, message: 'x11vnc did not come up', action: 'start' },
+      { code: 'not_running', status: 409, message: 'no login window is open', action: 'confirm' },
+      { code: 'bad_request', status: 400, message: 'minutes must be a whole number', action: 'start' },
+      { code: 'profile_busy', status: 409, message: 'the shared profile is held', action: 'stop' },
+    ] as const;
+    for (const { code, status, message, action } of cases) {
+      const lifecycle = new Lifecycle();
+      const raise = async () => {
+        throw new BrowserError(code, message, status);
+      };
+      lifecycle.start = raise;
+      lifecycle.stop = raise;
+      lifecycle.confirm = raise;
+      const response = await new BrowserLoginApi(lifecycle).handle({
+        method: 'POST',
+        body: { action },
+        actor: 'admin-cli',
+      });
+      expect(response).toEqual({ status, body: { error: message, code } });
+    }
   });
 });

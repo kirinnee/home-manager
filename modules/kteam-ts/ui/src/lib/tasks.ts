@@ -390,7 +390,9 @@ export function taskActivityText(activity: TaskActivity): string {
   if (activity.type === 'status') {
     const from = value('phaseFrom') ?? value('from') ?? 'phase';
     const to = value('phaseTo') ?? value('to') ?? 'phase';
-    return `${from} → ${to}${(value('reason') ?? value('note')) ? `: ${value('reason') ?? value('note')}` : ''}`;
+    const prefix =
+      activity.data['reopened'] === true ? 'Reopened · ' : activity.data['backward'] === true ? 'Moved back · ' : '';
+    return `${prefix}${from} → ${to}${(value('reason') ?? value('note')) ? `: ${value('reason') ?? value('note')}` : ''}`;
   }
   if (activity.type === 'clarification') return `Clarification: ${value('text') ?? ''}`;
   if (activity.type === 'dependency') {

@@ -4,6 +4,7 @@ import {
   encodeBrowserFrameEnvelope,
   parseBrowserInput,
   type BrowserStreamDownstream,
+  type BrowserStreamScheduler,
 } from './browser-stream';
 import { BrowserService, type ManagedBrowserRuntime } from './browser-service';
 import { createPaths } from './paths';
@@ -123,7 +124,7 @@ class Downstream implements BrowserStreamDownstream {
   sent: Uint8Array[] = [];
   closed: Array<{ code?: number; reason?: string }> = [];
   buffered = 0;
-  send(chunk: Uint8Array) {
+  send(chunk: Uint8Array): number | void {
     this.sent.push(chunk);
   }
   close(code?: number, reason?: string) {
@@ -137,6 +138,56 @@ class Downstream implements BrowserStreamDownstream {
 class ThrowingDownstream extends Downstream {
   override send(_chunk: Uint8Array) {
     throw new Error('socket is gone');
+  }
+}
+
+class BackpressuredDownstream extends Downstream {
+  override send(chunk: Uint8Array): number {
+    this.sent.push(chunk);
+    return -1;
+  }
+}
+
+class DroppingDownstream extends Downstream {
+  attempts: Uint8Array[] = [];
+  result: number | void = 0;
+
+  override send(chunk: Uint8Array): number | void {
+    this.attempts.push(chunk);
+    if (this.result === 0) return 0;
+    this.sent.push(chunk);
+    return this.result;
+  }
+}
+
+class FrameClock implements BrowserStreamScheduler {
+  private now = 0;
+  private nextTimer = 0;
+  private readonly timers = new Map<number, { dueAt: number; callback: () => void }>();
+
+  setTimeout(callback: () => void, delayMs: number): unknown {
+    this.nextTimer += 1;
+    this.timers.set(this.nextTimer, { dueAt: this.now + delayMs, callback });
+    return this.nextTimer;
+  }
+
+  clearTimeout(timer: unknown): void {
+    this.timers.delete(timer as number);
+  }
+
+  advance(delayMs: number): void {
+    const deadline = this.now + delayMs;
+    for (;;) {
+      const next = [...this.timers.entries()]
+        .filter(([, timer]) => timer.dueAt <= deadline)
+        .sort(([leftId, left], [rightId, right]) => left.dueAt - right.dueAt || leftId - rightId)[0];
+      if (!next) break;
+      const [id, timer] = next;
+      this.timers.delete(id);
+      this.now = timer.dueAt;
+      timer.callback();
+    }
+    this.now = deadline;
   }
 }
 
@@ -266,6 +317,91 @@ describe('browser JPEG stream bridge', () => {
     });
     expect(downstream.sent).toHaveLength(0);
     expect((await service.status(SID)).viewers).toBe(1);
+    await service.close();
+  });
+
+  test('sends only the newest buffered frame after a slow viewer recovers', async () => {
+    const { runtime, service } = await harness();
+    const downstream = new Downstream();
+    const clock = new FrameClock();
+    downstream.buffered = 1;
+    await BrowserStreamBridge.connect(service, SID, downstream, clock);
+
+    runtime.listener?.({
+      dataBase64: Buffer.from('older-frame').toString('base64'),
+      width: 1280,
+      height: 800,
+      pageId: 'page-1',
+    });
+    runtime.listener?.({
+      dataBase64: Buffer.from('newest-frame').toString('base64'),
+      width: 1280,
+      height: 800,
+      pageId: 'page-1',
+    });
+    expect(downstream.sent).toEqual([]);
+
+    downstream.buffered = 0;
+    clock.advance(16);
+    expect(downstream.sent).toHaveLength(1);
+    expect(decodeFrameEnvelope(downstream.sent[0]!)).toMatchObject({ jpeg: 'newest-frame' });
+    await service.close();
+  });
+
+  test('keeps a fast viewer independent from a backpressured sibling', async () => {
+    const { runtime, service } = await harness();
+    const slow = new Downstream();
+    const fast = new Downstream();
+    const clock = new FrameClock();
+    slow.buffered = 1;
+    await BrowserStreamBridge.connect(service, SID, slow, clock);
+    await BrowserStreamBridge.connect(service, SID, fast, clock);
+
+    runtime.listener?.({
+      dataBase64: Buffer.from('frame-one').toString('base64'),
+      width: 1280,
+      height: 800,
+      pageId: 'page-1',
+    });
+    runtime.listener?.({
+      dataBase64: Buffer.from('frame-two').toString('base64'),
+      width: 1280,
+      height: 800,
+      pageId: 'page-1',
+    });
+
+    expect(fast.sent.map(decodeFrameEnvelope).map(frame => frame.jpeg)).toEqual(['frame-one', 'frame-two']);
+    expect(slow.sent).toEqual([]);
+    slow.buffered = 0;
+    clock.advance(16);
+    expect(slow.sent.map(decodeFrameEnvelope).map(frame => frame.jpeg)).toEqual(['frame-two']);
+    expect(fast.sent).toHaveLength(2);
+    await service.close();
+  });
+
+  test('treats Bun backpressure and dropped-frame results as healthy transport states', async () => {
+    const { runtime, service } = await harness();
+    const backpressured = new BackpressuredDownstream();
+    const dropped = new DroppingDownstream();
+    const clock = new FrameClock();
+    await BrowserStreamBridge.connect(service, SID, backpressured, clock);
+    await BrowserStreamBridge.connect(service, SID, dropped, clock);
+
+    runtime.listener?.({
+      dataBase64: Buffer.from('latest-frame').toString('base64'),
+      width: 1280,
+      height: 800,
+      pageId: 'page-1',
+    });
+
+    expect(backpressured.closed).toEqual([]);
+    expect(backpressured.sent).toHaveLength(1);
+    expect(dropped.closed).toEqual([]);
+    expect(dropped.sent).toEqual([]);
+    dropped.result = undefined;
+    clock.advance(16);
+    expect(dropped.sent.map(decodeFrameEnvelope).map(frame => frame.jpeg)).toEqual(['latest-frame']);
+    expect((await service.status(SID)).viewers).toBe(2);
     await service.close();
   });
 

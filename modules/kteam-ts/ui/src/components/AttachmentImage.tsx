@@ -8,9 +8,16 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
-import { ImageOff, X } from 'lucide-react';
+import { Download, ExternalLink, FileText, ImageOff, X } from 'lucide-react';
 import { api } from '../lib/api';
-import { formatAttachmentSize, type TranscriptImage } from '../lib/attachments';
+import {
+  attachmentTypeLabel,
+  formatAttachmentSize,
+  isBrowserOpenableAttachment,
+  isImageMime,
+  type StoredTranscriptAttachment,
+  type TranscriptImage,
+} from '../lib/attachments';
 import { cn } from '../lib/utils';
 import { useDialogFocus } from '../hooks/useDialogFocus';
 
@@ -45,7 +52,6 @@ export class AttachmentBlobCache {
     };
     entry.promise = load()
       .then(blob => {
-        if (!blob.type.startsWith('image/')) throw new Error('attachment response was not an image');
         const url = URL.createObjectURL(blob);
         // A released in-flight entry may have been evicted, or the provider may
         // have been disposed, before its fetch settled. It no longer has an
@@ -95,7 +101,111 @@ export class AttachmentBlobCache {
   }
 }
 
+function AttachmentDocumentCard({ attachment }: { attachment: StoredTranscriptAttachment }) {
+  const sharedCache = useContext(AttachmentCacheContext);
+  const localCache = useRef<AttachmentBlobCache | null>(null);
+  localCache.current ??= new AttachmentBlobCache(1);
+  useEffect(() => () => localCache.current?.dispose(), []);
+  const cache = sharedCache ?? localCache.current;
+  const host = useRef<HTMLDivElement | null>(null);
+  const visible = useVisible(host, false);
+  const [src, setSrc] = useState('');
+  const [failed, setFailed] = useState(false);
+  const key = `${attachment.sessionId}/${attachment.attachmentId}`;
+
+  useEffect(() => {
+    if (!visible) return;
+    let active = true;
+    setSrc('');
+    setFailed(false);
+    void cache
+      .acquire(key, () => api.attachment(attachment.sessionId, attachment.attachmentId))
+      .then(url => {
+        if (active) setSrc(url);
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
+    return () => {
+      active = false;
+      cache.release(key);
+    };
+  }, [attachment.attachmentId, attachment.sessionId, cache, key, visible]);
+
+  const type = attachmentTypeLabel(attachment.mime);
+  const metadata = [attachment.mime, formatAttachmentSize(attachment.size)].filter(Boolean).join(' · ');
+  return (
+    <div
+      ref={host}
+      className="flex min-w-0 max-w-full gap-2 rounded-control border border-border-soft bg-surface-2 p-2 text-left"
+    >
+      <FileText size={18} className="mt-0.5 shrink-0 text-muted" aria-hidden="true" />
+      <div className="min-w-0 flex-1 text-meta leading-tight">
+        <span className="block truncate text-fg" title={attachment.filename}>
+          {attachment.filename}
+        </span>
+        <span className="block truncate text-faint" title={metadata}>
+          {type}
+          {metadata ? ` · ${metadata}` : ''}
+        </span>
+        {attachment.textExtraction && (
+          <span className="block text-faint">
+            text extracted for agent{attachment.textExtraction.truncated ? ' · truncated' : ''}
+          </span>
+        )}
+        {failed ? (
+          <span className="block text-warn">file could not be opened</span>
+        ) : (
+          <>
+            {!src && (
+              <span className="block text-muted" role="status">
+                loading file…
+              </span>
+            )}
+            <span className="mt-1 flex flex-wrap gap-1">
+              {isBrowserOpenableAttachment(attachment.mime) && (
+                <a
+                  {...(src ? { href: src } : {})}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-disabled={!src}
+                  className="inline-flex min-h-[44px] min-w-[44px] items-center gap-1 rounded-control px-2 text-muted hover:bg-surface hover:text-fg aria-disabled:opacity-50"
+                  aria-label={`Open ${attachment.filename}`}
+                  onClick={event => {
+                    if (!src) event.preventDefault();
+                  }}
+                >
+                  <ExternalLink size={14} aria-hidden="true" /> Open
+                </a>
+              )}
+              <a
+                {...(src ? { href: src, download: attachment.filename } : {})}
+                aria-disabled={!src}
+                className="inline-flex min-h-[44px] min-w-[44px] items-center gap-1 rounded-control px-2 text-muted hover:bg-surface hover:text-fg aria-disabled:opacity-50"
+                aria-label={`Download ${attachment.filename}`}
+                onClick={event => {
+                  if (!src) event.preventDefault();
+                }}
+              >
+                <Download size={14} aria-hidden="true" /> Download
+              </a>
+            </span>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const AttachmentCacheContext = createContext<AttachmentBlobCache | null>(null);
+
+function isImageAttachment(image: TranscriptImage): boolean {
+  return (
+    image.kind === 'inline' ||
+    isImageMime(image.mime) ||
+    (!image.mime && /\.(?:png|jpe?g|gif|webp)$/i.test(image.filename))
+  );
+}
 
 export function AttachmentImageProvider({ children }: { children: ReactNode }) {
   const cache = useRef<AttachmentBlobCache | null>(null);
@@ -169,7 +279,11 @@ function AttachmentThumbnail({ image }: { image: TranscriptImage }) {
     const key = `${image.sessionId}/${image.attachmentId}`;
     let active = true;
     void cache
-      .acquire(key, () => api.attachment(image.sessionId, image.attachmentId))
+      .acquire(key, async () => {
+        const blob = await api.attachment(image.sessionId, image.attachmentId);
+        if (!isImageMime(blob.type)) throw new Error('attachment response was not an image');
+        return blob;
+      })
       .then(url => {
         if (active) setSrc(url);
       })
@@ -271,16 +385,20 @@ export function TranscriptImageGallery({
   return (
     <div className={cn('min-w-0 space-y-1.5', className)}>
       <div className="flex min-w-0 flex-wrap items-start gap-2">
-        {visible.map((image, index) => (
-          <AttachmentThumbnail
-            key={
-              image.kind === 'attachment'
-                ? `${image.sessionId}/${image.attachmentId}/${index}`
-                : `${image.alt}/${image.src.length}/${index}`
-            }
-            image={image}
-          />
-        ))}
+        {visible.map((image, index) =>
+          image.kind === 'attachment' && !isImageAttachment(image) ? (
+            <AttachmentDocumentCard key={`${image.sessionId}/${image.attachmentId}/${index}`} attachment={image} />
+          ) : (
+            <AttachmentThumbnail
+              key={
+                image.kind === 'attachment'
+                  ? `${image.sessionId}/${image.attachmentId}/${index}`
+                  : `${image.alt}/${image.src.length}/${index}`
+              }
+              image={image}
+            />
+          ),
+        )}
       </div>
       {hidden > 0 && (
         <button
@@ -288,7 +406,7 @@ export function TranscriptImageGallery({
           className="inline-flex min-h-[44px] items-center rounded-control px-2 text-meta text-muted hover:bg-surface-2 hover:text-fg"
           onClick={() => setShowAll(true)}
         >
-          Show {hidden} more image{hidden === 1 ? '' : 's'}
+          Show {hidden} more attachment{hidden === 1 ? '' : 's'}
         </button>
       )}
     </div>

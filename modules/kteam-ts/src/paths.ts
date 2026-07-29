@@ -32,6 +32,15 @@ export interface KTeamPaths {
   learningPatches: string;
   /** Fleet-global daemon-owned task records. */
   tasksDir: string;
+  /** State of the daemon-global human browser sign-in window: child pids, the
+   *  loopback VNC port, and its timestamps — written 0600 so a crashed daemon
+   *  can reconcile the orphans it left behind on the next boot.
+   *
+   *  NEVER the VNC password. That credential is minted per window, handed to
+   *  x11vnc through a self-deleting 0600 file, returned only to a human-admin
+   *  caller, and is gone the moment the window closes. Anything durable is a
+   *  credential that outlives the window it belonged to. */
+  browserLogin: string;
 }
 
 export function createPaths(home = process.env.KTEAM_HOME ?? path.join(os.homedir(), '.kteam')): KTeamPaths {
@@ -59,6 +68,7 @@ export function createPaths(home = process.env.KTEAM_HOME ?? path.join(os.homedi
     learningRuns: path.join(home, 'daemon', 'learning', 'runs'),
     learningPatches: path.join(home, 'daemon', 'learning', 'patches'),
     tasksDir: path.join(home, 'daemon', 'tasks'),
+    browserLogin: path.join(home, 'daemon', 'browser', 'login.json'),
   };
 }
 

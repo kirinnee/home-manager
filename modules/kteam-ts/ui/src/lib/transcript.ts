@@ -40,7 +40,13 @@
 
 import type { ChatRecord, KTeamEvent, SendRecord } from '../types';
 import { resultImages, type ToolResultData, type ToolUseData } from './tool-extract';
-import { attachmentFromToolPath, type StoredTranscriptImage, type TranscriptImage } from './attachments';
+import {
+  ATTACHMENT_MIME_TYPES,
+  attachmentFromToolPath,
+  normalizeAttachmentMime,
+  type StoredTranscriptImage,
+  type TranscriptImage,
+} from './attachments';
 import { classifySystemText, type SystemBlockInfo } from './system-blocks';
 export type { SystemBlockInfo } from './system-blocks';
 
@@ -432,6 +438,7 @@ export function buildSendIndex(events: KTeamEvent[], sessionId: string, ledger: 
         filename: typeof data['filename'] === 'string' && data['filename'] ? data['filename'] : id,
         ...(typeof data['mime'] === 'string' ? { mime: data['mime'] } : {}),
         ...(typeof data['size'] === 'number' ? { size: data['size'] } : {}),
+        ...(validTextExtraction(data['textExtraction']) ? { textExtraction: data['textExtraction'] } : {}),
       });
       continue;
     }
@@ -538,8 +545,21 @@ function queuedFileId(text: string): string | undefined {
 
 /** Conservatively strip only the daemon's complete, trailing reference block.
  * Any malformed line leaves the prose untouched. */
+function validTextExtraction(value: unknown): value is NonNullable<StoredTranscriptImage['textExtraction']> {
+  if (!value || typeof value !== 'object') return false;
+  const extraction = value as Record<string, unknown>;
+  return (
+    (extraction['method'] === 'pdfjs' || extraction['method'] === 'docx-xml') &&
+    typeof extraction['characters'] === 'number' &&
+    typeof extraction['truncated'] === 'boolean' &&
+    (extraction['totalPages'] === undefined || typeof extraction['totalPages'] === 'number') &&
+    (extraction['pagesRead'] === undefined || typeof extraction['pagesRead'] === 'number')
+  );
+}
+
 export function stripAttachmentReferenceBlock(text: string): { text: string; attachmentIds: string[] } | null {
-  const heading = /(?:^|\n\n)(Attached images? \(inspect th(?:is|ese) files? directly before responding\):\n)/g;
+  const heading =
+    /(?:^|\n\n)(Attached (?:file|files|image|images) \(inspect th(?:is|ese) files? directly before responding\):\n)/g;
   let match: RegExpExecArray | null = null;
   for (const candidate of text.matchAll(heading)) match = candidate;
   if (!match || match.index === undefined) return null;
@@ -547,14 +567,29 @@ export function stripAttachmentReferenceBlock(text: string): { text: string; att
   const lines = text.slice(blockStart).split('\n');
   if (
     lines.length < 2 ||
-    !/^Attached images? \(inspect th(?:is|ese) files? directly before responding\):$/.test(lines[0]!)
+    !/^Attached (?:file|files|image|images) \(inspect th(?:is|ese) files? directly before responding\):$/.test(
+      lines[0]!,
+    )
   )
     return null;
   const attachmentIds: string[] = [];
-  for (const line of lines.slice(1)) {
-    const item = /^- .+ \(image\/(?:png|jpeg|gif|webp), \d+ bytes, id (att_[a-f0-9]{64})\)$/.exec(line);
-    if (!item) return null;
-    attachmentIds.push(item[1]!);
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    const item = /^- .+ \(([^,]+), \d+ bytes, id (att_[a-f0-9]{64})\)$/.exec(line);
+    if (item) {
+      if (!(ATTACHMENT_MIME_TYPES as readonly string[]).includes(normalizeAttachmentMime(item[1]))) return null;
+      attachmentIds.push(item[2]!);
+      continue;
+    }
+    if (!attachmentIds.length || !/^  Text extracted by kteam \(.+\)\.$/.test(line)) return null;
+    const retained = lines[++index];
+    if (!retained || !/^  Full retained extraction: \/\S+$/.test(retained)) return null;
+    const begin = /^  ----- BEGIN KTEAM EXTRACTED TEXT (att_[a-f0-9]{64}) -----$/.exec(lines[++index] ?? '');
+    if (!begin || begin[1] !== attachmentIds.at(-1)) return null;
+    const end = `  ----- END KTEAM EXTRACTED TEXT ${begin[1]} -----`;
+    index += 1;
+    while (index < lines.length && lines[index] !== end) index += 1;
+    if (index === lines.length) return null;
   }
   if (!attachmentIds.length) return null;
   return { text: text.slice(0, match.index).trim(), attachmentIds };

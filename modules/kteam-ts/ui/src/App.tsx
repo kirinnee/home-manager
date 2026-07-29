@@ -34,6 +34,8 @@ import { useNotificationWatch } from './hooks/useNotifications';
 import { useServiceWorkerUpdate } from './hooks/useServiceWorkerUpdate';
 import { useChrome, useStore } from './lib/store';
 import { isSettingId, settingsHref, type SettingId } from './lib/settings';
+import { useBrowserLogin } from './lib/browser-login';
+import { BrowserLoginBanner } from './components/BrowserLoginBanner';
 
 // THE CHAT PAGE IS A LAZY CHUNK. It pulls in the whole reading stack — the
 // transcript, markdown, syntax highlighting, tool previews, the terminal view —
@@ -57,6 +59,10 @@ const SessionChatPage = lazy(() =>
   }),
 );
 
+const GlobalAnalyticsPage = lazy(() =>
+  import('./pages/GlobalAnalyticsPage').then(module => ({ default: module.GlobalAnalyticsPage })),
+);
+
 /** How many session pages stay mounted at once (the current one plus the one
  *  you most recently came from — enough for back-and-forth, bounded). */
 const MAX_MOUNTED_SESSIONS = 2;
@@ -76,6 +82,20 @@ function ChatChunkFallback() {
           aria-hidden="true"
         />
         Loading conversation…
+      </span>
+    </div>
+  );
+}
+
+function AnalyticsChunkFallback() {
+  return (
+    <div role="status" aria-live="polite" className="flex h-full min-h-0 w-full items-center justify-center">
+      <span className="inline-flex items-center gap-2 text-[13px] text-muted">
+        <span
+          className="inline-block h-3 w-3 animate-spin rounded-full border border-current border-t-transparent motion-reduce:animate-none"
+          aria-hidden="true"
+        />
+        Loading global analytics…
       </span>
     </div>
   );
@@ -158,9 +178,10 @@ export function App() {
   const layout = useLayoutMode();
   const compactSession = Boolean(route.sessionId) && layout === 'drawer';
   const settingsAsSheet = Boolean(route.isSettings) && layout === 'drawer';
-  const fullWidthDestination = Boolean(route.isSettings || route.isWarden || route.isLearning);
+  const fullWidthDestination = Boolean(route.isSettings || route.isWarden || route.isLearning || route.isAnalytics);
   const store = useStore();
   const chrome = useChrome();
+  const browserLogin = useBrowserLogin();
 
   // A phone opens Settings without changing the underlying route. If that same
   // window grows into rail/desktop mode, preserve the reader's destination as
@@ -251,11 +272,13 @@ export function App() {
       ? [{ href: '/', label: 'Sessions' }, { label: 'Settings' }]
       : route.isWarden
         ? [{ href: '/', label: 'Sessions' }, { label: 'Warden' }]
-        : route.isLearning
-          ? [{ href: '/', label: 'Sessions' }, { label: 'Learning' }]
-          : route.sessionId
-            ? [{ href: '/', label: 'Sessions' }, { label: route.sessionId }]
-            : [{ label: 'Sessions' }];
+        : route.isAnalytics
+          ? [{ href: '/', label: 'Sessions' }, { label: 'Analytics' }]
+          : route.isLearning
+            ? [{ href: '/', label: 'Sessions' }, { label: 'Learning' }]
+            : route.sessionId
+              ? [{ href: '/', label: 'Sessions' }, { label: route.sessionId }]
+              : [{ label: 'Sessions' }];
 
   // ONE SCROLL REGION (round 4). The shell is exactly the viewport — `100dvh`,
   // so it tracks mobile browser chrome collapsing instead of overflowing behind
@@ -289,9 +312,11 @@ export function App() {
           settingsActive={route.isSettings}
           wardenActive={route.isWarden}
           learningActive={route.isLearning}
+          analyticsActive={route.isAnalytics}
           showTheme={!route.isSettings}
         />
       )}
+      <BrowserLoginBanner status={browserLogin.status} onClose={browserLogin.stop} />
       {/* THE RECOVERY AFFORDANCE MUST SURVIVE THE BAR BEING GONE.
           On a phone the session route suppresses the AppBar entirely (see the
           note above), and that is the single most likely place to hit a pruned
@@ -331,6 +356,7 @@ export function App() {
               !route.sessionId &&
               !route.isNew &&
               !route.isWarden &&
+              !route.isAnalytics &&
               !route.isLearning &&
               (!route.isSettings || settingsAsSheet)
             }
@@ -370,6 +396,13 @@ export function App() {
           {route.isWarden && (
             <SafePane active onChunkError={raiseRecovery} onReload={applyUpdate}>
               <WardenPage />
+            </SafePane>
+          )}
+          {route.isAnalytics && (
+            <SafePane active onChunkError={raiseRecovery} onReload={applyUpdate}>
+              <Suspense fallback={<AnalyticsChunkFallback />}>
+                <GlobalAnalyticsPage />
+              </Suspense>
             </SafePane>
           )}
           {route.isLearning && (

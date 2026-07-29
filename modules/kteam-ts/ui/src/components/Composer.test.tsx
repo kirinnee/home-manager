@@ -2,8 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   Composer,
+  ComposerMarkdownPreview,
   ComposerTextarea,
-  clipboardImageFiles,
+  clipboardAttachmentFiles,
   composerCanSubmit,
   composerEnterDecision,
   composerStatusCopy,
@@ -30,6 +31,31 @@ describe('Composer reference snapshots', () => {
       status: 'in_progress',
       sessionId: 'session-one',
     });
+  });
+});
+
+describe('Composer Markdown preview', () => {
+  test('renders through shared Markdown in a separate bounded reader, never a second editor', () => {
+    const html = renderToStaticMarkup(
+      <ComposerMarkdownPreview text={'## Preview\n\n**bold**'} sessionId="session-one" />,
+    );
+
+    expect(html).toContain('data-composer-markdown-preview');
+    expect(html).toContain('aria-label="Rendered Markdown preview"');
+    expect(html).toContain('<h2>Preview</h2>');
+    expect(html).toContain('<strong>bold</strong>');
+    expect(html).toContain('max-h-28');
+    expect(html).toContain('overflow-auto');
+    expect(html).not.toContain('<textarea');
+  });
+
+  test('keeps the native textarea and lossless overlay as the sole input path', async () => {
+    const source = await Bun.file(new URL('./Composer.tsx', import.meta.url)).text();
+    expect(source).toContain('<ComposerMarkdownPreview');
+    expect(source.match(/<ComposerTextarea\b/g)).toHaveLength(1);
+    expect(source.match(/<ComposerHighlight\b/g)).toHaveLength(1);
+    expect(source).toContain('<Markdown text={text} {...markdown}');
+    expect(source).toContain('onPinOpen={sidePane?.openPin}');
   });
 });
 
@@ -305,25 +331,28 @@ describe('Composer keyboard safety matrix', () => {
   });
 });
 
-describe('Composer image capture', () => {
-  test('clipboard capture consumes only image file items', () => {
+describe('Composer attachment capture', () => {
+  test('clipboard capture consumes approved file items, including documents, but not ordinary strings', () => {
     const image = new File(['png'], 'paste.png', { type: 'image/png' });
     const text = new File(['text'], 'note.txt', { type: 'text/plain' });
-    const files = clipboardImageFiles([
+    const pdf = new File(['%PDF'], 'paper.pdf', { type: 'application/pdf' });
+    const files = clipboardAttachmentFiles([
       { kind: 'string', type: 'text/plain', getAsFile: () => text },
       { kind: 'file', type: 'text/plain', getAsFile: () => text },
       { kind: 'file', type: 'image/png', getAsFile: () => image },
+      { kind: 'file', type: 'application/pdf', getAsFile: () => pdf },
       { kind: 'file', type: 'image/jpeg', getAsFile: () => null },
     ]);
-    expect(files).toEqual([image]);
+    expect(files).toEqual([text, image, pdf]);
   });
 
-  test('picker is multi-image-only and its paperclip is a labelled 44px target', () => {
+  test('picker accepts supported files and its paperclip is a labelled 44px target', () => {
     const html = renderComposer({ onFiles: () => {} });
     expect(html).toContain('type="file"');
-    expect(html).toContain('accept="image/png,image/jpeg,image/gif,image/webp"');
+    expect(html).toContain('application/pdf');
+    expect(html).toContain('.docx');
     expect(html).toContain('multiple=""');
-    expectTouchTarget(buttonWithLabel(html, 'Attach images'));
+    expectTouchTarget(buttonWithLabel(html, 'Attach files'));
   });
 
   test('the page-owned attachment slot sits before the textarea', () => {
@@ -336,8 +365,8 @@ describe('Composer image capture', () => {
     const html = renderComposer({ onFiles: () => {}, attachmentsPending: true });
     const send = buttonWithLabel(html, 'Send this message');
     expect(send).toContain('disabled=""');
-    expect(html).toContain('Wait for images to finish uploading.');
-    expectTouchTarget(buttonWithLabel(html, 'Attach images'));
+    expect(html).toContain('Wait for files to finish uploading.');
+    expectTouchTarget(buttonWithLabel(html, 'Attach files'));
   });
 });
 
@@ -389,7 +418,7 @@ describe('Composer dictation integration', () => {
 
   test('mounts a labelled 44px mic disclosure beside Attach, collapsed at rest', () => {
     const html = renderComposerWithMicrophone({ compact: true, onFiles: () => {} });
-    const attachAt = html.indexOf('aria-label="Attach images"');
+    const attachAt = html.indexOf('aria-label="Attach files"');
     const dictateAt = html.indexOf('aria-label="Dictate a message"');
     expect(attachAt).toBeGreaterThan(-1);
     expect(dictateAt).toBeGreaterThan(attachAt);
@@ -591,7 +620,7 @@ describe('the mandatory touch send cluster', () => {
     const html = renderComposerWithMicrophone({ compact: true, onFiles: () => {}, context: { model: 'm' } });
     // Both controls share a flex-COLUMN container — the same stack as
     // Interrupt/Queue — instead of the old side-by-side row.
-    const attachAncestors = ancestorsOfLabelledButton(html, 'Attach images');
+    const attachAncestors = ancestorsOfLabelledButton(html, 'Attach files');
     const micAncestors = ancestorsOfLabelledButton(html, 'Dictate a message');
     expect(attachAncestors.some(tag => tag.includes('flex-col') && tag.includes('items-end'))).toBe(true);
     expect(micAncestors.some(tag => tag.includes('flex-col') && tag.includes('items-end'))).toBe(true);

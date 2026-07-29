@@ -36,6 +36,8 @@ import {
 import { Markdown } from './Markdown';
 import { highlightToHtml } from '../lib/highlight';
 import { formatCodeReference, type CodeReference, type CodeReferenceOpenRequest } from '../lib/code-references';
+import type { AttentionId } from '../lib/attention';
+import type { PinReferenceLookup } from '../lib/remark-session-references';
 import { langFromPath } from '../lib/tool-extract';
 import { useInputModality } from '../hooks/useInputModality';
 import {
@@ -94,6 +96,10 @@ interface Props {
   /** Programmatic open request from the session SidePane host. */
   requestedReference?: CodeReferenceOpenRequest | null;
   onRequestedReferenceHandled?: (sequence: number) => void;
+  onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
 }
 
 export interface FilesTabSnapshot {
@@ -535,12 +541,24 @@ export function FileBody({
   raw = false,
   selection,
   targetLineRef,
+  sessionId,
+  cwd,
+  onTaskOpen,
+  onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
 }: {
   file: FsFile;
   path: string;
   raw?: boolean;
   selection?: FileLineSelection;
   targetLineRef?: RefObject<HTMLSpanElement | null>;
+  sessionId?: string;
+  cwd?: string;
+  onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
+  onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
+  onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
 }) {
   const refusal = fileRefusal(file);
   const content = file.content ?? '';
@@ -565,7 +583,15 @@ export function FileBody({
   if (!raw && renderedMarkdown) {
     return (
       <div className="kt-fs-md">
-        <Markdown text={content} />
+        <Markdown
+          text={content}
+          sessionId={sessionId}
+          cwd={cwd}
+          onTaskOpen={onTaskOpen}
+          onCodeReferenceOpen={onCodeReferenceOpen}
+          onAttentionOpen={onAttentionOpen}
+          onPinOpen={onPinOpen}
+        />
       </div>
     );
   }
@@ -676,7 +702,16 @@ export function scrollFileLineIntoView(
   pane.scrollTop = Math.max(0, targetOffset - Math.floor(pane.clientHeight / 3));
 }
 
-export function FilesTab({ sessionId, cwd, requestedReference, onRequestedReferenceHandled }: Props) {
+export function FilesTab({
+  sessionId,
+  cwd,
+  requestedReference,
+  onRequestedReferenceHandled,
+  onTaskOpen,
+  onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
+}: Props) {
   const probe = useFsProbe(sessionId);
   const restored = readFilesTabState(sessionId);
   const [stateSessionId, setStateSessionId] = useState(sessionId);
@@ -963,6 +998,12 @@ export function FilesTab({ sessionId, cwd, requestedReference, onRequestedRefere
               raw={rawActive}
               selection={active.selection}
               targetLineRef={targetLineRef}
+              sessionId={sessionId}
+              cwd={cwd}
+              onTaskOpen={onTaskOpen}
+              onCodeReferenceOpen={onCodeReferenceOpen}
+              onAttentionOpen={onAttentionOpen}
+              onPinOpen={onPinOpen}
             />
           ) : (
             <Note role="status">Nothing to show.</Note>

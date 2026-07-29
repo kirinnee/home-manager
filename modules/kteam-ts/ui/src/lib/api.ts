@@ -118,6 +118,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.text()) as unknown as T;
 }
 
+/** Attachments are binary regardless of their verified MIME type. Keep this
+ * separate from request<T>: most API routes intentionally decode text. */
+async function requestBlob(path: string, init?: RequestInit): Promise<Blob> {
+  const headers = new Headers(init?.headers);
+  if (TOKEN) headers.set('authorization', `Bearer ${TOKEN}`);
+  const res = await fetch(path, { ...init, headers });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+    throw new ApiError(res.status, body.error ?? `HTTP ${res.status}`, body.code);
+  }
+  return await res.blob();
+}
+
 export const api = {
   listTasks: () => request<unknown>('/v1/tasks'),
   getTask: (id: string) => request<unknown>(`/v1/tasks/${encodeURIComponent(id)}`),
@@ -159,7 +172,7 @@ export const api = {
       body: form,
     });
   },
-  attachment: (id: string, attachmentId: string) => request<Blob>(attachmentApiPath(id, attachmentId)),
+  attachment: (id: string, attachmentId: string) => requestBlob(attachmentApiPath(id, attachmentId)),
   answer: (
     id: string,
     payload: { toolUseId: string; labels?: string[]; other?: string; responses?: string[] },
