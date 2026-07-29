@@ -12,6 +12,7 @@ import {
   TaskStore,
   SerialQueue,
   compareTasks,
+  matchesTaskFilter,
   normalizeTaskId as normalizeTaskIdLocal,
   parseTaskLinks,
   resolveStatusReason,
@@ -36,6 +37,7 @@ import {
   SessionTaskStore,
   isValidShippedReopenActivity,
   isSafeTaskSessionId,
+  type SessionTaskRead,
   type SessionTaskStoreOptions,
   type StoredSessionTask,
 } from './session-tasks-store';
@@ -270,34 +272,38 @@ export class TaskService {
   // ---- aggregate read compatibility ------------------------------------
 
   /** Fleet-wide READ only. Every row carries its storage scope; unresolved
-   *  legacy rows carry null and remain in the retained old store. */
+   *  legacy rows carry null and remain in the retained old store. One parallel
+   *  walk of the session files feeds BOTH the rows and the dependency graph:
+   *  the sequential double walk this replaces cost ~14s against a busy daemon
+   *  (each awaited read paying the loop's lag) when the underlying I/O is
+   *  ~70ms in parallel. */
   async taskList(filter: TaskFilter = {}): Promise<FleetTaskListResponse> {
     await this.initialize();
-    const sessionIds = await this.store.listSessionIds();
+    const { reads, migrated } = await this.fleetReads();
     const scoped: Array<{ sessionId: string | null; entry: StoredSessionTask }> = [];
-    const migrated = new Set<string>();
     const parseErrorIds: string[] = [];
     let parseErrors = 0;
 
-    for (const sessionId of sessionIds) {
-      const read = await this.store.list(sessionId, filter);
-      scoped.push(...read.tasks.map(entry => ({ sessionId, entry })));
+    for (const { sessionId, read } of reads) {
+      const rows = read.file.tasks.filter(entry => matchesTaskFilter(entry.task, filter));
+      scoped.push(...rows.map(entry => ({ sessionId, entry })));
       parseErrors += read.parseErrors;
       parseErrorIds.push(...read.parseErrorIds.map(id => `${sessionId}:${id}`));
-      // A marker proves representation only while the corresponding record is
-      // still readable. If it is damaged, the retained source becomes visible.
-      for (const id of read.file.migratedGlobalIds) {
-        if (read.file.tasks.some(entry => entry.task.id === id)) migrated.add(id);
-      }
     }
 
-    const legacy = await this.legacy.listTasks(filter);
-    for (const task of legacy.tasks) {
-      if (!migrated.has(task.id)) {
-        const history = await this.legacy.readActivity(task.id);
-        scoped.push({ sessionId: null, entry: { task, activity: history.activity } });
-      }
-    }
+    // Unfiltered on purpose: the same listing feeds the graph below, and parse
+    // errors are a property of the store, not of the filter.
+    const legacy = await this.legacy.listTasks();
+    const legacyUnmigrated = legacy.tasks.filter(task => !migrated.has(task.id));
+    const legacyEntries = await mapPooled(
+      legacyUnmigrated.filter(task => matchesTaskFilter(task, filter)),
+      FLEET_READ_CONCURRENCY,
+      async task => ({
+        sessionId: null,
+        entry: { task, activity: (await this.legacy.readActivity(task.id)).activity },
+      }),
+    );
+    scoped.push(...legacyEntries);
     parseErrors += legacy.parseErrors;
     parseErrorIds.push(...legacy.parseErrorIds.map(id => `legacy:${id}`));
 
@@ -306,7 +312,7 @@ export class TaskService {
     );
     const annotated = await this.annotateEntries(
       scoped.map(item => item.entry),
-      await this.graphTasks(),
+      [...reads.flatMap(({ read }) => read.file.tasks.map(entry => entry.task)), ...legacyUnmigrated],
     );
     const scopeById = new Map(scoped.map(item => [item.entry.task.id, item.sessionId] as const));
     return {
@@ -325,12 +331,11 @@ export class TaskService {
   async taskDetail(id: string, afterSeq = 0): Promise<ScopedTaskDetailResponse | undefined> {
     await this.initialize();
     const canonical = canonicalTaskId(id);
-    const sessionIds = await this.store.listSessionIds();
+    const { reads, migrated } = await this.fleetReads();
     const hits: Array<{ sessionId: string | null; entry: StoredSessionTask; activityParseErrors: number }> = [];
-    let migrated = false;
 
-    for (const sessionId of sessionIds) {
-      const { entry, read } = await this.store.detail(sessionId, canonical);
+    for (const { sessionId, read } of reads) {
+      const entry = read.file.tasks.find(candidate => candidate.task.id === canonical);
       if (entry !== undefined) {
         hits.push({
           sessionId,
@@ -338,10 +343,9 @@ export class TaskService {
           activityParseErrors: read.activityParseErrors.get(canonical) ?? 0,
         });
       }
-      if (entry !== undefined && read.file.migratedGlobalIds.includes(canonical)) migrated = true;
     }
 
-    if (!migrated) {
+    if (!migrated.has(canonical)) {
       const task = await this.legacy.readTask(canonical);
       if (task !== undefined) {
         const history = await this.legacy.readActivity(canonical);
@@ -361,7 +365,11 @@ export class TaskService {
       );
     }
     const hit = hits[0]!;
-    const [view] = await this.annotateEntries([hit.entry], await this.graphTasks());
+    const legacyGraph = (await this.legacy.listTasks()).tasks.filter(task => !migrated.has(task.id));
+    const [view] = await this.annotateEntries(
+      [hit.entry],
+      [...reads.flatMap(({ read }) => read.file.tasks.map(entry => entry.task)), ...legacyGraph],
+    );
     if (view === undefined) return undefined;
     return {
       sessionId: hit.sessionId,
@@ -813,8 +821,8 @@ export class TaskService {
   async taskAct(id: string, input: TaskActionInput & TaskActor): Promise<ScopedTaskView> {
     const canonical = canonicalTaskId(id);
     const scopes: string[] = [];
-    for (const sessionId of await this.store.listSessionIds()) {
-      if ((await this.store.detail(sessionId, canonical)).entry !== undefined) scopes.push(sessionId);
+    for (const { sessionId, read } of await this.readSessions()) {
+      if (read.file.tasks.some(entry => entry.task.id === canonical)) scopes.push(sessionId);
     }
     if (scopes.length > 1) throw new TaskError('ambiguous', `task ${canonical} exists in multiple sessions`);
     if (scopes.length === 0 && (await this.legacy.readTask(canonical)) !== undefined) {
@@ -882,30 +890,51 @@ export class TaskService {
       .sort(compareTaskViews);
   }
 
-  /** Complete fleet record set for cross-session edges and derived blockers.
-   * Migrated legacy duplicates stay suppressed exactly like the aggregate read. */
-  private async graphTasks(): Promise<Task[]> {
-    const tasks: Task[] = [];
+  /** Every session task file, read once and IN PARALLEL. The sequential
+   *  per-session loop this replaces was the whole performance defect: ~190
+   *  boards × one awaited read each, and every await taxed by the busy
+   *  daemon's event-loop lag. Reads are safe to run concurrently — writes stay
+   *  serialised per session in the store, and each file is an atomic
+   *  temp+rename snapshot. */
+  private async readSessions(): Promise<Array<{ sessionId: string; read: SessionTaskRead }>> {
+    const sessionIds = await this.store.listSessionIds();
+    return mapPooled(sessionIds, FLEET_READ_CONCURRENCY, async sessionId => ({
+      sessionId,
+      read: await this.store.read(sessionId),
+    }));
+  }
+
+  /** One fleet snapshot shared by rows, graph, and migration suppression, so no
+   *  caller walks the files twice. A marker proves representation only while
+   *  the corresponding record is still readable; if it is damaged, the retained
+   *  source becomes visible. */
+  private async fleetReads(): Promise<{
+    reads: Array<{ sessionId: string; read: SessionTaskRead }>;
+    migrated: Set<string>;
+  }> {
+    const reads = await this.readSessions();
     const migrated = new Set<string>();
-    for (const sessionId of await this.store.listSessionIds()) {
-      const read = await this.store.read(sessionId);
-      tasks.push(...read.file.tasks.map(entry => entry.task));
+    for (const { read } of reads) {
       for (const id of read.file.migratedGlobalIds) {
         if (read.file.tasks.some(entry => entry.task.id === id)) migrated.add(id);
       }
     }
+    return { reads, migrated };
+  }
+
+  /** Complete fleet record set for cross-session edges and derived blockers.
+   * Migrated legacy duplicates stay suppressed exactly like the aggregate read. */
+  private async graphTasks(): Promise<Task[]> {
+    const { reads, migrated } = await this.fleetReads();
+    const tasks: Task[] = reads.flatMap(({ read }) => read.file.tasks.map(entry => entry.task));
     const legacy = await this.legacy.listTasks();
     tasks.push(...legacy.tasks.filter(task => !migrated.has(task.id)));
     return tasks;
   }
 
   private async scopedEntries(): Promise<Array<{ sessionId: string; entry: StoredSessionTask }>> {
-    const entries: Array<{ sessionId: string; entry: StoredSessionTask }> = [];
-    for (const sessionId of await this.store.listSessionIds()) {
-      const read = await this.store.read(sessionId);
-      entries.push(...read.file.tasks.map(entry => ({ sessionId, entry })));
-    }
-    return entries;
+    const reads = await this.readSessions();
+    return reads.flatMap(({ sessionId, read }) => read.file.tasks.map(entry => ({ sessionId, entry })));
   }
 
   /** Session boards whose derived blocker state can change when one of these
@@ -1108,6 +1137,27 @@ export class TaskService {
       }
     }
   }
+}
+
+/** Enough parallelism to collapse a fleet walk into a handful of event-loop
+ *  turns, bounded so a home with thousands of boards cannot hold that many file
+ *  descriptors open at once. */
+const FLEET_READ_CONCURRENCY = 64;
+
+/** Order-preserving map with at most `limit` operations in flight. */
+async function mapPooled<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (true) {
+        const index = next++;
+        if (index >= items.length) return;
+        results[index] = await fn(items[index]!);
+      }
+    }),
+  );
+  return results;
 }
 
 function canonicalTaskId(id: string): string {
