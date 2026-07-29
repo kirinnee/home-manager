@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { detectAnomalies, fingerprintAnomalies, WARDEN_LABEL, type WardenSessionView } from './warden-detect';
+import {
+  detectAnomalies,
+  fingerprintAnomalies,
+  isWardenScannableStatus,
+  WARDEN_LABEL,
+  type WardenSessionView,
+} from './warden-detect';
 import type { SessionConfig, SessionState, SessionStatus } from './types';
 
 const NOW = Date.parse('2026-07-22T12:00:00.000Z');
@@ -62,6 +68,13 @@ function view(
 }
 
 describe('warden anomaly detection', () => {
+  test('the sweep selection excludes terminal sessions but retains live work', () => {
+    for (const status of ['completed', 'failed', 'stalled', 'stopped', 'kill_failed'] as SessionStatus[])
+      expect(isWardenScannableStatus(status)).toBe(false);
+    for (const status of ['running', 'thinking', 'tool_running', 'waiting', 'rate_limited'] as SessionStatus[])
+      expect(isWardenScannableStatus(status)).toBe(true);
+  });
+
   test('flags an active session with no live monitor handle', () => {
     const result = detectAnomalies([view('running', { hasLiveMonitor: false })], NOW, OPTIONS);
     expect(result.anomalies).toHaveLength(1);

@@ -590,6 +590,7 @@ describe('warden report serving and prompts', () => {
         targetSession: 'target-1',
         anomalyKind: 'sus_subprocess',
         verdict: 'needs_human',
+        explicitNeedsHuman: true,
         reason: 'Only the human can choose the rollout path.',
         reportPath: '/reports/needs-human.md',
       },
@@ -636,6 +637,7 @@ describe('warden report serving and prompts', () => {
         targetSession: 'target-1',
         anomalyKind: 'sus_subprocess',
         verdict: 'needs_human',
+        explicitNeedsHuman: true,
         reason: 'Choose whether to interrupt the subprocess.',
         reportPath: '/reports/two-blocks.md',
       },
@@ -644,6 +646,7 @@ describe('warden report serving and prompts', () => {
         targetSession: 'target-1',
         anomalyKind: 'sus_thinking',
         verdict: 'needs_human',
+        explicitNeedsHuman: true,
         reason: 'Choose whether thinking should continue.',
         reportPath: '/reports/two-blocks.md',
       },
@@ -684,6 +687,7 @@ describe('warden report serving and prompts', () => {
           targetSession: 'target-1',
           anomalyKind: 'sus_subprocess',
           verdict: 'needs_human',
+          explicitNeedsHuman: true,
           reason: 'Only the human can choose the rollout path.',
           reportPath: '/reports/needs-human.md',
         },
@@ -743,6 +747,7 @@ describe('warden report serving and prompts', () => {
         targetSession: 'target-1',
         anomalyKind: 'sus_subprocess',
         verdict: 'needs_human',
+        explicitNeedsHuman: true,
         reason: 'Now parsed exactly.',
         reportPath: '/reports/legacy.md',
       },
@@ -801,9 +806,9 @@ describe('warden report serving and prompts', () => {
       expect(prompt).toContain('- Lead with the outcome.');
       expect(prompt).toContain('- Use point form only.');
       expect(prompt).toContain('- Bold one key value per bullet.');
-      expect(prompt).toContain('- Include the exact CLI, resolved model, and harness.');
-      expect(prompt).toContain('- Include whether failover happened.');
-      expect(prompt).toContain('- If failover happened, include the original CLI and exact daemon reason.');
+      expect(prompt).toContain(
+        '- Do not write CLI, model, harness, or failover facts: the daemon injects those from session metadata when rendering.',
+      );
       expect(prompt).toContain(provenancePath(report));
       expect(prompt).toContain('NEEDS_HUMAN');
     }
@@ -811,6 +816,8 @@ describe('warden report serving and prompts', () => {
     expect(sweep).toContain('repeat a session in separate sections when it has multiple anomaly kinds');
     expect(sweep).toContain('inside EVERY anomaly section');
     expect(sweep).toContain('Never use one fleet-wide verdict');
+    expect(sweep).toContain(':<teammate>');
+    expect(assigned).toContain(':t1');
     expect(assigned).toContain('- **Anomaly kind:** sus_thinking');
     expect(sweep).toContain('- **Anomaly kind:** <kind>');
   });

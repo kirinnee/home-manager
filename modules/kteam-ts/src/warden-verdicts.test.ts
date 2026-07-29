@@ -14,6 +14,24 @@ test('classifyVerdict prefers the structured marker', () => {
   expect(classifyVerdict('Verdict: NEEDS_HUMAN')).toBe('needs_human');
 });
 
+test('only an explicit NEEDS_HUMAN marker is eligible to interrupt a human', () => {
+  const [explicit, heuristic] = parseWardenReports([
+    {
+      path: '/r/explicit.md',
+      mtimeMs: 2,
+      content: '## Anomaly: target-a â :alpha / proj\n\nVerdict: NEEDS_HUMAN\n',
+    },
+    {
+      path: '/r/heuristic.md',
+      mtimeMs: 1,
+      content: '## Anomaly: target-b â :beta / proj\n\nNo safe action was taken; this needs a human.\n',
+    },
+  ]);
+  expect(explicit).toMatchObject({ verdict: 'needs_human', explicitNeedsHuman: true });
+  expect(heuristic).toMatchObject({ verdict: 'needs_human' });
+  expect(heuristic?.explicitNeedsHuman).toBeUndefined();
+});
+
 test('Attention source refs round-trip exact report blocks and legacy identities', () => {
   const exact = wardenVerdictSourceRef('/reports/two-blocks.md', 'sus_subprocess');
   expect(exact).toBe('warden:/reports/two-blocks.md#sus_subprocess');
