@@ -103,10 +103,15 @@ variants:
 defaultHomes:
   claude: kirin
   codex: personal
-# Cross-account session sharing: session state (transcripts, prompt history,
-# checkpoints, plans) is pooled under ~/.kfleet/shared/<kind> and symlinked into
-# every account home, so any account can `--resume` any session. Auth stays
-# per-account. Existing history migrates into the pool on the next apply.
+# Cross-account session sharing: rollout state is pooled under
+# ~/.kfleet/shared/<kind> and symlinked into every account home, so any account
+# can resume any session. Codex wrappers and the configured bare Codex home also
+# use fresh ~/.kfleet/shared/codex/sqlite state; auth/config otherwise stay
+# per-home. This is a same-human trust domain: threads, goals, memories, logs,
+# remote-control metadata, and possible paginated history/items are shared.
+# Existing per-home DBs are never merged/deleted. After first enabling, run
+# `kfleet apply` then one `kfleet prewarm codex` (non-LLM; active + archived).
+# Do not concurrently write to the same resumed rollout.
 sharedHistory:
   claude: true
   codex: true

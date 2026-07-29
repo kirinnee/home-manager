@@ -1,8 +1,10 @@
 // Cross-account session sharing. Each kind gets ONE pool (~/.kfleet/shared/<kind>)
-// holding the session-state entries listed in its KindSpec.sharedState; every
+// holding the rollout-state entries listed in its KindSpec.sharedState; every
 // account's copy of those entries is migrated into the pool and replaced with a
 // symlink, so any account can `--resume` any session. Identity (.claude.json,
-// auth.json, settings, sqlite state) is never touched — it stays per-account.
+// auth.json, settings) is never touched — it stays per-account. Codex's shared
+// SQLite directory is created fresh beside these entries; existing per-home
+// databases are deliberately never inspected or migrated.
 //
 // Migration is rename-based (same volume), so live sessions keep their inodes and
 // keep appending through the new symlink. Idempotent: an entry already linked at
@@ -39,6 +41,14 @@ const lstatOrNull = (p: string) => {
     return null;
   }
 };
+
+/** Create the fresh kfleet-owned Codex SQLite directory. This intentionally
+ *  performs no discovery or migration of databases in any Codex home. */
+export function ensureCodexSharedSqliteDir(poolRoot = sharedDir): string {
+  const sqliteDir = path.resolve(poolRoot, 'codex', 'sqlite');
+  mkdirSync(sqliteDir, { recursive: true });
+  return sqliteDir;
+}
 
 /** Make sure the pool-side target exists so symlinks never dangle. */
 function ensurePoolEntry(entry: SharedEntry, poolPath: string): void {

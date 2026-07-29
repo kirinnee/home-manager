@@ -17,6 +17,11 @@ export const binDir = path.join(kfleetHome, 'bin');
 /** Cross-account shared session-state pools live here (one subdir per kind). */
 export const sharedDir = path.join(kfleetHome, 'shared');
 
+/** Shared Codex rollout pool plus its SQLite state and prewarm lock. */
+export const codexSharedDir = path.resolve(sharedDir, 'codex');
+export const codexSharedSqliteDir = path.join(codexSharedDir, 'sqlite');
+export const codexPrewarmLockPath = path.join(codexSharedDir, '.sqlite-prewarm-lock.sqlite3');
+
 /** Resolve a profile asset reference (relative to ~/.kfleet, ~ expanded). */
 export function resolveAsset(ref: string): string {
   if (ref.startsWith('~/')) return path.join(home, ref.slice(2));
