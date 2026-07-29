@@ -31,8 +31,8 @@ export const MAX_ATTENTION_SOURCE_REF_LEN = 512;
 export const ATTENTION_SOURCES = ['task', 'question', 'permission', 'agent-raised'] as const;
 export type AttentionSource = (typeof ATTENTION_SOURCES)[number];
 
-/** Stable identity shared by the shipped-reopen producer, its durable
- * Attention item, and the compact resolution watermark. */
+/** Stable identity shared by the shipped-reopen producer and its durable
+ * Attention item. */
 export const TASK_REOPENED_ATTENTION_SOURCE_REF_PREFIX = 'task-reopened:';
 const TASK_REOPENED_TASK_ID = /^[BFIC][0-9]{1,9}$/u;
 
@@ -84,6 +84,10 @@ export interface AttentionItem {
   /** Stable source identity used for idempotent integration, e.g. task F31 or
    * a question tool-use id. Null for a free-form explicit agent request. */
   sourceRef: string | null;
+  /** Daemon-only activity generation for a shipped-reopen item. The resolver
+   * acknowledges exactly this seq, never whichever reopen happens to be latest
+   * when the click arrives. */
+  sourceSeq?: number;
   subject: string;
   why: string;
   /** ISO timestamp. Display order is ascending: oldest unanswered first. */
@@ -116,9 +120,8 @@ export interface AttentionSnapshot {
    * empty list. Writers refuse to overwrite a file with parse errors. */
   parseErrors: number;
   updatedAt: string;
-  /** Additive, compact acknowledgement for append-only shipped-reopen
-   * activity. Unlike `resolved`, this is not a bounded display audit and may
-   * therefore prevent an explicitly cleared reopen from returning at restart. */
+  /** @deprecated Legacy timestamp watermarks, read only for one-time migration
+   * to each task's monotonic reopenAckSeq and then compacted away. */
   reopenResolvedAt?: Readonly<Record<string, string>>;
 }
 

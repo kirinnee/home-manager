@@ -34,6 +34,7 @@ import {
 import {
   SESSION_TASK_FILE_VERSION,
   SessionTaskStore,
+  isValidShippedReopenActivity,
   isSafeTaskSessionId,
   type SessionTaskStoreOptions,
   type StoredSessionTask,
@@ -149,6 +150,8 @@ interface ShippedReopen {
   from: 'live' | 'done';
   to: TaskPhase;
   reason: string;
+  /** Sequence of the exact status activity entry that records this reopen. */
+  seq: number;
 }
 
 export class TaskService {
@@ -243,6 +246,7 @@ export class TaskService {
     tasks: Array<{
       id: string;
       workflow: TaskWorkflow;
+      reopenAckSeq: number;
       activity: TaskActivity[];
       activityParseErrors: number;
     }>;
@@ -255,6 +259,7 @@ export class TaskService {
       tasks: read.file.tasks.map(entry => ({
         id: entry.task.id,
         workflow: entry.task.workflow,
+        reopenAckSeq: entry.task.reopenAckSeq ?? 0,
         activity: [...entry.activity],
         activityParseErrors: read.activityParseErrors.get(entry.task.id) ?? 0,
       })),
@@ -541,15 +546,6 @@ export class TaskService {
               ? { verifiedByHuman: true }
               : {}),
           };
-          if (backward && (current.task.phase === 'live' || current.task.phase === 'done')) {
-            shippedReopen = {
-              id: current.task.id,
-              title: current.task.title,
-              from: current.task.phase,
-              to,
-              reason,
-            };
-          }
         };
 
         switch (input.action) {
@@ -694,6 +690,23 @@ export class TaskService {
             data: inputActivity.data,
           }),
         );
+        const reopenReason = data['reason'];
+        if (
+          data['reopened'] === true &&
+          (current.task.phase === 'live' || current.task.phase === 'done') &&
+          typeof reopenReason === 'string'
+        ) {
+          // The status entry is deliberately last (after a reopen's optional
+          // clarification), so this is the exact durable generation emitted.
+          shippedReopen = {
+            id: current.task.id,
+            title: current.task.title,
+            from: current.task.phase,
+            to: next.phase,
+            reason: reopenReason,
+            seq: activities.at(-1)!.seq,
+          };
+        }
         satisfactionChanged = dependencySatisfied(current.task) !== dependencySatisfied(next);
         return { task: { ...next, updatedAt: at }, activity: [...current.activity, ...activities] };
       });
@@ -714,6 +727,71 @@ export class TaskService {
   }
 
   // ---- source-compatible service helpers (not HTTP routes) ---------------
+
+  /** Persist the generation displayed by a shipped-reopen Attention item.
+   *
+   * Lock ordering is load-bearing: Attention may call this while holding its
+   * per-session mutation lock, so this method takes only the task store lock
+   * (never graphQueue). Task writes never await Attention mutations. */
+  async acknowledgeReopen(
+    sessionId: string,
+    id: string,
+    seq: number,
+    actor: TaskActor = {},
+    note?: string,
+  ): Promise<void> {
+    await this.initialize();
+    this.assertSessionId(sessionId);
+    const canonical = canonicalTaskId(id);
+    if (!Number.isSafeInteger(seq) || seq < 1) {
+      throw new TaskError('invalid', 'reopen acknowledgement seq must be a safe integer of at least 1');
+    }
+    const provenance = provenanceOf(actor);
+    try {
+      await this.store.transact(sessionId, canonical, current => {
+        const highest = current.activity.reduce((value, item) => Math.max(value, item.seq), 0);
+        if (seq > highest) {
+          throw new TaskError(
+            'invalid',
+            `cannot acknowledge reopen generation ${seq} for ${canonical}; highest recorded activity is ${highest}`,
+          );
+        }
+        const generation = current.activity.find(item => item.seq === seq);
+        if (!isValidShippedReopenActivity(current.task.workflow, generation)) {
+          throw new TaskError(
+            'invalid',
+            `cannot acknowledge reopen generation ${seq} for ${canonical}; it is not a valid shipped-reopen activity`,
+          );
+        }
+        if (seq <= (current.task.reopenAckSeq ?? 0)) return current;
+        const at = now();
+        const acknowledgement: TaskActivity = {
+          v: TASK_SCHEMA_VERSION,
+          seq: highest + 1,
+          time: at,
+          actor: provenance.actor,
+          actorName: provenance.actorName,
+          type: 'session',
+          data: {
+            reopenAck: seq,
+            resolvedBy: provenance.actor,
+            resolvedByName: provenance.actorName,
+            ...(note === undefined ? {} : { note }),
+          },
+        };
+        return {
+          task: { ...current.task, reopenAckSeq: seq, updatedAt: at },
+          activity: [...current.activity, acknowledgement],
+        };
+      });
+    } catch (error) {
+      if (error instanceof TaskError && error.code === 'not-found') {
+        console.error(`kteam tasks: reopen acknowledgement skipped; ${canonical} is absent from ${sessionId}`);
+        return;
+      }
+      throw error;
+    }
+  }
 
   /** Older internal callers passed actor fields in the create object. Keep that
    *  source shape while still writing the actor's session file; API parsing does

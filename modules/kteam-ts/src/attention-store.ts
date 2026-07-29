@@ -45,8 +45,7 @@ export interface AttentionFile {
   nextId: number;
   items: AttentionItem[];
   resolved: ResolvedAttentionItem[];
-  /** One compact durable acknowledgement per reopened task. Optional because
-   * v1 files predate it; parsing and the next write materialise the map. */
+  /** @deprecated Legacy-read only until startup migrates it onto task records. */
   reopenResolvedAt?: Record<string, string>;
   count: number;
   updatedAt: string;
@@ -84,7 +83,6 @@ function emptyFile(sessionId: string, at = now()): AttentionFile {
     nextId: 1,
     items: [],
     resolved: [],
-    reopenResolvedAt: {},
     count: 0,
     updatedAt: at,
   };
@@ -107,10 +105,10 @@ const optionalText = (value: unknown, max: number): string | null | undefined =>
 const iso = (value: unknown): string | null =>
   typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null;
 
-function parseReopenResolvedAt(value: unknown): { value: Record<string, string>; errors: string[] } {
-  if (value === undefined) return { value: {}, errors: [] };
+function parseReopenResolvedAt(value: unknown): { value: Record<string, string> | undefined; errors: string[] } {
+  if (value === undefined) return { value: undefined, errors: [] };
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return { value: {}, errors: ['<reopenResolvedAt>'] };
+    return { value: undefined, errors: ['<reopenResolvedAt>'] };
   }
   const valid: Array<[string, string]> = [];
   const errors: string[] = [];
@@ -126,23 +124,6 @@ function parseReopenResolvedAt(value: unknown): { value: Record<string, string>;
   return { value: Object.fromEntries(valid), errors };
 }
 
-function mergeResolvedReopenWatermarks(
-  base: Record<string, string>,
-  resolved: readonly ResolvedAttentionItem[],
-): Record<string, string> {
-  const merged = { ...base };
-  for (const item of resolved) {
-    if (item.source !== 'agent-raised') continue;
-    const taskId = taskIdFromReopenedAttentionSourceRef(item.sourceRef);
-    if (taskId === null) continue;
-    const previous = merged[taskId];
-    if (previous === undefined || Date.parse(item.resolvedAt) > Date.parse(previous)) {
-      merged[taskId] = item.resolvedAt;
-    }
-  }
-  return merged;
-}
-
 /** Parse one active item. Every required field is checked independently. */
 export function parseAttentionItem(value: unknown): AttentionItem | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -150,6 +131,13 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
   const id = parseAttentionId(raw['id']);
   const source = raw['source'];
   const sourceRef = optionalText(raw['sourceRef'], MAX_ATTENTION_SOURCE_REF_LEN);
+  const rawSourceSeq = raw['sourceSeq'];
+  const sourceSeq =
+    rawSourceSeq === undefined
+      ? undefined
+      : Number.isSafeInteger(rawSourceSeq) && (rawSourceSeq as number) >= 1
+        ? (rawSourceSeq as number)
+        : null;
   const subject = requiredText(raw['subject'], MAX_ATTENTION_SUBJECT_LEN);
   const why = requiredText(raw['why'], MAX_ATTENTION_DETAIL_LEN);
   const waitingSince = iso(raw['waitingSince']);
@@ -161,6 +149,7 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
     id === null ||
     !isSource(source) ||
     sourceRef === undefined ||
+    sourceSeq === null ||
     subject === null ||
     why === null ||
     waitingSince === null ||
@@ -177,6 +166,7 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
     id,
     source,
     sourceRef,
+    ...(sourceSeq === undefined ? {} : { sourceSeq }),
     subject,
     why,
     waitingSince,
@@ -296,7 +286,7 @@ export function parseAttentionFile(rawText: string | null, expectedSessionId: st
       nextId: Number.isSafeInteger(nextId) ? (nextId as number) : 1,
       items,
       resolved,
-      reopenResolvedAt: mergeResolvedReopenWatermarks(reopenResolvedAt.value, resolved),
+      ...(reopenResolvedAt.value === undefined ? {} : { reopenResolvedAt: reopenResolvedAt.value }),
       count: items.length,
       updatedAt: updatedAt ?? now(),
     },
@@ -311,6 +301,7 @@ export function serializeAttentionItem(item: AttentionItem): AttentionItem {
     id: item.id,
     source: item.source,
     sourceRef: item.sourceRef,
+    ...(item.sourceSeq === undefined ? {} : { sourceSeq: item.sourceSeq }),
     subject: item.subject,
     why: item.why,
     waitingSince: item.waitingSince,
@@ -339,7 +330,7 @@ export function serializeAttentionFile(file: AttentionFile): AttentionFile {
     nextId: file.nextId,
     items: file.items.map(serializeAttentionItem),
     resolved: file.resolved.map(serializeResolvedAttentionItem),
-    reopenResolvedAt: { ...(file.reopenResolvedAt ?? {}) },
+    ...(file.reopenResolvedAt === undefined ? {} : { reopenResolvedAt: { ...file.reopenResolvedAt } }),
     count: file.items.length,
     updatedAt: file.updatedAt,
   };
@@ -385,7 +376,7 @@ function validateState(state: AttentionState): AttentionState {
     nextId: state.nextId,
     items,
     resolved: resolved.slice(0, MAX_ATTENTION_RESOLUTIONS),
-    reopenResolvedAt: mergeResolvedReopenWatermarks(reopenResolvedAt.value, resolved),
+    ...(reopenResolvedAt.value === undefined ? {} : { reopenResolvedAt: reopenResolvedAt.value }),
   };
 }
 
@@ -453,7 +444,7 @@ export class AttentionStore {
       sessionId,
       items: read.file.items,
       resolved: read.file.resolved,
-      reopenResolvedAt: { ...(read.file.reopenResolvedAt ?? {}) },
+      ...(read.file.reopenResolvedAt === undefined ? {} : { reopenResolvedAt: { ...read.file.reopenResolvedAt } }),
       count: read.file.count,
       parseErrors: read.parseErrors,
       updatedAt: read.file.updatedAt,
@@ -513,7 +504,7 @@ export class AttentionStore {
         nextId: read.file.nextId,
         items: read.file.items,
         resolved: read.file.resolved,
-        reopenResolvedAt: { ...(read.file.reopenResolvedAt ?? {}) },
+        ...(read.file.reopenResolvedAt === undefined ? {} : { reopenResolvedAt: { ...read.file.reopenResolvedAt } }),
       };
       const transformed = await transform(current);
       if (transformed === current) {
@@ -523,7 +514,9 @@ export class AttentionStore {
             sessionId,
             items: read.file.items,
             resolved: read.file.resolved,
-            reopenResolvedAt: { ...(read.file.reopenResolvedAt ?? {}) },
+            ...(read.file.reopenResolvedAt === undefined
+              ? {}
+              : { reopenResolvedAt: { ...read.file.reopenResolvedAt } }),
             count: read.file.count,
             parseErrors: 0,
             updatedAt: read.file.updatedAt,
@@ -550,12 +543,25 @@ export class AttentionStore {
           sessionId: file.sessionId,
           items: file.items,
           resolved: file.resolved,
-          reopenResolvedAt: { ...(file.reopenResolvedAt ?? {}) },
+          ...(file.reopenResolvedAt === undefined ? {} : { reopenResolvedAt: { ...file.reopenResolvedAt } }),
           count: file.count,
           parseErrors: 0,
           updatedAt: file.updatedAt,
         },
         changed: true,
+      };
+    });
+  }
+
+  /** Remove the transition-only timestamp map after a clean startup pass.
+   * Absence is preserved so resolved audit rows can never materialise it again. */
+  async compactLegacyReopenWatermarks(sessionId: string): Promise<AttentionMutation> {
+    return this.mutateWithResult(sessionId, current => {
+      if (current.reopenResolvedAt === undefined) return current;
+      return {
+        nextId: current.nextId,
+        items: current.items,
+        resolved: current.resolved,
       };
     });
   }

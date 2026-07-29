@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
 import { createPaths, sessionDir, type KTeamPaths } from './paths';
-import { AttentionService } from './attention-service';
+import { AttentionService, type AttentionDeps } from './attention-service';
 import { MAX_AGENT_ATTENTION_PER_SESSION, MAX_ATTENTION_PER_SESSION, type AttentionActor } from './attention-types';
 import type { KTeamEvent } from './types';
 
@@ -33,7 +33,8 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-const service = () => new AttentionService(paths, deps, { role: 'daemon' });
+const service = (over: Partial<AttentionDeps> = {}) =>
+  new AttentionService(paths, { ...deps, ...over }, { role: 'daemon' });
 const explicit = (subject: string) => ({
   source: 'agent-raised' as const,
   subject,
@@ -89,6 +90,22 @@ describe('provenance and scope', () => {
     ).rejects.toMatchObject({ code: 'forbidden' });
     const snap = await s.add(SID, { ...explicit('dated'), waitingSince: '2000-01-01T00:00:00.000Z' }, AGENT);
     expect(snap.items[0]!.waitingSince).not.toBe('2000-01-01T00:00:00.000Z');
+    const untrustedSeq = await s.add(SID, { ...explicit('untrusted seq'), sourceSeq: 99 }, AGENT);
+    expect(untrustedSeq.items.find(item => item.subject === 'untrusted seq')?.sourceSeq).toBeUndefined();
+    const ordinaryDaemon = await s.addFromSource(SID, {
+      ...explicit('ordinary daemon source'),
+      source: 'task',
+      sourceRef: 'F31',
+      sourceSeq: 99,
+    });
+    expect(ordinaryDaemon.items.find(item => item.sourceRef === 'F31')?.sourceSeq).toBeUndefined();
+    await expect(
+      s.addFromSource(SID, {
+        ...explicit('invalid reopen seq'),
+        sourceRef: 'task-reopened:F31',
+        sourceSeq: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid' });
   });
 
   test('aliases always persist under the canonical session directory', async () => {
@@ -149,6 +166,69 @@ describe('ordering, dedupe and capacity', () => {
       howToResolve: 'q',
       waitingSince: '2026-07-28T01:00:00.000Z',
     });
+  });
+
+  test('shipped-reopen refresh never regresses a generation and updates text with a newer seq', async () => {
+    const s = service();
+    const base = {
+      ...explicit('generation two'),
+      sourceRef: 'task-reopened:F31',
+      sourceSeq: 2,
+      waitingSince: '2026-07-28T01:00:00.000Z',
+    };
+    const first = await s.addFromSource(SID, base);
+    const stale = await s.addFromSource(SID, {
+      ...base,
+      subject: 'stale generation one',
+      why: 'stale reason',
+      sourceSeq: 1,
+    });
+    expect(stale.updatedAt).toBe(first.updatedAt);
+    expect(stale.items[0]).toMatchObject({ subject: 'generation two', sourceSeq: 2 });
+
+    const newer = await s.addFromSource(SID, {
+      ...base,
+      subject: 'generation three',
+      why: 'new reason',
+      howToResolve: 'review generation three',
+      sourceSeq: 3,
+    });
+    expect(newer.items).toHaveLength(1);
+    expect(newer.items[0]).toMatchObject({
+      id: first.items[0]?.id,
+      subject: 'generation three',
+      why: 'new reason',
+      howToResolve: 'review generation three',
+      sourceSeq: 3,
+      waitingSince: '2026-07-28T01:00:00.000Z',
+    });
+  });
+
+  test('resolved shipped-reopen generation ignores stale redelivery but permits a newer generation', async () => {
+    const s = service();
+    const generationR = {
+      ...explicit('generation R'),
+      sourceRef: 'task-reopened:F31',
+      sourceSeq: 7,
+    };
+    const raised = await s.addFromSource(SID, generationR);
+    const resolved = await s.resolve(SID, raised.items[0]!.id, 'Reviewed generation R.', HUMAN);
+
+    const stale = await s.addFromSource(SID, {
+      ...generationR,
+      subject: 'queued duplicate generation R',
+    });
+    expect(stale.updatedAt).toBe(resolved.updatedAt);
+    expect(stale.items).toHaveLength(0);
+    expect(stale.resolved).toHaveLength(1);
+
+    const newer = await s.addFromSource(SID, {
+      ...generationR,
+      subject: 'generation M',
+      why: 'A newer shipped regression needs review.',
+      sourceSeq: 9,
+    });
+    expect(newer.items).toContainEqual(expect.objectContaining({ subject: 'generation M', sourceSeq: 9 }));
   });
 
   test('active cap refuses rather than evicting the oldest', async () => {
@@ -220,21 +300,76 @@ describe('explicit resolution audit', () => {
     expect(reraised.resolved).toHaveLength(1);
   });
 
-  test('resolving shipped-reopen Attention stamps a durable per-task watermark', async () => {
-    const s = service();
-    await s.addFromSource(SID, {
+  test('resolving acknowledges the item generation task-first for both resolver paths', async () => {
+    const calls: Array<{ sessionId: string; taskId: string; seq: number; actor: AttentionActor; note?: string }> = [];
+    const s = service({
+      ackReopen: async (sessionId, taskId, seq, actor, note) => {
+        calls.push({ sessionId, taskId, seq, actor, ...(note === undefined ? {} : { note }) });
+      },
+    });
+    const first = await s.addFromSource(SID, {
       ...explicit('Shipped task reopened'),
       sourceRef: 'task-reopened:F31',
+      sourceSeq: 7,
       waitingSince: '2026-07-28T01:00:00.000Z',
     });
-    const resolved = await s.resolveFromSource(
-      SID,
-      'agent-raised',
-      'task-reopened:F31',
-      'The human reviewed it.',
-      HUMAN,
+    const resolved = await s.resolve(SID, first.items[0]!.id, 'The human reviewed it.', HUMAN);
+    expect(calls).toEqual([
+      {
+        sessionId: SID,
+        taskId: 'F31',
+        seq: 7,
+        actor: { actor: 'user' },
+        note: 'The human reviewed it.',
+      },
+    ]);
+    expect(resolved.reopenResolvedAt).toBeUndefined();
+
+    await s.addFromSource(SID, {
+      ...explicit('Shipped task reopened again'),
+      sourceRef: 'task-reopened:F31',
+      sourceSeq: 9,
+    });
+    await s.resolveFromSource(SID, 'agent-raised', 'task-reopened:F31', 'Agent handled it.', AGENT);
+    expect(calls[1]).toEqual({
+      sessionId: SID,
+      taskId: 'F31',
+      seq: 9,
+      actor: { actor: SID, actorName: 'zoe' },
+      note: 'Agent handled it.',
+    });
+
+    await s.addFromSource(SID, {
+      ...explicit('Legacy shipped reopen'),
+      sourceRef: 'task-reopened:F32',
+    });
+    await s.resolveFromSource(SID, 'agent-raised', 'task-reopened:F32', 'Legacy reviewed.', HUMAN);
+    expect(calls).toHaveLength(2);
+  });
+
+  test('acknowledgement failure aborts resolution and leaves the item visible', async () => {
+    const s = service({
+      ackReopen: async () => {
+        throw new Error('task write failed');
+      },
+    });
+    const added = await s.addFromSource(SID, {
+      ...explicit('Shipped task reopened'),
+      sourceRef: 'task-reopened:F31',
+      sourceSeq: 7,
+    });
+    await expect(s.resolve(SID, added.items[0]!.id, 'reviewed', HUMAN)).rejects.toThrow('task write failed');
+    await s.addFromSource(SID, {
+      ...explicit('Another shipped task reopened'),
+      sourceRef: 'task-reopened:F32',
+      sourceSeq: 8,
+    });
+    await expect(s.resolveFromSource(SID, 'agent-raised', 'task-reopened:F32', 'reviewed', HUMAN)).rejects.toThrow(
+      'task write failed',
     );
-    expect(resolved.reopenResolvedAt?.['F31']).toBe(resolved.resolved[0]!.resolvedAt);
+    const snapshot = await s.list(SID);
+    expect(snapshot.items).toHaveLength(2);
+    expect(snapshot.resolved).toHaveLength(0);
   });
 
   test('trusted source resolution records a cross-session lead without opening a general write path', async () => {

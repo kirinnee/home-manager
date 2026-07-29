@@ -10,7 +10,7 @@ import { createPaths } from './paths';
 import { SessionManager } from './session-manager';
 import { createSttService } from './stt-service';
 import { PinApi, PinService } from './pins';
-import { TaskService } from './tasks';
+import { TaskService, type TaskActor } from './tasks';
 import { AttentionApi, AttentionService, AttentionSources } from './attention';
 import { TaskApi } from './tasks-api';
 import { AnalyticsIndex } from './analytics-index';
@@ -176,6 +176,8 @@ const attentionSessions = {
       }),
       () => null,
     ),
+  ackReopen: (sessionId: string, taskId: string, seq: number, actor: TaskActor, note?: string) =>
+    taskService.acknowledgeReopen(sessionId, taskId, seq, actor, note),
 };
 const attentionService = new AttentionService(paths, attentionSessions);
 const attentionApi = new AttentionApi(attentionService, manager);

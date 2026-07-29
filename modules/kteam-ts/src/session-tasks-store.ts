@@ -18,18 +18,20 @@ import {
   normalizeTaskId,
   parseTaskCounters,
   parseTaskActivity,
-  parseTaskRecord,
-  serializeTask,
+  parseTaskRecord as parseBaseTaskRecord,
+  serializeTask as serializeBaseTask,
   splitTaskId,
   type TaskFilter,
 } from './tasks-store';
 import {
   TASK_ID_PREFIX,
   TASK_SCHEMA_VERSION,
+  TASK_WORKFLOW_PATHS,
   TaskError,
   type Task,
   type TaskActivity,
   type TaskKind,
+  type TaskWorkflow,
 } from './tasks-types';
 
 export const SESSION_TASK_FILE_VERSION = 1;
@@ -138,6 +140,68 @@ function parseActivityList(value: unknown): { activity: TaskActivity[]; errors: 
   return { activity, errors };
 }
 
+/** Session-owned task metadata extends the shared/legacy record additively.
+ * A malformed acknowledgement fails toward visibility by parsing as absent. */
+function parseSessionTaskRecord(value: unknown): Task | null {
+  const task = parseBaseTaskRecord(value);
+  if (task === null || !value || typeof value !== 'object' || Array.isArray(value)) return task;
+  const reopenAckSeq = (value as Record<string, unknown>)['reopenAckSeq'];
+  return Number.isSafeInteger(reopenAckSeq) && (reopenAckSeq as number) >= 1
+    ? { ...task, reopenAckSeq: reopenAckSeq as number }
+    : task;
+}
+
+function serializeSessionTask(task: Task): Task {
+  const base = serializeBaseTask(task);
+  return Number.isSafeInteger(task.reopenAckSeq) && (task.reopenAckSeq ?? 0) >= 1
+    ? { ...base, reopenAckSeq: task.reopenAckSeq }
+    : base;
+}
+
+/** The single evidence predicate for recovery, parsing, and acknowledgement.
+ * An ack may suppress only the exact valid shipped-reopen generation it names. */
+export function isValidShippedReopenActivity(
+  workflow: TaskWorkflow,
+  entry: TaskActivity | undefined,
+): entry is TaskActivity {
+  if (
+    entry === undefined ||
+    !Number.isSafeInteger(entry.seq) ||
+    entry.seq < 1 ||
+    entry.type !== 'status' ||
+    entry.data['reopened'] !== true ||
+    entry.data['backward'] !== true
+  ) {
+    return false;
+  }
+  const phaseFrom = entry.data['phaseFrom'];
+  const phaseTo = entry.data['phaseTo'];
+  const reason = entry.data['reason'];
+  if (
+    (phaseFrom !== 'live' && phaseFrom !== 'done') ||
+    typeof phaseTo !== 'string' ||
+    typeof reason !== 'string' ||
+    reason.trim().length === 0
+  ) {
+    return false;
+  }
+  const path = TASK_WORKFLOW_PATHS[workflow];
+  const fromIndex = path.findIndex(phase => phase === phaseFrom);
+  const toIndex = path.findIndex(phase => phase === phaseTo);
+  return fromIndex >= 0 && toIndex >= 0 && toIndex < fromIndex;
+}
+
+/** Syntactically valid but ungrounded acknowledgements could suppress a real
+ * reopen after hand corruption. Bind the field to its exact parsed evidence. */
+function boundReopenAckToActivity(task: Task, activity: readonly TaskActivity[]): Task {
+  if (task.reopenAckSeq === undefined) return task;
+  const acknowledged = activity.find(entry => entry.seq === task.reopenAckSeq);
+  if (isValidShippedReopenActivity(task.workflow, acknowledged)) return task;
+  const visible = { ...task };
+  delete visible.reopenAckSeq;
+  return visible;
+}
+
 /** Field-by-field defensive parse. One malformed task/history degrades only
  *  that entry. A malformed WHOLE file is flagged fatal so a writer refuses to
  *  replace evidence it could not read with an apparently empty board. */
@@ -188,7 +252,7 @@ export function parseSessionTaskFile(rawText: string | null, expectedSessionId: 
   const seen = new Set<string>();
   for (const item of raw['tasks']) {
     const entry = item && typeof item === 'object' && !Array.isArray(item) ? (item as Record<string, unknown>) : null;
-    const task = entry === null ? null : parseTaskRecord(entry['task']);
+    const task = entry === null ? null : parseSessionTaskRecord(entry['task']);
     const hintedId =
       entry === null ? null : normalizeTaskId((entry['task'] as Record<string, unknown> | undefined)?.['id']);
     if (task === null || seen.has(task.id)) {
@@ -198,7 +262,7 @@ export function parseSessionTaskFile(rawText: string | null, expectedSessionId: 
     seen.add(task.id);
     const parsedActivity = parseActivityList(entry?.['activity']);
     if (parsedActivity.errors > 0) activityParseErrors.set(task.id, parsedActivity.errors);
-    tasks.push({ task, activity: parsedActivity.activity });
+    tasks.push({ task: boundReopenAckToActivity(task, parsedActivity.activity), activity: parsedActivity.activity });
   }
   tasks.sort((a, b) => compareTasks(a.task, b.task));
 
@@ -238,7 +302,7 @@ function serializeActivity(entry: TaskActivity): TaskActivity {
 
 function serializeStoredTask(entry: StoredSessionTask): StoredSessionTask {
   return {
-    task: serializeTask(entry.task),
+    task: serializeSessionTask(entry.task),
     activity: entry.activity.map(serializeActivity),
   };
 }
@@ -256,14 +320,14 @@ export function serializeSessionTaskFile(file: SessionTaskFile): SessionTaskFile
 }
 
 function validateStoredEntry(entry: StoredSessionTask, expectedId?: string): StoredSessionTask {
-  const task = parseTaskRecord(serializeTask(entry.task));
+  const task = parseSessionTaskRecord(serializeSessionTask(entry.task));
   if (task === null) throw new TaskError('invalid', `refusing to write an invalid task ${entry.task.id}`);
   if (expectedId !== undefined && task.id !== expectedId) {
     throw new TaskError('invalid', `a task transaction may not rename ${expectedId} to ${task.id}`);
   }
   const parsed = parseActivityList(entry.activity.map(serializeActivity));
   if (parsed.errors > 0) throw new TaskError('invalid', `refusing to write invalid activity for ${task.id}`);
-  return { task, activity: parsed.activity };
+  return { task: boundReopenAckToActivity(task, parsed.activity), activity: parsed.activity };
 }
 
 export class SessionTaskStore {

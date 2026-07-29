@@ -226,6 +226,10 @@ export interface Task {
   links: TaskLinks;
   /** Lead-set priority rank; null = unranked. Lower sorts first. */
   order: number | null;
+  /** Highest shipped-reopen activity generation explicitly resolved on the
+   * Attention board. Optional for additive compatibility with existing task
+   * records; acknowledgement is monotonic. */
+  reopenAckSeq?: number;
   createdAt: string;
   /** Provenance ONLY — the creating session's death orphans nothing. */
   createdBy: string | null;

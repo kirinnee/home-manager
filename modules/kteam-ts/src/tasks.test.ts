@@ -395,6 +395,7 @@ describe('v2 workflow, ask, DAG, and delegated completion', () => {
         from: 'live',
         to: 'build',
         reason: 'The deployed browser still returns 404.',
+        seq: 3,
         actorName: 'zelda',
       },
     });
@@ -404,6 +405,7 @@ describe('v2 workflow, ask, DAG, and delegated completion', () => {
         {
           id: 'F1',
           workflow: 'quick',
+          reopenAckSeq: 0,
           activityParseErrors: 0,
           activity: [
             expect.objectContaining({ type: 'created' }),
@@ -413,6 +415,84 @@ describe('v2 workflow, ask, DAG, and delegated completion', () => {
         },
       ],
     });
+  });
+
+  test('reopen acknowledgement is bounded, monotonic, audited, and idempotent', async () => {
+    await created({ workflow: 'quick', phase: 'live' });
+    await service.taskAct('F1', {
+      action: 'reopen',
+      reason: 'The deployed browser still returns 404.',
+      ask: 'Repair the shipped browser.',
+      source: 'kteam://messages/ms-lead/ack',
+      actor: 'ms-lead',
+      actorName: 'zelda',
+    });
+
+    await expect(service.acknowledgeReopen('ms-lead', 'F1', 0, { actor: 'user' })).rejects.toMatchObject({
+      code: 'invalid',
+    });
+    await expect(service.acknowledgeReopen('ms-lead', 'F1', 1.5, { actor: 'user' })).rejects.toMatchObject({
+      code: 'invalid',
+    });
+    await expect(service.acknowledgeReopen('ms-lead', 'F1', 99, { actor: 'user' })).rejects.toMatchObject({
+      code: 'invalid',
+    });
+    await expect(service.acknowledgeReopen('ms-lead', 'F99', 1, { actor: 'user' })).resolves.toBeUndefined();
+
+    const acknowledgementEvents: KTeamEvent[] = [];
+    const unsubscribe = service.subscribe(event => acknowledgementEvents.push(event));
+    await service.acknowledgeReopen(
+      'ms-lead',
+      'F1',
+      3,
+      { actor: 'user' },
+      'The human confirmed this generation was handled.',
+    );
+    let detail = await service.taskDetail('F1');
+    expect(detail?.task.reopenAckSeq).toBe(3);
+    expect(detail?.activity.at(-1)).toMatchObject({
+      seq: 4,
+      type: 'session',
+      actor: 'user',
+      data: {
+        reopenAck: 3,
+        resolvedBy: 'user',
+        resolvedByName: 'user',
+        note: 'The human confirmed this generation was handled.',
+      },
+    });
+
+    const activityCount = detail?.activity.length;
+    await service.acknowledgeReopen('ms-lead', 'F1', 3, { actor: 'ms-lead', actorName: 'zelda' });
+    await service.acknowledgeReopen('ms-lead', 'F1', 3, { actor: 'user' });
+    expect(acknowledgementEvents).toEqual([]);
+    unsubscribe();
+    detail = await service.taskDetail('F1');
+    expect(detail?.task.reopenAckSeq).toBe(3);
+    expect(detail?.activity).toHaveLength(activityCount ?? 0);
+    expect(await service.sessionTaskActivityBaselines('ms-lead')).toMatchObject({
+      tasks: [{ id: 'F1', reopenAckSeq: 3 }],
+    });
+  });
+
+  test('reopen acknowledgement rejects an in-range non-reopen activity without writing', async () => {
+    await created({ workflow: 'quick', phase: 'live' });
+    await service.taskAct('F1', {
+      action: 'reopen',
+      reason: 'The deployed browser still returns 404.',
+      ask: 'Repair the shipped browser.',
+      source: 'kteam://messages/ms-lead/ack-invalid',
+      actor: 'ms-lead',
+      actorName: 'zelda',
+    });
+    const before = await service.taskDetail('F1');
+
+    // Seq 2 exists but is the reopen clarification; only the status entry at
+    // seq 3 is a valid shipped-reopen generation.
+    await expect(service.acknowledgeReopen('ms-lead', 'F1', 2, { actor: 'user' })).rejects.toMatchObject({
+      code: 'invalid',
+    });
+    expect(await service.taskDetail('F1')).toEqual(before);
   });
 
   test('an invalid reopen writes neither the clarification nor the phase change', async () => {

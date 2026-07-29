@@ -5,13 +5,8 @@
 
 import type { SessionView } from './service';
 import type { KTeamEvent, PendingQuestion } from './types';
-import {
-  TASK_WORKFLOW_PATHS,
-  type ScopedTaskSummary,
-  type SessionTaskListResponse,
-  type TaskActivity,
-  type TaskWorkflow,
-} from './tasks-types';
+import type { ScopedTaskSummary, SessionTaskListResponse, TaskActivity, TaskWorkflow } from './tasks-types';
+import { isValidShippedReopenActivity } from './session-tasks-store';
 import type { AddAttentionInput, AttentionService } from './attention-service';
 import {
   TASK_REOPENED_ATTENTION_SOURCE_REF_PREFIX,
@@ -39,11 +34,13 @@ export interface AttentionTaskSource {
     tasks: Array<{
       id: string;
       workflow: TaskWorkflow;
+      reopenAckSeq: number;
       activity: readonly TaskActivity[];
       activityParseErrors: number;
     }>;
     parseErrors: number;
   }>;
+  acknowledgeReopen?(sessionId: string, taskId: string, seq: number, actor: AttentionActor): Promise<void>;
   subscribe(listener: (event: KTeamEvent) => void): () => void;
 }
 
@@ -111,10 +108,21 @@ function reopenedTaskInputFrom(raw: Record<string, unknown>, waitingSince: strin
   const from = textFrom(raw, ['phaseFrom', 'from']);
   const to = textFrom(raw, ['phaseTo', 'to']);
   const reason = textFrom(raw, ['reason']);
-  if (id === null || (from !== 'live' && from !== 'done') || to === null || reason === null) return null;
+  const sourceSeq = raw['seq'];
+  if (
+    id === null ||
+    (from !== 'live' && from !== 'done') ||
+    to === null ||
+    reason === null ||
+    !Number.isSafeInteger(sourceSeq) ||
+    (sourceSeq as number) < 1
+  ) {
+    return null;
+  }
   return {
     source: 'agent-raised',
     sourceRef: `${TASK_REOPENED_ATTENTION_SOURCE_REF_PREFIX}${id}`,
+    sourceSeq: sourceSeq as number,
     subject: `#${id}: shipped work reopened from ${from}`,
     why: reason,
     waitingSince,
@@ -134,17 +142,10 @@ function latestReopenedTaskInput(
   workflow: TaskWorkflow,
   activity: readonly TaskActivity[],
 ): AddAttentionInput | null {
-  const path = TASK_WORKFLOW_PATHS[workflow];
   for (let index = activity.length - 1; index >= 0; index -= 1) {
     const entry = activity[index]!;
-    if (entry.type !== 'status' || entry.data['reopened'] !== true) continue;
-    if (entry.data['backward'] !== true) continue;
-    const from = textFrom(entry.data, ['phaseFrom']);
-    const to = textFrom(entry.data, ['phaseTo']);
-    const fromIndex = path.findIndex(phase => phase === from);
-    const toIndex = path.findIndex(phase => phase === to);
-    if (fromIndex < 0 || toIndex < 0 || toIndex >= fromIndex) continue;
-    const input = reopenedTaskInputFrom({ ...entry.data, id }, entry.time);
+    if (!isValidShippedReopenActivity(workflow, entry)) continue;
+    const input = reopenedTaskInputFrom({ ...entry.data, id, seq: entry.seq }, entry.time);
     if (input !== null) return input;
   }
   return null;
@@ -374,22 +375,30 @@ export class AttentionSources {
   private async reconcileShippedReopens(sessionId: string, persisted: AttentionSnapshot): Promise<void> {
     if (!this.tasks.sessionTaskActivityBaselines) return;
     const baseline = await this.tasks.sessionTaskActivityBaselines(sessionId);
-    if (baseline.parseErrors > 0) return;
+    if (baseline.parseErrors > 0 || persisted.parseErrors > 0) return;
+    let safeToCompact = true;
     for (const task of baseline.tasks) {
-      if (task.activityParseErrors > 0) continue;
+      if (task.activityParseErrors > 0) {
+        safeToCompact = false;
+        continue;
+      }
       const input = latestReopenedTaskInput(task.id, task.workflow, task.activity);
       const sourceRef = input?.sourceRef ?? null;
-      if (input === null || sourceRef === null) continue;
+      const reopenSeq = input?.sourceSeq;
+      if (input === null || sourceRef === null || reopenSeq === undefined) continue;
 
       const active = persisted.items.some(item => item.source === 'agent-raised' && item.sourceRef === sourceRef);
       if (active) {
         // Refresh the one stable item when a newer shipped rewind changed the
         // reason while the older request remained unresolved.
-        await this.attention
-          .addFromSource(sessionId, input)
-          .catch(error => this.report(sessionId, `task reopen refresh ${task.id}`, error));
+        await this.attention.addFromSource(sessionId, input).catch(error => {
+          safeToCompact = false;
+          this.report(sessionId, `task reopen refresh ${task.id}`, error);
+        });
         continue;
       }
+
+      if (reopenSeq <= task.reopenAckSeq) continue;
 
       const reopenedAt = Date.parse(input.waitingSince ?? '');
       const durableResolution = persisted.reopenResolvedAt?.[task.id];
@@ -399,13 +408,28 @@ export class AttentionSources {
           item =>
             item.source === 'agent-raised' &&
             item.sourceRef === sourceRef &&
+            item.sourceSeq === undefined &&
             Number.isFinite(reopenedAt) &&
             Date.parse(item.resolvedAt) >= reopenedAt,
         );
-      if (resolvedAfterReopen) continue;
-      await this.attention
-        .addFromSource(sessionId, input)
-        .catch(error => this.report(sessionId, `task reopen recovery ${task.id}`, error));
+      if (resolvedAfterReopen) {
+        if (this.tasks.acknowledgeReopen === undefined) {
+          safeToCompact = false;
+          continue;
+        }
+        await this.tasks.acknowledgeReopen(sessionId, task.id, reopenSeq, { actor: 'daemon' }).catch(error => {
+          safeToCompact = false;
+          this.report(sessionId, `task reopen watermark migration ${task.id}`, error);
+        });
+        continue;
+      }
+      await this.attention.addFromSource(sessionId, input).catch(error => {
+        safeToCompact = false;
+        this.report(sessionId, `task reopen recovery ${task.id}`, error);
+      });
+    }
+    if (safeToCompact && persisted.reopenResolvedAt !== undefined) {
+      await this.attention.compactLegacyReopenWatermarks(sessionId);
     }
   }
 
