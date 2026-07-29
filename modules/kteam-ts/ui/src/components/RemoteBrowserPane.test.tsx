@@ -1066,4 +1066,15 @@ describe('RemoteBrowserPane', () => {
     await flush();
     expect(snapshots).toEqual(['page-2']);
   });
+
+  test('hides its governor footer when embedded inside the unified surface', async () => {
+    mount(() => RemoteBrowserPane({ sessionId: 'session-1', dependencies, showNavigation: false }));
+    await flush();
+    expect(JSON.stringify(harness!.output)).not.toContain('idle stop');
+
+    harness!.unmount();
+    mount(() => RemoteBrowserPane({ sessionId: 'session-1', dependencies }));
+    await flush();
+    expect(JSON.stringify(harness!.output)).toContain('idle stop');
+  });
 });

@@ -232,7 +232,9 @@ describe('workspace', () => {
         <main>Conversation</main>
       </SidePaneWorkspace>,
     );
-    expect(html).toContain('aria-label="Browser engine"');
+    // The engine control folds into the single-bar ⋯ menu; its trigger is the
+    // usable chrome on the home, not an always-visible toggle.
+    expect(html).toContain('aria-label="Browser controls"');
     expect(html).toContain('Where to?');
     expect(html).toContain('Nothing opens until you choose where to go.');
     expect(html).not.toContain('autofocus');
