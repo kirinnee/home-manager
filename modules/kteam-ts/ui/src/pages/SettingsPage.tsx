@@ -1,4 +1,4 @@
-import { useEffect, useId } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { ThemeSettings } from '../components/ThemeToggle';
 import { DictationSettings } from '../components/DictationSettings';
@@ -19,6 +19,8 @@ import {
 import { Link } from '../lib/router';
 import { useUiControls } from '../lib/store';
 import { cn } from '../lib/utils';
+import { api, HAS_TOKEN } from '../lib/api';
+import type { PwaConfig } from '../types';
 
 const SETTINGS_SHEET_HEIGHT = 'min(90dvh, calc(var(--app-h, 100dvh) - var(--gap-xs)))';
 
@@ -87,6 +89,170 @@ function TextScaleControl({ theme }: { theme: ThemeState }) {
           </button>
         );
       })}
+    </div>
+  );
+}
+
+function pwaNameError(value: string): string | undefined {
+  if (!value) return undefined; // blank explicitly returns to the daemon default
+  if (Array.from(value.trim()).length > 64) return 'Name must be 64 characters or fewer.';
+  if (/[\u0000-\u001f\u007f]/.test(value)) return 'Name cannot contain control characters.';
+  return undefined;
+}
+
+function pwaIconError(value: string): string | undefined {
+  if (!value) return undefined; // blank explicitly returns to the daemon default
+  return /^[A-Za-z0-9]{1,2}$/.test(value.trim()) ? undefined : 'Monogram must be 1–2 ASCII letters or digits.';
+}
+
+function derivedMonogram(name: string): string | undefined {
+  const words = name.normalize('NFKD').match(/[A-Za-z0-9]+/g) ?? [];
+  if (words.length >= 2) return `${words[0]![0]}${words[1]![0]}`.toUpperCase();
+  if (words.length === 1) return words[0]!.slice(0, 2).toUpperCase();
+  return undefined;
+}
+
+function iconColor(name: string, icon: string): string {
+  let hash = 0x811c9dc5;
+  for (const value of new TextEncoder().encode(`${name}\n${icon}`)) {
+    hash ^= value;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return ['#3151A3', '#7A3E9D', '#006B70', '#8A3A51', '#76511B', '#2F6B3E', '#5A4B9B'][(hash >>> 0) % 7]!;
+}
+
+function PwaIdentityControl() {
+  const [config, setConfig] = useState<PwaConfig | null>(null);
+  const [name, setName] = useState('');
+  const [icon, setIcon] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void api
+      .pwaConfig()
+      .then(view => {
+        if (!active) return;
+        setConfig(view.config);
+        setName(view.config.name ?? '');
+        setIcon(view.config.icon ?? '');
+      })
+      .catch(error => active && setMessage(error instanceof Error ? error.message : 'Could not load PWA identity.'))
+      .finally(() => active && setLoading(false));
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const nameError = pwaNameError(name);
+  const iconError = pwaIconError(icon);
+  const normalizedName = name.trim().replace(/\s+/g, ' ');
+  const normalizedIcon = icon.trim().toUpperCase();
+  const previewIcon = iconError ? undefined : normalizedIcon || derivedMonogram(normalizedName);
+  // There is deliberately no guessed host name here. The browser cannot know
+  // which hostname the daemon will fall back to, so absence stays unknown.
+  const previewName = normalizedName || undefined;
+  const previewColor = previewName && previewIcon ? iconColor(previewName, previewIcon) : '#5C667A';
+  const save = async () => {
+    if (nameError || iconError) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      const view = await api.updatePwaConfig({
+        name: normalizedName || null,
+        icon: normalizedIcon || null,
+      });
+      setConfig(view.config);
+      setName(view.config.name ?? '');
+      setIcon(view.config.icon ?? '');
+      setMessage('Saved.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Could not save PWA identity.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_132px]">
+      <div className="min-w-0 space-y-3">
+        <label className="block text-ui font-medium text-fg" htmlFor="pwa-name">
+          App name
+          <input
+            id="pwa-name"
+            value={name}
+            onChange={event => setName(event.target.value)}
+            placeholder="Daemon default"
+            maxLength={64}
+            className="mt-1 h-control w-full rounded-control border border-border bg-surface-2 px-control-x text-fg"
+            aria-describedby="pwa-name-help pwa-name-error"
+          />
+        </label>
+        <p id="pwa-name-help" className="-mt-2 text-meta text-muted">
+          Up to 64 characters; control characters are not allowed. The installed app’s short name is truncated to 12
+          code points.
+        </p>
+        {nameError && (
+          <p id="pwa-name-error" role="alert" className="text-meta text-danger">
+            {nameError}
+          </p>
+        )}
+        <label className="block text-ui font-medium text-fg" htmlFor="pwa-icon">
+          Icon monogram
+          <input
+            id="pwa-icon"
+            value={icon}
+            onChange={event => setIcon(event.target.value)}
+            placeholder="Derived default"
+            maxLength={2}
+            className="mt-1 h-control w-full rounded-control border border-border bg-surface-2 px-control-x font-mono uppercase text-fg"
+            aria-describedby="pwa-icon-help pwa-icon-error"
+          />
+        </label>
+        <p id="pwa-icon-help" className="-mt-2 text-meta text-muted">
+          One or two ASCII letters or digits. Leave either field blank to return it to the daemon default.
+        </p>
+        {iconError && (
+          <p id="pwa-icon-error" role="alert" className="text-meta text-danger">
+            {iconError}
+          </p>
+        )}
+        <button
+          type="button"
+          onClick={() => void save()}
+          disabled={!HAS_TOKEN || loading || saving || Boolean(nameError || iconError)}
+          className="kt-btn min-h-[44px]"
+        >
+          {saving ? 'Saving…' : 'Save PWA identity'}
+        </button>
+        {message && (
+          <p role="status" className="text-meta text-muted">
+            {message}
+          </p>
+        )}
+        {!HAS_TOKEN && (
+          <p className="text-meta text-warn">This page has no daemon token, so PWA identity is read-only.</p>
+        )}
+      </div>
+      <div className="rounded-control border border-border bg-surface-2 p-3" aria-label="Generated icon preview">
+        <p className="m-0 text-meta font-medium text-muted">Generated icon preview</p>
+        <div
+          aria-hidden="true"
+          className="mt-2 flex aspect-square w-full items-center justify-center rounded-[22%] text-2xl font-bold text-white shadow-sm"
+          style={{ backgroundColor: previewColor }}
+        >
+          {previewIcon ?? '?'}
+        </div>
+        <p className="mt-2 break-words text-meta text-muted">
+          {previewName ? previewName : config ? 'Name uses daemon default (unknown here).' : 'Identity unavailable.'}
+        </p>
+      </div>
+      <p className="sm:col-span-2 text-meta leading-base text-faint">
+        An already-installed PWA picks up a new name or icon only after the operating system re-reads its manifest;
+        usually reinstall the app.
+      </p>
     </div>
   );
 }
@@ -195,6 +361,17 @@ export function SettingsContent({ target = null }: { target?: SettingId | null }
           {control(definition.id)}
         </SettingsSection>
       ))}
+      <section className="kt-panel p-panel" aria-labelledby="settings-pwa-heading">
+        <h2 id="settings-pwa-heading" className="m-0 text-title font-semibold text-fg">
+          PWA identity
+        </h2>
+        <p className="mt-1 text-ui leading-base text-muted">
+          The installed-app name and the generated monogram icon for this daemon.
+        </p>
+        <div className="mt-3">
+          <PwaIdentityControl />
+        </div>
+      </section>
       {SETTINGS_LINKS.map(link => (
         <section key={link.id} id={`settings-${link.id}`} className="kt-panel p-panel" aria-label={link.label}>
           <Link to={link.href} className="group flex min-h-[44px] w-full items-center justify-between gap-2 text-left">

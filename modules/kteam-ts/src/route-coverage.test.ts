@@ -577,6 +577,11 @@ describe('UI to daemon route coverage', () => {
     expect(await routeIsReachable('/v1/sessions/*/notify', dispatch, server)).toBe(true);
   });
 
+  test('the CLI PWA identity route is mounted by daemon-entry (&F159)', async () => {
+    const { dispatch, server } = captureAssembledRouter();
+    expect(await routeIsReachable('/v1/pwa/config', dispatch, server)).toBe(true);
+  });
+
   test('every UI /v1 path reaches the router assembled by daemon-entry', async () => {
     const { dispatch, server } = captureAssembledRouter();
     const unmatched: UiRoute[] = [];

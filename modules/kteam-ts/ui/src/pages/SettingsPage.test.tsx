@@ -65,6 +65,18 @@ describe('SettingsPage', () => {
     expect(html).toContain('href="/warden#config"');
   });
 
+  test('renders the phone-first PWA identity editor with truthful defaults and install guidance', () => {
+    const html = renderToStaticMarkup(<SettingsPage />);
+    expect(html).toContain('>PWA identity</h2>');
+    expect(html).toContain('for="pwa-name"');
+    expect(html).toContain('for="pwa-icon"');
+    expect(html).toContain('Generated icon preview');
+    expect(html).toContain('short name is truncated to 12 code points');
+    expect(html).toContain('usually reinstall the app');
+    expect(html).toContain('Identity unavailable.');
+    expect(html).toContain('min-h-[44px]');
+  });
+
   test('has no autofocus path on touch', () => {
     const html = renderToStaticMarkup(<SettingsPage />).toLowerCase();
     expect(html).not.toContain('autofocus');

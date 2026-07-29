@@ -36,7 +36,7 @@ import {
   toGraphNode,
 } from './migrate-graph';
 import { createPaths } from './paths';
-import type { SessionView } from './service';
+import type { PwaConfig, SessionView } from './service';
 import { SIGNAL_KINDS } from './types';
 import type { KTeamEvent, SessionStatus, SignalKind } from './types';
 import { compactUsageQuota, fetchKfleetUsage, UsageFeed, usageQuotaLabel } from './usage';
@@ -1507,6 +1507,39 @@ cgroupsConfigCommand
         console.log('running sessions listed above retain their previous placement until relaunched');
     },
   );
+
+const pwaCommand = program.command('pwa').description('installed PWA name and generated icon identity');
+const printPwaConfig = (view: { config: PwaConfig }) => {
+  const config = view.config;
+  console.log(`name: ${config.name ?? 'unknown/default (daemon hostname)'}`);
+  console.log(`icon: ${config.icon ?? 'unknown/default (derived from name)'}`);
+  console.log('short_name: configured name is truncated to 12 code points for the home-screen label');
+  console.log('installed apps update after the OS re-reads the manifest (usually reinstall)');
+};
+pwaCommand
+  .command('show')
+  .description('show explicitly configured PWA identity fields')
+  .option('--json')
+  .action(async (options: { json?: boolean }) => {
+    const view = await (await client()).pwaConfig();
+    if (options.json) return console.log(JSON.stringify(view, null, 2));
+    printPwaConfig(view);
+  });
+pwaCommand
+  .command('set')
+  .description('persist a PWA name and/or 1–2 character alphanumeric monogram')
+  .option('--name <name>', 'installed-app label (1–64 characters, no control characters)')
+  .option('--icon <icon>', 'one or two ASCII letters or digits')
+  .option('--json')
+  .action(async (options: { name?: string; icon?: string; json?: boolean }) => {
+    const patch: Record<string, string> = {};
+    if (options.name !== undefined) patch.name = options.name;
+    if (options.icon !== undefined) patch.icon = options.icon;
+    if (Object.keys(patch).length === 0) throw new Error('nothing to set — pass --name and/or --icon');
+    const view = await (await client()).updatePwaConfig(patch);
+    if (options.json) return console.log(JSON.stringify(view, null, 2));
+    printPwaConfig(view);
+  });
 
 program.command('doctor').action(async () => {
   const tmux = Bun.spawnSync(['tmux', '-V']);

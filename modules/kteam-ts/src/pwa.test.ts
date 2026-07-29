@@ -11,10 +11,12 @@ import {
   PwaRuntime,
   brandPwaHtml,
   brandPwaManifest,
+  mergePwaConfig,
   parsePwaConfig,
   pwaIconPaths,
   renderPwaIcon,
   resolvePwaIdentity,
+  validatePwaConfigPatch,
 } from './pwa';
 
 const temporaryDirectories: string[] = [];
@@ -93,6 +95,20 @@ describe('versioned PWA daemon config', () => {
     expect(parsePwaConfig(null)).toEqual({ version: 1 });
   });
 
+  test('rejects each operator validation rule instead of silently dropping a PATCH field', () => {
+    expect(() => validatePwaConfigPatch({ name: 'x'.repeat(65) })).toThrow(/1–64/);
+    expect(() => validatePwaConfigPatch({ name: 'bad\u0000name' })).toThrow(/control characters/);
+    expect(() => validatePwaConfigPatch({ icon: '' })).toThrow(/1–2 ASCII/);
+    expect(() => validatePwaConfigPatch({ icon: 'A!7' })).toThrow(/1–2 ASCII/);
+    expect(() => validatePwaConfigPatch({ version: 1 })).toThrow(/unknown field/);
+  });
+
+  test('normalizes patches and lets null return individual fields to defaults', () => {
+    const initial = { version: 1 as const, name: 'Atlas', icon: 'AT' };
+    expect(validatePwaConfigPatch({ name: '  Home   Lab ', icon: 'h1' })).toEqual({ name: 'Home Lab', icon: 'H1' });
+    expect(mergePwaConfig(initial, { name: null })).toEqual({ version: 1, icon: 'AT' });
+  });
+
   test('old daemon config gains defaults without rewriting setup requirements', async () => {
     const home = await temporaryDirectory('kteam-pwa-old-config-');
     const paths = createPaths(home);
@@ -150,6 +166,14 @@ describe('per-machine PWA identity', () => {
     expect(atlas.brandVersion).not.toBe(atlasTwo.brandVersion);
     expect(atlas.brandVersion).not.toBe(borealis.brandVersion);
     expect(pwaIconPaths(atlas).any192).not.toBe(pwaIconPaths(atlasTwo).any192);
+  });
+
+  test('hot-swaps generated resources after a persisted config update', () => {
+    const runtime = new PwaRuntime({ version: 1, name: 'Atlas', icon: 'AT' }, 'ignored');
+    const before = runtime.identity.brandVersion;
+    runtime.setConfig({ version: 1, name: 'Borealis', icon: 'B2' });
+    expect(runtime.identity).toMatchObject({ name: 'Borealis', icon: 'B2' });
+    expect(runtime.identity.brandVersion).not.toBe(before);
   });
 });
 

@@ -4,6 +4,23 @@
 export type Harness = 'claude' | 'codex';
 export type InteractionMode = 'auto' | 'interactive';
 
+/** Explicit daemon PWA fields. Omitted means unknown/default, never a guessed
+ * hostname or monogram supplied by the browser. */
+export interface PwaConfig {
+  version: 1;
+  name?: string;
+  icon?: string;
+}
+
+export interface PwaConfigView {
+  config: PwaConfig;
+}
+
+export interface PwaConfigPatch {
+  name?: string | null;
+  icon?: string | null;
+}
+
 export type SessionStatus =
   | 'created'
   | 'starting'

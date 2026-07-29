@@ -85,6 +85,7 @@ import {
   type CgroupConfig,
   type CgroupTarget,
 } from './cgroups';
+import { defaultPwaConfig, mergePwaConfig, type PwaConfig, type PwaConfigPatch, validatePwaConfigPatch } from './pwa';
 import {
   defaultProviderOutageConfig,
   defaultScratchConfig,
@@ -354,6 +355,10 @@ interface SessionManagerOptions {
    *  the deep-merged daemon setting; omitted test fixtures keep the old direct
    *  launch path. */
   cgroups?: CgroupConfig;
+  /** Optional for compatibility with focused construction sites. */
+  pwa?: PwaConfig;
+  /** The entrypoint owns runtime assets; invoke it only after persistence. */
+  onPwaConfigUpdated?: (config: PwaConfig) => void;
   contextWindows?: Record<string, number>;
   /** Invoked when the daemon decides its own index is unhealable and a clean
    *  restart is the only repair. The entrypoint owns HOW (and WHETHER — only a
@@ -1040,6 +1045,8 @@ export class SessionManager implements KTeamService {
    *  picked up by the next sweep/spawn without a daemon restart; the boot
    *  config from options stays the fallback. */
   private wardenConfigOverride?: WardenConfig;
+  /** Explicit PWA fields, separate from hostname-derived runtime fallbacks. */
+  private pwaConfigOverride?: PwaConfig;
   /** Configured-but-missing warden wrappers already warned about — the
    *  fleet.warden_config_invalid event fires once per daemon boot per wrapper,
    *  not once per sweep. */
@@ -1049,6 +1056,10 @@ export class SessionManager implements KTeamService {
    *  options.warden directly): options.warden until a live PATCH swaps it. */
   private get wardenConfig(): WardenConfig {
     return this.wardenConfigOverride ?? this.options.warden;
+  }
+
+  private get pwaConfig(): PwaConfig {
+    return this.pwaConfigOverride ?? this.options.pwa ?? defaultPwaConfig();
   }
 
   private constructor(
@@ -8980,6 +8991,26 @@ export class SessionManager implements KTeamService {
       });
       return view;
     });
+  }
+
+  async pwaConfigView(): Promise<{ config: PwaConfig }> {
+    return { config: this.pwaConfig };
+  }
+
+  /** The icon and manifest URLs are rendered by the daemon-owned PwaRuntime.
+   * Persist first, then switch that runtime so a successful PATCH is never a
+   * temporary display-only change. */
+  async updatePwaConfig(patch: PwaConfigPatch): Promise<{ config: PwaConfig }> {
+    const normalized = validatePwaConfigPatch(patch);
+    const next = mergePwaConfig(this.pwaConfig, normalized);
+    const onDisk = await readJson<Record<string, unknown>>(this.paths.daemonConfig).catch(
+      () => ({}) as Record<string, unknown>,
+    );
+    await atomicJson(this.paths.daemonConfig, { ...onDisk, pwa: next });
+    this.pwaConfigOverride = next;
+    this.options.onPwaConfigUpdated?.(next);
+    this.emitTransient('fleet.pwa_config_changed', { fields: Object.keys(normalized) });
+    return { config: next };
   }
 
   private describeWardenConfig(config: WardenConfig): WardenConfigView {

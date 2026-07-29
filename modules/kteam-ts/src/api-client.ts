@@ -3,6 +3,8 @@ import type {
   AttachmentView,
   CgroupConfigPatch,
   CgroupConfigView,
+  PwaConfig,
+  PwaConfigPatch,
   SessionView,
   UsageFeedView,
   WardenConfigPatch,
@@ -235,6 +237,16 @@ export class ApiClient {
   }
   updateCgroupConfig(patch: CgroupConfigPatch) {
     return this.request<CgroupConfigView>('/v1/cgroups/config', {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+  pwaConfig() {
+    return this.request<{ config: PwaConfig }>('/v1/pwa/config');
+  }
+  updatePwaConfig(patch: PwaConfigPatch) {
+    return this.request<{ config: PwaConfig }>('/v1/pwa/config', {
       method: 'PATCH',
       body: JSON.stringify(patch),
       headers: { 'content-type': 'application/json' },

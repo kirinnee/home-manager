@@ -29,6 +29,13 @@ export interface PwaIdentity {
   brandVersion: string;
 }
 
+/** A partial update to the persisted PWA identity. `null` removes an explicit
+ * value so the daemon returns to its hostname-derived identity. */
+export interface PwaConfigPatch {
+  name?: string | null;
+  icon?: string | null;
+}
+
 type JsonRecord = Record<string, unknown>;
 
 const isRecord = (value: unknown): value is JsonRecord =>
@@ -47,6 +54,48 @@ function normaliseIcon(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const icon = value.trim().toUpperCase();
   return /^[A-Z0-9]{1,2}$/.test(icon) ? icon : undefined;
+}
+
+/** Validate an operator-supplied PATCH strictly. Loading old config remains
+ * permissive, but an invalid setting must never look as though it saved. */
+export function validatePwaConfigPatch(value: unknown): PwaConfigPatch {
+  if (!isRecord(value)) throw new Error('invalid PWA config: request body must be an object');
+  const keys = Object.keys(value);
+  if (keys.length === 0) throw new Error('invalid PWA config: pass name and/or icon');
+  for (const key of keys) {
+    if (key !== 'name' && key !== 'icon') throw new Error(`invalid PWA config: unknown field ${key}`);
+  }
+  const patch: PwaConfigPatch = {};
+  if ('name' in value) {
+    if (value.name === null) patch.name = null;
+    else {
+      const name = normaliseName(value.name);
+      if (!name) throw new Error('invalid PWA config: name must be 1–64 characters and contain no control characters');
+      patch.name = name;
+    }
+  }
+  if ('icon' in value) {
+    if (value.icon === null) patch.icon = null;
+    else {
+      const icon = normaliseIcon(value.icon);
+      if (!icon) throw new Error('invalid PWA config: icon must be 1–2 ASCII letters or digits');
+      patch.icon = icon;
+    }
+  }
+  return patch;
+}
+
+export function mergePwaConfig(config: PwaConfig, patch: PwaConfigPatch): PwaConfig {
+  const next: PwaConfig = { ...config, version: PWA_CONFIG_VERSION };
+  if ('name' in patch) {
+    if (patch.name === null) delete next.name;
+    else next.name = patch.name;
+  }
+  if ('icon' in patch) {
+    if (patch.icon === null) delete next.icon;
+    else next.icon = patch.icon;
+  }
+  return next;
 }
 
 /**
@@ -310,16 +359,34 @@ function pngResponse(bytes: Buffer): Response {
 }
 
 export class PwaRuntime {
-  readonly identity: PwaIdentity;
-  private readonly iconSpecs: ReadonlyMap<string, readonly [size: number, purpose: 'any' | 'maskable']>;
+  private identityValue: PwaIdentity;
+  private iconSpecs: ReadonlyMap<string, readonly [size: number, purpose: 'any' | 'maskable']>;
   private readonly icons = new Map<string, Buffer>();
+  private readonly hostname: string;
 
   constructor(config: PwaConfig = defaultPwaConfig(), hostname: string = os.hostname()) {
-    this.identity = resolvePwaIdentity(config, hostname);
-    const paths = pwaIconPaths(this.identity);
+    this.hostname = hostname;
+    this.identityValue = resolvePwaIdentity(config, hostname);
+    this.iconSpecs = this.createIconSpecs(this.identityValue);
+  }
+
+  get identity(): PwaIdentity {
+    return this.identityValue;
+  }
+
+  setConfig(config: PwaConfig): void {
+    this.identityValue = resolvePwaIdentity(config, this.hostname);
+    this.iconSpecs = this.createIconSpecs(this.identityValue);
+    this.icons.clear();
+  }
+
+  private createIconSpecs(
+    identity: PwaIdentity,
+  ): ReadonlyMap<string, readonly [size: number, purpose: 'any' | 'maskable']> {
+    const paths = pwaIconPaths(identity);
     // Keep daemon bind fast: icons are generated only if a client requests
     // installation metadata, then retained for this immutable brand version.
-    this.iconSpecs = new Map([
+    return new Map([
       [paths.any192, [192, 'any']],
       [paths.any512, [512, 'any']],
       [paths.maskable192, [192, 'maskable']],

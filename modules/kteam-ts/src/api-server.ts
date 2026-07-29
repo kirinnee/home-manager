@@ -1,7 +1,14 @@
 import type { Server, ServerWebSocket } from 'bun';
 import { existsSync } from 'node:fs';
 import { join, normalize } from 'node:path';
-import type { CgroupConfigPatch, KTeamService, SessionView, WardenAttentionView, WardenConfigPatch } from './service';
+import type {
+  CgroupConfigPatch,
+  KTeamService,
+  PwaConfigPatch,
+  SessionView,
+  WardenAttentionView,
+  WardenConfigPatch,
+} from './service';
 import { SIGNAL_KINDS } from './types';
 import type { KTeamEvent, RuntimeControlRequest, SendRequest, SignalKind, StartSessionRequest } from './types';
 import { WARDEN_LABEL } from './warden-detect';
@@ -172,6 +179,7 @@ async function wardenScopeDenial(
   const pathname = url.pathname;
   if (pathname.startsWith('/v1/warden/')) return forbidden('use the warden oversight routes');
   if (pathname.startsWith('/v1/cgroups')) return forbidden('change fleet resource limits');
+  if (pathname.startsWith('/v1/pwa')) return forbidden('change PWA identity');
   // Learning is admin-only (it can accept/reject rules that steer the whole
   // fleet). Deny BEFORE the generic GET allowance below.
   if (pathname.startsWith('/v1/learning')) return forbidden('use the learning routes');
@@ -649,6 +657,12 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           if (url.pathname === '/v1/cgroups/config' && request.method === 'PATCH') {
             const patch = await body<CgroupConfigPatch>(request);
             return json(await options.service.updateCgroupConfig(patch));
+          }
+          if (url.pathname === '/v1/pwa/config' && request.method === 'GET')
+            return json(await options.service.pwaConfigView());
+          if (url.pathname === '/v1/pwa/config' && request.method === 'PATCH') {
+            const patch = await body<PwaConfigPatch>(request);
+            return json(await options.service.updatePwaConfig(patch));
           }
           if (url.pathname === '/v1/warden/attention' && request.method === 'GET') {
             if (!options.wardenAttention) return json(unknownRoute(request.method, url.pathname), 404);

@@ -79,6 +79,7 @@ const supervised = async () =>
     new DaemonService(paths, process.execPath).supervises(process.pid).catch(() => false),
     Bun.sleep(3_000).then(() => false),
   ]);
+const pwa = new PwaRuntime(config.pwa);
 const manager = await SessionManager.create(paths, {
   healthIntervalSeconds: config.healthIntervalSeconds,
   quotaUrl: config.quotaUrl,
@@ -90,6 +91,8 @@ const manager = await SessionManager.create(paths, {
   warden: config.warden,
   scratch: config.scratch,
   cgroups: config.cgroups,
+  pwa: config.pwa,
+  onPwaConfigUpdated: next => pwa.setConfig(next),
   onSelfRestart: async () => {
     if (!(await supervised())) return false;
     requestStop('session index unhealable in place');
@@ -230,7 +233,7 @@ const apiOptions = {
   terminals: terminalApi,
   browser: browserApi,
   browserLogin: browserLoginApi,
-  pwa: new PwaRuntime(config.pwa),
+  pwa,
   runtimeModels: runtimeModelsApi,
   attention: attentionApi,
   wardenAttention,

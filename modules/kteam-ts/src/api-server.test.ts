@@ -195,6 +195,12 @@ class FakeService implements KTeamService {
     this.lastCgroupConfigPatch = patch;
     return this.cgroupConfigView();
   };
+  lastPwaConfigPatch: Record<string, unknown> | undefined = undefined;
+  pwaConfigView = async () => ({ config: { version: 1 as const, name: 'Atlas', icon: 'AT' } });
+  updatePwaConfig = async (patch: Record<string, unknown>) => {
+    this.lastPwaConfigPatch = patch;
+    return this.pwaConfigView();
+  };
   wrappers = async () => [
     {
       name: 'claude-auto-loge',
@@ -653,6 +659,33 @@ describe('kteam daemon API', () => {
     const denied = await fetch(base, { headers: { authorization: 'Bearer warden-secret' } });
     expect(denied.status).toBe(403);
     expect(await denied.json()).toEqual({ error: 'the warden-scoped token may not change fleet resource limits' });
+  });
+
+  test('serves and updates PWA identity for admins but denies the warden token', async () => {
+    const service = new FakeService();
+    const server = startApiServer({
+      host: '127.0.0.1',
+      port: 0,
+      token: 'secret',
+      wardenToken: 'warden-secret',
+      service,
+    });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}/v1/pwa/config`;
+    const admin = { authorization: 'Bearer secret' };
+    expect(await (await fetch(base, { headers: admin })).json()).toEqual({
+      config: { version: 1, name: 'Atlas', icon: 'AT' },
+    });
+    const updated = await fetch(base, {
+      method: 'PATCH',
+      headers: { ...admin, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Workshop', icon: 'WS' }),
+    });
+    expect(updated.status).toBe(200);
+    expect(service.lastPwaConfigPatch).toEqual({ name: 'Workshop', icon: 'WS' });
+    const denied = await fetch(base, { headers: { authorization: 'Bearer warden-secret' } });
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toEqual({ error: 'the warden-scoped token may not change PWA identity' });
   });
 
   test('exposes transcript search with a scanned count', async () => {

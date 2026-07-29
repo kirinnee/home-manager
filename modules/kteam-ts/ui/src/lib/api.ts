@@ -18,6 +18,8 @@ import type {
   SearchResponse,
   SendsResponse,
   UsageFeedView,
+  PwaConfigPatch,
+  PwaConfigView,
 } from '../types';
 import type { AnalyticsResponse } from '../../../src/analytics-types';
 import { attachmentApiPath, type AttachmentView } from './attachments';
@@ -241,6 +243,9 @@ export const api = {
   wardenReport: (path: string) => request<string>(`/v1/warden/report?path=${encodeURIComponent(path)}`),
   search: (q: string, limit = 30) => request<SearchResponse>(`/v1/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   usage: () => request<UsageFeedView>('/v1/usage'),
+  pwaConfig: () => request<PwaConfigView>('/v1/pwa/config'),
+  updatePwaConfig: (patch: PwaConfigPatch) =>
+    request<PwaConfigView>('/v1/pwa/config', { method: 'PATCH', body: JSON.stringify(patch) }),
   analytics: (query?: string) => {
     const parameters = [query === undefined ? undefined : `q=${encodeURIComponent(query)}`].filter(
       (parameter): parameter is string => parameter !== undefined,

@@ -19,8 +19,10 @@ import type { FsDiffView, FsFileView, FsListing } from './fs';
 import type { GitChangesView } from './git';
 import type { RuntimeModelCatalog } from './codex-runtime';
 import type { CgroupConfigPatch, CgroupConfigView } from './cgroups';
+import type { PwaConfig, PwaConfigPatch } from './pwa';
 
 export type { CgroupConfigPatch, CgroupConfigView } from './cgroups';
+export type { PwaConfig, PwaConfigPatch } from './pwa';
 
 // Fleet-wide, read-only Warden Attention projection. Re-exported here so the API
 // wire types live beside the other views (and can be mirrored into the UI).
@@ -287,6 +289,10 @@ export interface KTeamService {
   cgroupConfigView(): Promise<CgroupConfigView>;
   /** Persist and hot-apply cgroup limits wherever possible. */
   updateCgroupConfig(patch: CgroupConfigPatch): Promise<CgroupConfigView>;
+  /** Persisted PWA fields only. Missing fields remain daemon-local defaults. */
+  pwaConfigView(): Promise<{ config: PwaConfig }>;
+  /** Persist and hot-apply the generated PWA identity. */
+  updatePwaConfig(patch: PwaConfigPatch): Promise<{ config: PwaConfig }>;
   /** Recent warden verdicts parsed from the reports (newest first). */
   wardenVerdicts(): Promise<WardenVerdict[]>;
   /** Raw markdown of one warden report; `path` is validated to live under the
