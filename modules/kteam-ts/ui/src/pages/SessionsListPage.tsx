@@ -1,7 +1,10 @@
 // Sessions list. Live teammate sessions managed by kteamd, grouped by project.
-//  - header: title + count + table/cards switch + New
+//  - header: title + count + table/cards switch + New (title is sr-only below
+//    `sm`: the app bar crumb already says it)
 //  - per-project group: header + table (identity, TASK, status, runtime,
-//    activity, signals)
+//    activity, signals); at reduced density in cards mode the group renders as
+//    ONE panel — hue rail + header + one 44px row per session — with a
+//    majority status hoisted into the header (B42)
 //
 // NO DATA OF ITS OWN (round 5). This page used to fetch the session list, open
 // its own fleet WebSocket, and re-GET the ENTIRE list 1.5s after every event —
@@ -203,14 +206,19 @@ export function SessionsListPage() {
           shrink-0. Unscoped keeps the original wrapping toolbar untouched. */}
       <div
         className={cn(
-          'mt-1 mb-1 flex items-center justify-between gap-2 sm:mt-2 sm:mb-2',
+          'mt-0.5 mb-1 flex items-center justify-between gap-2 sm:mt-2 sm:mb-2',
           scope === null && 'flex-wrap',
         )}
       >
         {/* `--text-display` / `--weight-display` / `--tracking-display`: Mission
             shouts this in 0.08em caps, Neo at 900, Ember in a serif. */}
+        {/* Below `sm` the h1 is screen-reader-only: the app bar's breadcrumb
+            already says "Sessions" one row above, and at 390x844 the repeated
+            display-size title was the single largest block of chrome between
+            the reader and the first session (B42). The heading stays in the
+            a11y tree at every width. */}
         {scope === null ? (
-          <h1 className="m-0 font-display text-display font-bold tracking-display">Sessions</h1>
+          <h1 className="sr-only m-0 font-display text-display font-bold tracking-display sm:not-sr-only">Sessions</h1>
         ) : (
           // SCOPED: [All-folders chip] [FolderGit2 + folder name h1] [(n sessions)].
           // The chip is a real link to `/` (deep-linkable, right-clickable) whose
@@ -238,12 +246,24 @@ export function SessionsListPage() {
             </span>
           </div>
         )}
-        <div className="flex shrink-0 items-center gap-sm">
+        {/* On a phone (h1 sr-only) the count anchors the LEFT end of the band
+            so the row reads as [count … New session] instead of a dead gutter
+            with a floating cluster; `sm:` returns it to the right cluster
+            beside the button. Rendered twice, shown once — never both. */}
+        {sessions && scope === null && (
+          <span className="mono text-meta text-faint sm:hidden" title="visible / total sessions">
+            {visible.length}/{sessions.length}
+          </span>
+        )}
+        {/* `ml-auto` keeps this cluster right-aligned when the h1 above is
+            sr-only (position:absolute leaves it out of flow, so justify-between
+            alone would swing the cluster to the left edge). */}
+        <div className="ml-auto flex shrink-0 items-center gap-sm">
           {/* Unscoped: the visible/total subset readout. When scoped, the folder
               name and the scoped count above already tell the story, so it is
               dropped to hold the header to one row at 360px. */}
           {sessions && scope === null && (
-            <span className="mono text-meta text-faint" title="visible / total sessions">
+            <span className="mono hidden text-meta text-faint sm:inline" title="visible / total sessions">
               {visible.length}/{sessions.length}
             </span>
           )}
@@ -335,12 +355,16 @@ function ProjectHeading({ group, onFocus }: { group: SessionGroup; onFocus: (pat
       onClick={() => onFocus(group.path)}
       aria-label={`Focus folder ${group.name}`}
       title={`Focus folder ${group.name}`}
-      className="mb-1 flex w-full items-baseline gap-sm rounded-control px-0.5 text-left hover:bg-surface-2"
+      // `overflow-hidden` + `min-w-0` on every flexible child: the count used to
+      // be sliced off at the right edge of a 390px viewport when the name+path
+      // pair refused to shrink (B42 problem 3). Nothing in this row may ever be
+      // wider than the page again, whatever the font metrics.
+      className="mb-1 flex w-full min-w-0 items-baseline gap-sm overflow-hidden rounded-control px-0.5 text-left hover:bg-surface-2"
     >
       <FolderGit2 size={13} className="shrink-0 translate-y-0.5 text-faint" />
-      <span className="text-ui font-semibold text-fg">{group.name}</span>
-      {group.path && <span className="mono truncate text-meta text-faint">{group.path}</span>}
-      <span className="mono ml-auto shrink-0 text-meta text-faint">{group.rows.length}</span>
+      <span className="min-w-0 truncate text-ui font-semibold text-fg">{group.name}</span>
+      {group.path && <span className="mono min-w-0 truncate text-meta text-faint">{group.path}</span>}
+      <span className="mono ml-auto shrink-0 pr-1 text-meta text-faint">{group.rows.length}</span>
     </button>
   );
 }
@@ -401,7 +425,7 @@ function FullDensityGroups({
   );
 }
 
-function LeanDensityGroups({
+export function LeanDensityGroups({
   groups,
   mode,
   density,
@@ -415,18 +439,28 @@ function LeanDensityGroups({
   onFocus: (path: string) => void;
 }) {
   const columns = DENSITY_COLUMN_LABELS[density];
+  const hues = groupHueVars(groups);
   return (
     <div className="space-y-3">
-      {groups.map(group => (
-        <section key={group.path || group.name}>
-          {!scoped && <ProjectHeading group={group} onFocus={onFocus} />}
-          {mode === 'cards' ? (
-            <div className="grid gap-2.5 sm:gap-1.5">
-              {group.rows.map(view => (
-                <LeanSessionCard key={view.config.id} view={view} density={density} />
-              ))}
-            </div>
-          ) : (
+      {groups.map((group, groupIndex) =>
+        mode === 'cards' ? (
+          // CARDS ARE NOW ROWS IN A GROUP PANEL (B42). Nine free-standing white
+          // cards, each carrying the same status pill, read as one monotone
+          // slab and paid a border + gap + padding tax per session. The panel
+          // carries the group identity ONCE (header + hue rail), the status
+          // pill is hoisted when the whole group agrees, and each session
+          // shrinks to a single 44px row — same facts, half the height.
+          <LeanGroupPanel
+            key={group.path || group.name}
+            group={group}
+            hue={hues[groupIndex]!}
+            density={density}
+            scoped={scoped}
+            onFocus={onFocus}
+          />
+        ) : (
+          <section key={group.path || group.name}>
+            {!scoped && <ProjectHeading group={group} onFocus={onFocus} />}
             <div className="kt-panel">
               <table className="w-full table-fixed border-collapse">
                 <caption className="sr-only">Sessions in {group.name}</caption>
@@ -459,10 +493,172 @@ function LeanDensityGroups({
                 </tbody>
               </table>
             </div>
-          )}
-        </section>
-      ))}
+          </section>
+        ),
+      )}
     </div>
+  );
+}
+
+/** Raw status enums ('TOOL_RUNNING', 'AWAITING_USER') were leaking straight
+ * into the lean pills — internal identifiers, shouted in caps, spending up to
+ * 13 characters per row on a 390px line whose job is to show the TASK TITLE.
+ * The pill text is now a short human word; the raw value stays on the pill's
+ * `title` for hover, and the tone colours still come from `toneFor(raw)`.
+ * 'you' is deliberate for awaiting_user: the pill answers "who is this
+ * waiting on?". Unknown statuses degrade to the raw name with underscores
+ * unshouted, never to silence. Lean surfaces only — the full-density table
+ * and cards have the width for the precise enum and keep it. */
+const STATUS_WORDS: Record<string, string> = {
+  created: 'new',
+  starting: 'start',
+  running: 'run',
+  thinking: 'think',
+  tool_running: 'tool',
+  awaiting_question: 'ask',
+  awaiting_user: 'you',
+  interrupted: 'paused',
+  rate_limited: 'limited',
+  retrying: 'retry',
+  kill_failed: 'zombie',
+  waiting: 'wait',
+  completed: 'done',
+  failed: 'failed',
+  stalled: 'stalled',
+  stopped: 'stopped',
+};
+export function statusWord(status: string): string {
+  return STATUS_WORDS[status] ?? status.replace(/_/g, ' ');
+}
+
+/** The status pill was the loudest element on every card and, in a real fleet,
+ * identical across a whole repo group — pure noise (B42 problem 1). When one
+ * status holds a strict majority of a group (and at least two rows), it is
+ * hoisted into the group header and only the exceptions keep their pill. Ties,
+ * pairs of one, and single-row groups hoist nothing: there the pill still
+ * varies row to row and IS the signal. Every row keeps its StatusMark shape
+ * regardless, so no fact is removed — only the repetition. */
+export interface HoistedStatus {
+  status: string;
+  count: number;
+  uniform: boolean;
+}
+export function hoistedStatus(rows: readonly SessionView[]): HoistedStatus | null {
+  if (rows.length < 2) return null;
+  const counts = new Map<string, number>();
+  for (const row of rows) counts.set(row.state.status, (counts.get(row.state.status) ?? 0) + 1);
+  let status: string | null = null;
+  let count = 0;
+  for (const [s, n] of counts) {
+    if (n > count) {
+      status = s;
+      count = n;
+    }
+  }
+  if (!status || count < 2 || count * 2 <= rows.length) return null;
+  return { status, count, uniform: count === rows.length };
+}
+
+/** The list's second variation axis, independent of status (B42 problem 1):
+ * a stable identity hue per repo group, hashed from the group key so `diene`
+ * keeps its colour across visits and filters. The hues are the existing
+ * `--tool-*` categorical tokens — defined and tuned in every one of the ten
+ * themes (High Contrast and Neo included), so no new colour enters the system.
+ * The greys (`wait`/`generic`) are excluded; seven distinct hues remain.
+ *
+ * DECORATIVE ONLY (contract §8.2 spirit): the hue appears as a rail and an
+ * icon tint, always redundant with the group NAME beside it, so its contrast
+ * is never load-bearing and it carries no state. */
+const GROUP_HUES = ['read', 'edit', 'write', 'search', 'patch', 'bash', 'plan'] as const;
+function groupHueIndex(key: string): number {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
+  return Math.abs(h) % GROUP_HUES.length;
+}
+export function groupHueVar(key: string): string {
+  return `var(--tool-${GROUP_HUES[groupHueIndex(key)]})`;
+}
+
+/** Hue per group for one render of the list, in order. Hashing alone let two
+ * ADJACENT groups land on the same hue (observed on the live fleet, first
+ * screen: two green rails in a row — the monotony the axis exists to break),
+ * so a collision with the group directly above bumps to the next hue. Non-
+ * adjacent repeats are fine; only neighbours compete for the eye. */
+export function groupHueVars(groups: readonly SessionGroup[]): string[] {
+  const out: number[] = [];
+  for (const group of groups) {
+    let idx = groupHueIndex(group.path || group.name);
+    if (out.length > 0 && idx === out[out.length - 1]) idx = (idx + 1) % GROUP_HUES.length;
+    out.push(idx);
+  }
+  return out.map(idx => `var(--tool-${GROUP_HUES[idx]})`);
+}
+
+/** One repo group rendered as a single panel: hue rail, tappable header
+ * (focus-folder, same affordance as ProjectHeading), then one row per session.
+ * Mirrors TranscriptResults' proven shape — `kt-panel overflow-hidden` around
+ * a `divide-y` list of full-width interactive rows — so every theme's panel
+ * silhouette (Mission's HUD sheet, Neo's hard offset, Ember's seam, High
+ * Contrast's plain box) carries the group for free. The header lives INSIDE
+ * the panel, with `min-w-0` truncation on every flexible child, so it can
+ * never escape the page's horizontal padding again (B42 problem 3). */
+function LeanGroupPanel({
+  group,
+  hue,
+  density,
+  scoped,
+  onFocus,
+}: {
+  group: SessionGroup;
+  /** From groupHueVars — hashed on the group key, de-collided per render. */
+  hue: string;
+  density: Exclude<Density, 'full'>;
+  scoped: boolean;
+  onFocus: (path: string) => void;
+}) {
+  // When scoped the header is suppressed (the page header already names the
+  // folder), and with it the hoist: rows keep their own pills rather than
+  // pointing at a summary that is not on screen. Minimal density never shows
+  // a status WORD anywhere, so it never hoists one either.
+  const hoisted = !scoped && density === 'compact' ? hoistedStatus(group.rows) : null;
+  return (
+    <section className="kt-panel overflow-hidden" style={{ borderLeftWidth: 3, borderLeftColor: hue }}>
+      {!scoped && (
+        <button
+          type="button"
+          onClick={() => onFocus(group.path)}
+          aria-label={`Focus folder ${group.name}`}
+          title={`Focus folder ${group.name}`}
+          className="kt-panel__header min-h-[44px] w-full min-w-0 text-left hover:bg-surface-2"
+        >
+          <FolderGit2 size={13} className="shrink-0" style={{ color: hue }} aria-hidden="true" />
+          <span className="min-w-0 truncate text-ui font-semibold text-fg">{group.name}</span>
+          {/* The full path is desktop context; at phone widths it duplicated the
+              basename beside it and was what pushed the count off the right
+              edge. Reduced density means fewer facts — the button's title still
+              carries the folder name, and focusing the group shows the path. */}
+          {group.path && (
+            <span className="mono hidden min-w-0 truncate text-meta text-faint sm:inline">{group.path}</span>
+          )}
+          {hoisted && (
+            <Badge tone={toneFor(hoisted.status)} title={hoisted.status} className="ml-auto shrink-0">
+              {hoisted.uniform ? statusWord(hoisted.status) : `${hoisted.count}× ${statusWord(hoisted.status)}`}
+            </Badge>
+          )}
+          <span className={cn('mono shrink-0 text-meta text-faint', !hoisted && 'ml-auto')}>{group.rows.length}</span>
+        </button>
+      )}
+      <div className="divide-y divide-border-soft">
+        {group.rows.map(view => (
+          <LeanSessionCard
+            key={view.config.id}
+            view={view}
+            density={density}
+            statusHoisted={hoisted != null && view.state.status === hoisted.status}
+          />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -686,9 +882,14 @@ export const LeanSessionRow = memo(function LeanSessionRow({
       {density === 'compact' && (
         <td>
           <div className="flex min-w-0 flex-wrap items-center gap-xs">
-            <Badge tone={toneFor(view.state.status)} className="max-w-full truncate">
-              {view.state.status}
-            </Badge>
+            {/* Same lean voice as the cards: short human word, raw enum on
+                hover, and a declared park collapses to its single 'parked'
+                flag instead of two chips for one condition. */}
+            {!view.state.waiting && (
+              <Badge tone={toneFor(view.state.status)} title={view.state.status} className="max-w-full truncate">
+                {statusWord(view.state.status)}
+              </Badge>
+            )}
             <AttentionFlags view={view} />
           </div>
         </td>
@@ -773,49 +974,70 @@ const SessionCard = memo(function SessionCard({
   );
 });
 
-/** Reduced-density card counterpart to LeanSessionRow. The whole card remains
- * the one-tap session link, while its visible facts follow the approved model. */
+/** Reduced-density counterpart to LeanSessionRow — no longer a free-standing
+ * card but ONE ROW inside its group's panel (LeanGroupPanel): a single 44px
+ * line, mark → name → task, with the pill and exception flags on the right at
+ * compact. Two 16px lines in a padded, bordered box cost ~90px per session and
+ * looked identical nine times over (B42); the same facts fit on one line
+ * because the name and the task were both short by contract (kteam titles cap
+ * at five words) and both truncate with the full string in `title`. Density
+ * still means fewer facts, never smaller type — the row is 16px text on a
+ * 44px tap floor.
+ *
+ * `statusHoisted` is set by LeanGroupPanel when this row's status is already
+ * summarised in the group header: the pill is then repetition, not signal, and
+ * only the exceptions keep theirs. Attention flags (parked / needs human) are
+ * exceptional by nature and always survive at compact. Rendered standalone
+ * (tests), the default keeps the pill. */
 export const LeanSessionCard = memo(function LeanSessionCard({
   view,
   density,
+  statusHoisted = false,
 }: {
   view: SessionView;
   density: Exclude<Density, 'full'>;
+  statusHoisted?: boolean;
 }) {
   const cfg = view.config;
   return (
     <Link
       to={`/session/${encodeURIComponent(cfg.id)}`}
-      // PHONE RHYTHM (item 9): the ≤640px type ramp lifts card text to 16px, but
-      // the panel padding/gap tokens stayed at their desktop values, so the two
-      // 16px lines sat 4px apart inside a 10px box that nearly touched its
-      // neighbours — the "too tight / unprofessional" complaint. This restores
-      // breathing room (padding 10→14, inner gap 4→6, and the grid gap 6→10 at
-      // the call site) WITHOUT adding a single fact — density still means fewer
-      // facts, not squashed ones. Desktop keeps the compact `p-panel`/`mt-1`.
-      className="kt-panel group block p-3.5 sm:p-panel transition-colors hover:border-accent active:bg-surface-2"
+      className="group flex min-h-[44px] min-w-0 items-center gap-sm px-panel py-1.5 transition-colors hover:bg-surface-2 active:bg-surface-2"
     >
-      <div className="flex min-w-0 items-center gap-sm">
-        {/* Same anchor as the table row: the shape carries state greyscale-safe,
-            and the name recedes once the work is done — so a scrolled column of
-            cards is not ten identical bold headings. */}
-        <StatusMark view={view} />
-        <span className={cn('min-w-0 truncate text-row font-semibold group-hover:text-accent', nameToneClass(view))}>
-          {displayCallsign(cfg.teammate) || cfg.id}
-        </span>
-        {density === 'compact' && (
-          <Badge tone={toneFor(view.state.status)} className="ml-auto shrink-0">
-            {view.state.status}
-          </Badge>
+      {/* Same anchor as the table row: the shape carries state greyscale-safe,
+          and the name recedes once the work is done — so a scrolled column of
+          rows is not ten identical bold headings. */}
+      <StatusMark view={view} />
+      {/* TRUNCATION PRIORITY: the title is what identifies a session, so it is
+          the LAST thing to lose width. The callsign shrinks eight times as
+          eagerly (shrink-[8] vs the title's default 1) down to a ~8-character
+          floor (min-w-16 — 'Joselynn' survives; a 40px floor left 'M…', which
+          identifies nothing either), and only then does the title give. The
+          old shrink-0 callsign rendered in full while 'Build Manager Rails'
+          died at 'Build …'. */}
+      <span
+        className={cn(
+          'min-w-16 max-w-[45%] shrink-[8] truncate text-row font-semibold group-hover:text-accent',
+          nameToneClass(view),
         )}
-      </div>
-      <div className="mt-1.5 sm:mt-1">
-        <TaskName name={cfg.name} teammate={cfg.teammate} size="md" className="max-w-full" />
-      </div>
-      {density === 'compact' && (view.state.waiting || view.state.needsHuman) && (
-        <div className="mt-1.5 sm:mt-1 flex flex-wrap items-center gap-xs">
+      >
+        {displayCallsign(cfg.teammate) || cfg.id}
+      </span>
+      <TaskName name={cfg.name} teammate={cfg.teammate} size="md" className="min-w-0 grow" />
+      {density === 'compact' && (
+        <span className="ml-auto flex shrink-0 items-center gap-xs">
+          {/* One condition, one chip: a declared park already renders the
+              'parked' flag below, and the raw pane status next to it said the
+              same thing twice while eating the title (the park outranks the
+              pane — same rule as activityLine). Hoisted rows drop the pill
+              because the group header already carries it. */}
+          {!statusHoisted && !view.state.waiting && (
+            <Badge tone={toneFor(view.state.status)} title={view.state.status} className="max-w-full truncate">
+              {statusWord(view.state.status)}
+            </Badge>
+          )}
           <AttentionFlags view={view} />
-        </div>
+        </span>
       )}
     </Link>
   );
