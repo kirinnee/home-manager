@@ -7,14 +7,6 @@ describe('cfdPlist', () => {
     const programArguments = plist.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1];
     const args = [...(programArguments ?? '').matchAll(/<string>(.*?)<\/string>/g)].map(match => match[1]);
 
-    expect(args).toEqual([
-      '/bin/cloudflared',
-      'tunnel',
-      '--protocol',
-      'http2',
-      'run',
-      '--token',
-      'test-token',
-    ]);
+    expect(args).toEqual(['/bin/cloudflared', 'tunnel', '--protocol', 'http2', 'run', '--token', 'test-token']);
   });
 });
