@@ -241,10 +241,16 @@ export const api = {
   wardenReport: (path: string) => request<string>(`/v1/warden/report?path=${encodeURIComponent(path)}`),
   search: (q: string, limit = 30) => request<SearchResponse>(`/v1/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   usage: () => request<UsageFeedView>('/v1/usage'),
-  analytics: (query?: string, sessionId?: string) => {
+  analytics: (query?: string) => {
+    const parameters = [query === undefined ? undefined : `q=${encodeURIComponent(query)}`].filter(
+      (parameter): parameter is string => parameter !== undefined,
+    );
+    return request<AnalyticsResponse>(`/v1/analytics${parameters.length ? `?${parameters.join('&')}` : ''}`);
+  },
+  sessionAnalytics: (sessionId: string, query?: string) => {
     const parameters = [
       query === undefined ? undefined : `q=${encodeURIComponent(query)}`,
-      sessionId === undefined ? undefined : `session=${encodeURIComponent(sessionId)}`,
+      `session=${encodeURIComponent(sessionId)}`,
     ].filter((parameter): parameter is string => parameter !== undefined);
     return request<AnalyticsResponse>(`/v1/analytics${parameters.length ? `?${parameters.join('&')}` : ''}`);
   },

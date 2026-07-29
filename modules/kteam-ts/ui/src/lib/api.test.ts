@@ -164,11 +164,16 @@ describe('analytics API transport', () => {
 
   test('carries the server-owned session boundary separately from the editable query', async () => {
     const query = 'sum by (model) {id=someone-else}';
-    const captured = await captureRequest(response(), () => api.analytics(query, 'session/odd ?'));
+    const captured = await captureRequest(response(), () => api.sessionAnalytics('session/odd ?', query));
     const url = new URL(String(captured.input), 'http://daemon');
     expect(url.pathname).toBe('/v1/analytics');
     expect(url.searchParams.get('q')).toBe(query);
     expect(url.searchParams.get('session')).toBe('session/odd ?');
+  });
+
+  test('scopes a default query to the selected session', async () => {
+    const captured = await captureRequest(response(), () => api.sessionAnalytics('session/odd ?'));
+    expect(String(captured.input)).toBe('/v1/analytics?session=session%2Fodd%20%3F');
   });
 });
 
