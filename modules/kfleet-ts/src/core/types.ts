@@ -106,11 +106,14 @@ const defaultHomesSchema = z
 export type DefaultHomeMap = z.infer<typeof defaultHomesSchema>;
 
 // Cross-account session sharing (per kind). When ON for a kind, every account's
-// session state (transcripts, prompt history, checkpoints — see the kind's
+// rollout state (transcripts, prompt history, checkpoints — see the kind's
 // sharedState list in core/kinds.ts) is pooled under ~/.kfleet/shared/<kind> and
-// symlinked back, so ANY account can --resume ANY session. Auth/identity files
-// stay per-account. Existing per-account history is migrated into the pool on
-// the first `kfleet apply` after enabling.
+// symlinked back, so ANY account can --resume ANY session. For Codex this also
+// selects one SQLite runtime-state directory for the same human's whole fleet;
+// threads, goals, memories, logs, remote-control metadata, and paginated
+// history/items may therefore be shared. Auth/identity and the rest of each
+// account's config stay per-home. Existing rollout history is migrated into the
+// pool on first apply; existing per-home SQLite databases are never migrated.
 const sharedHistorySchema = z
   .object({
     claude: z.boolean().default(false),

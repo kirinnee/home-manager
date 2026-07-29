@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { materializeSharedHistory } from './shared-history';
+import { ensureCodexSharedSqliteDir, materializeSharedHistory } from './shared-history';
 
 /** Fresh sandbox: a pool root + two fake account config dirs. */
 function sandbox() {
@@ -110,17 +110,33 @@ describe('materializeSharedHistory', () => {
     expect(existsSync(path.join(a, 'projects/-p/s.jsonl'))).toBe(true);
   });
 
-  test('codex kind pools its own entries (sessions, history.jsonl)', () => {
+  test('codex kind pools active + archived rollouts and history.jsonl', () => {
     const { poolRoot, root } = sandbox();
     const c = path.join(root, '.codex-a');
     write(c, 'sessions/2026/r1.jsonl', 'rollout\n');
+    write(c, 'archived_sessions/r0.jsonl', 'archived\n');
     write(c, 'history.jsonl', '{"session_id":"s","ts":1,"text":"hi"}\n');
 
     materializeSharedHistory('codex', c, poolRoot);
 
     const pool = path.join(poolRoot, 'codex');
     expect(readlinkSync(path.join(c, 'sessions'))).toBe(path.join(pool, 'sessions'));
+    expect(readlinkSync(path.join(c, 'archived_sessions'))).toBe(path.join(pool, 'archived_sessions'));
     expect(existsSync(path.join(pool, 'sessions/2026/r1.jsonl'))).toBe(true);
+    expect(readFileSync(path.join(pool, 'archived_sessions/r0.jsonl'), 'utf8')).toBe('archived\n');
     expect(readFileSync(path.join(pool, 'history.jsonl'), 'utf8')).toContain('"hi"');
+  });
+
+  test('fresh shared SQLite directory is idempotent and legacy per-home DBs stay untouched', () => {
+    const { poolRoot, root } = sandbox();
+    const legacy = write(path.join(root, '.codex-a'), 'sqlite/state_5.sqlite', 'legacy-db');
+
+    const first = ensureCodexSharedSqliteDir(poolRoot);
+    const second = ensureCodexSharedSqliteDir(poolRoot);
+
+    expect(first).toBe(path.join(poolRoot, 'codex', 'sqlite'));
+    expect(second).toBe(first);
+    expect(existsSync(first)).toBe(true);
+    expect(readFileSync(legacy, 'utf8')).toBe('legacy-db');
   });
 });

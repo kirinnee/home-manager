@@ -103,7 +103,10 @@ export const KIND_SPECS: Record<Kind, KindSpec> = {
       { field: 'hooksDir', dest: ['hooks'], type: 'dir', mode: 'link' },
       { field: 'skills', dest: ['skills'], type: 'dir', mode: 'link' },
     ],
-    // Rollout files + prompt history. NOT shared: auth.json, config.toml, sqlite state.
+    // Rollout files + prompt history. Auth/config stay per-home. When Codex
+    // sharing is enabled, wrappers separately point SQLite-backed runtime state
+    // (threads, goals, memories, logs, remote-control metadata, and possibly
+    // paginated history/items) at one same-human pool; see core/generate.ts.
     sharedState: [
       { name: 'sessions', type: 'dir' }, // rollout transcripts (what `codex resume` reads)
       { name: 'archived_sessions', type: 'dir' },
