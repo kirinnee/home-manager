@@ -17,7 +17,14 @@
 // a second, drifting copy.
 
 import { describe, expect, test } from 'bun:test';
-import { ANALYTICS_ENTRY, SETTINGS_ENTRY, UPDATE_CHIP, WARDEN_ENTRY } from './AppBar';
+import {
+  ANALYTICS_ENTRY,
+  APP_BAR_DESTINATIONS,
+  SETTINGS_ENTRY,
+  UPDATE_CHIP,
+  WARDEN_ENTRY,
+  mobileDestinationMenuOpen,
+} from './AppBar';
 import type { UpdateReason } from '../hooks/useServiceWorkerUpdate';
 
 /** Words that assert a REASON the app cannot know at chip time. A title
@@ -69,17 +76,30 @@ describe('the two chips stay two different statements', () => {
   });
 });
 
-describe('Settings entry point', () => {
-  test('is a labelled desktop app-bar link to the static route', async () => {
+describe('app-bar destinations', () => {
+  test('keeps the destination labels, routes, and icons in one render source', async () => {
     expect(SETTINGS_ENTRY).toEqual({
       label: 'Settings',
       title: 'Open appearance and density settings',
     });
+    expect(
+      APP_BAR_DESTINATIONS.map(destination => ({
+        id: destination.id,
+        label: destination.label,
+        route: destination.route,
+      })),
+    ).toEqual([
+      { id: 'analytics', label: 'Analytics', route: '/analytics' },
+      { id: 'warden', label: 'Warden', route: '/warden' },
+      { id: 'learning', label: 'Learning', route: '/learning' },
+      { id: 'settings', label: 'Settings', route: '/settings' },
+    ]);
+    for (const destination of APP_BAR_DESTINATIONS) expect(destination.Icon).toBeDefined();
+
     const source = await Bun.file(new URL('./AppBar.tsx', import.meta.url).pathname).text();
-    expect(source).toContain('to="/settings"');
-    expect(source).toContain("settingsActive ? 'page'");
-    expect(source).toContain('aria-label="Destinations"');
-    expect(source).toContain('min-[1100px]:flex');
+    expect(source).toContain('APP_BAR_DESTINATIONS.map(destination => (');
+    expect(source).toContain('<DestinationLink');
+    expect(source).toContain('grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]');
     expect(source).toContain('{onOpenSidebar && <SidebarDrawerTrigger');
   });
 
@@ -89,23 +109,36 @@ describe('Settings entry point', () => {
       title: 'Open fleet supervision and verdicts',
     });
     const source = await Bun.file(new URL('./AppBar.tsx', import.meta.url).pathname).text();
-    expect(source).toContain('to="/warden"');
-    expect(source).toContain("wardenActive ? 'page'");
+    expect(source).toContain("? 'warden'");
     expect(source).toContain("layout !== 'drawer' && <ThemeToggle");
   });
 
-  test('keeps the separate global analytics tab outside the desktop-only nav', async () => {
+  test('keeps Analytics in the shared destination list', async () => {
     expect(ANALYTICS_ENTRY).toEqual({
       label: 'Analytics',
       title: 'Query all sessions and graph daily usage',
     });
+    expect(APP_BAR_DESTINATIONS[0]).toMatchObject({ id: 'analytics', route: '/analytics' });
+  });
+
+  test('opens, selects, and dismisses the mobile destination modal', async () => {
+    expect(mobileDestinationMenuOpen(false, 'open')).toBe(true);
+    expect(mobileDestinationMenuOpen(true, 'select')).toBe(false);
+    expect(mobileDestinationMenuOpen(true, 'dismiss')).toBe(false);
+
     const source = await Bun.file(new URL('./AppBar.tsx', import.meta.url).pathname).text();
-    expect(source).toContain('to="/analytics"');
-    expect(source).toContain("analyticsActive ? 'page'");
-    const analytics = source.indexOf('to="/analytics"');
-    const desktopOnlyNav = source.indexOf('min-[1100px]:flex');
-    expect(analytics).toBeGreaterThan(-1);
-    expect(analytics).toBeLessThan(desktopOnlyNav);
+    expect(source).toContain("layout === 'drawer'");
+    expect(source).toContain('aria-haspopup="dialog"');
+    expect(source).toContain('<BottomSheet');
+    expect(source).toContain('onSelect={selectMobileDestination}');
+    expect(source).toContain('Dismiss destination picker');
+  });
+
+  test('keeps the centred search control reachable at mobile and desktop widths', async () => {
+    const source = await Bun.file(new URL('./AppBar.tsx', import.meta.url).pathname).text();
+    expect(source).toContain('data-app-bar-search');
+    expect(source).toContain('aria-keyshortcuts={PALETTE_KEYSHORTCUTS}');
+    expect(source).not.toContain('data-app-bar-search\n          className="kt-chrome hidden');
   });
 
   test('does not expose a fleet-wide Tasks destination', async () => {
