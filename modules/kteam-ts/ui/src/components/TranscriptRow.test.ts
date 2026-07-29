@@ -61,17 +61,20 @@ describe('the assistant prose wrap', () => {
     expect(classes(ASSISTANT_LAYOUT.wrap)).toContain('min-w-0');
   });
 
-  test('routes task and code references through the unified side-pane host', async () => {
+  test('routes every session reference through the unified side-pane host', async () => {
     const source = await Bun.file(new URL('./TranscriptRow.tsx', import.meta.url)).text();
     expect(source).toContain("import { useSidePane } from './SidePane';");
     expect(source).toContain('onTaskOpen={sidePane?.openTask}');
     expect(source).toContain('onCodeReferenceOpen={sidePane?.openCodeReference}');
+    expect(source).toContain('onAttentionOpen={sidePane?.openAttention}');
+    expect(source).toContain('onPinOpen={sidePane?.openPin}');
     expect(source).toContain('cwd={sidePane?.cwd}');
+    expect(source).toContain('return <NoticeMessage text={block.label} sessionId={sessionId} />;');
   });
 });
 
 describe('agent-authored transcript prose', () => {
-  test('expanded peer messages share Markdown while ordinary human bubbles stay literal', () => {
+  test('expanded peer messages and ordinary human bubbles share Markdown', () => {
     const base = {
       id: 'peer-markdown',
       kind: 'user' as const,
@@ -98,8 +101,9 @@ describe('agent-authored transcript prose', () => {
     expect(peer).toContain('<strong>Agent result.</strong>');
     expect(peer).toContain('<p>Next line.');
     expect(peer).not.toContain('data-code-reference');
-    expect(human).toContain('**Agent result.**');
-    expect(human).not.toContain('<strong>Agent result.</strong>');
+    expect(human).toContain('<strong>Agent result.</strong>');
+    expect(human).toContain('<p>Next line.');
+    expect(human).not.toContain('data-code-reference');
   });
 });
 

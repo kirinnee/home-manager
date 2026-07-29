@@ -11,6 +11,7 @@ import {
   inferTaskWorkflow,
   taskBoardLaneFromPhase,
   taskDependents,
+  taskPhaseMovesBackward,
   taskPhaseFromStatus,
   taskStatusFromPhase,
   taskWorkflowPath,
@@ -105,17 +106,26 @@ describe('status ↔ phase mapping is a stable round-trip', () => {
 
 describe('the four fixed workflow paths', () => {
   test('each workflow is exactly its canonical phase sequence', () => {
-    expect(taskWorkflowPath('quick')).toEqual(['todo', 'build', 'built', 'live']);
-    expect(taskWorkflowPath('design-first')).toEqual(['todo', 'design', 'build', 'built', 'live']);
-    expect(taskWorkflowPath('research-first')).toEqual(['todo', 'research', 'design', 'build', 'built', 'live']);
+    expect(taskWorkflowPath('quick')).toEqual(['todo', 'build', 'built', 'live', 'done']);
+    expect(taskWorkflowPath('design-first')).toEqual(['todo', 'design', 'build', 'built', 'live', 'done']);
+    expect(taskWorkflowPath('research-first')).toEqual([
+      'todo',
+      'research',
+      'design',
+      'build',
+      'built',
+      'live',
+      'done',
+    ]);
     expect(taskWorkflowPath('investigate')).toEqual(['todo', 'research', 'done']);
   });
 
-  test('built is its own checkpoint, distinct from live, in every build lane', () => {
+  test('built, deployed live, and human-verified done are distinct in every build lane', () => {
     for (const workflow of ['quick', 'design-first', 'research-first'] as TaskWorkflow[]) {
       const path = TASK_WORKFLOW_PATHS[workflow];
       expect(path.indexOf('built')).toBeGreaterThanOrEqual(0);
       expect(path.indexOf('live')).toBe(path.indexOf('built') + 1);
+      expect(path.indexOf('done')).toBe(path.indexOf('live') + 1);
     }
   });
 
@@ -126,33 +136,61 @@ describe('the four fixed workflow paths', () => {
     expect(() => assertTaskPhaseInWorkflow('quick', 'dropped')).not.toThrow();
     expect(() => assertTaskPhaseInWorkflow('quick', 'design')).toThrow(TaskError);
     expect(() => assertTaskPhaseInWorkflow('investigate', 'build')).toThrow('not part of the investigate workflow');
+    expect(() => assertTaskPhaseInWorkflow('investigate', 'build')).toThrow('choose todo, research, done, or dropped');
   });
 });
 
-describe('phase transitions are adjacent-only', () => {
-  test('the one legal step forward is allowed; a skip or a rewind is refused', () => {
+describe('phase transitions move one step forward or explicitly backward', () => {
+  test('the next step forward is allowed, forward skips are actionable, and rewinds are legal', () => {
     const t = task({ workflow: 'quick', phase: 'todo', status: 'todo' });
     expect(() => assertTaskPhaseTransition(t, 'build', false)).not.toThrow();
     // skipping built is a two-step jump
-    expect(() => assertTaskPhaseTransition(t, 'built', false)).toThrow('cannot move todo → built');
-    expect(() => assertTaskPhaseTransition(t, 'live', false)).toThrow('expected build (in_progress on board)');
+    expect(() => assertTaskPhaseTransition(t, 'built', false)).toThrow('cannot skip forward todo → built');
+    expect(() => assertTaskPhaseTransition(t, 'live', false)).toThrow('move it to build (in_progress on board) first');
     // build → built is the next adjacent step and needs no human (not a gate)
     expect(() =>
       assertTaskPhaseTransition(task({ phase: 'build', status: 'in_progress' }), 'built', false),
     ).not.toThrow();
     // built → live is adjacent and deployment is always its own explicit step
     expect(() => assertTaskPhaseTransition(task({ phase: 'built', status: 'built' }), 'live', false)).not.toThrow();
+    // Deferral/un-starting may jump back more than one checkpoint.
+    expect(() => assertTaskPhaseTransition(task({ phase: 'built', status: 'built' }), 'todo', false)).not.toThrow();
+    expect(taskPhaseMovesBackward(task({ phase: 'built', status: 'built' }), 'todo')).toBe(true);
   });
 
-  test('a self-edge, a rewind, and advancing a dropped task are all refused', () => {
+  test('a self-edge and moving a dropped task are refused with a usable alternative', () => {
     expect(() => assertTaskPhaseTransition(task({ phase: 'build', status: 'in_progress' }), 'build', true)).toThrow(
       'already in build',
     );
-    expect(() => assertTaskPhaseTransition(task({ phase: 'built', status: 'built' }), 'build', true)).toThrow(
-      'cannot move built → build',
-    );
     expect(() => assertTaskPhaseTransition(task({ phase: 'dropped', status: 'dropped' }), 'live', true)).toThrow(
-      'was dropped and cannot advance',
+      'create a new task if the work is needed again',
+    );
+  });
+
+  test('every earlier in-workflow target is legal, but only the human may reopen verified done', () => {
+    for (const workflow of ['quick', 'design-first', 'research-first', 'investigate'] as TaskWorkflow[]) {
+      const path = TASK_WORKFLOW_PATHS[workflow];
+      for (let fromIndex = 1; fromIndex < path.length; fromIndex += 1) {
+        for (let toIndex = 0; toIndex < fromIndex; toIndex += 1) {
+          const from = path[fromIndex]!;
+          const to = path[toIndex]!;
+          const current = task({ workflow, phase: from, status: taskStatusFromPhase(from) });
+          expect(() => assertTaskPhaseTransition(current, to, true)).not.toThrow();
+          if (from === 'done') {
+            expect(() => assertTaskPhaseTransition(current, to, false)).toThrow('ask the human to reopen it');
+          } else {
+            expect(() => assertTaskPhaseTransition(current, to, false)).not.toThrow();
+          }
+        }
+      }
+    }
+  });
+
+  test('a refused forward skip explains both the next checkpoint and the backward choices', () => {
+    const building = task({ phase: 'build', status: 'in_progress' });
+    expect(() => assertTaskPhaseTransition(building, 'live', false)).toThrow('move it to built first');
+    expect(() => assertTaskPhaseTransition(building, 'live', false)).toThrow(
+      'To defer or reopen it, move it back to todo with --reason.',
     );
   });
 
@@ -199,6 +237,17 @@ describe('research and design are human approval gates', () => {
     const inResearch = task({ workflow: 'investigate', phase: 'research', status: 'researched' });
     expect(() => assertTaskPhaseTransition(inResearch, 'done', false)).toThrow('until the human approves');
     expect(() => assertTaskPhaseTransition(inResearch, 'done', true)).not.toThrow();
+  });
+
+  test('live is the human verification gate; shipped work may reopen, verified work may not do so silently', () => {
+    const live = task({ workflow: 'quick', phase: 'live', status: 'live' });
+    expect(() => assertTaskPhaseTransition(live, 'done', false)).toThrow('leave it live for human verification');
+    expect(() => assertTaskPhaseTransition(live, 'done', true)).not.toThrow();
+    expect(() => assertTaskPhaseTransition(live, 'build', false)).not.toThrow();
+
+    const verified = task({ workflow: 'quick', phase: 'done', status: 'done' });
+    expect(() => assertTaskPhaseTransition(verified, 'build', false)).toThrow('human-verified done');
+    expect(() => assertTaskPhaseTransition(verified, 'build', true)).not.toThrow();
   });
 });
 

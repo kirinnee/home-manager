@@ -137,4 +137,14 @@ describe('WardenVerdicts', () => {
   test('the legacy dashboard mount stays inert', () => {
     expect(renderToStaticMarkup(<WardenVerdicts />)).toBe('');
   });
+
+  test('the report renderer preserves target-session provenance and optional openers', async () => {
+    const source = await Bun.file(new URL('./WardenVerdicts.tsx', import.meta.url)).text();
+    expect(source).toContain('sessionId: v.targetSession');
+    expect(source).toContain('sessionId={sessionId}');
+    expect(source).toContain('onTaskOpen={onTaskOpen}');
+    expect(source).toContain('onCodeReferenceOpen={onCodeReferenceOpen}');
+    expect(source).toContain('onAttentionOpen={onAttentionOpen}');
+    expect(source).toContain('onPinOpen={onPinOpen}');
+  });
 });

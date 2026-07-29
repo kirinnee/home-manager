@@ -8,6 +8,8 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import { StoreProvider } from './lib/store';
 import { AgentMentionProvider } from './lib/agent-mention-context';
+import { TaskReferenceProvider } from './lib/task-reference-context';
+import { PinReferenceProvider } from './lib/pin-reference-context';
 import './index.css';
 import './highlight.css';
 
@@ -17,7 +19,11 @@ createRoot(root).render(
   <StrictMode>
     <StoreProvider>
       <AgentMentionProvider>
-        <App />
+        <TaskReferenceProvider>
+          <PinReferenceProvider>
+            <App />
+          </PinReferenceProvider>
+        </TaskReferenceProvider>
       </AgentMentionProvider>
     </StoreProvider>
   </StrictMode>,

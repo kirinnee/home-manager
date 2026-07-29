@@ -94,12 +94,13 @@ describe('retention policy', () => {
 
 test('the host exposes the same cwd used by Files and task/pin prose', async () => {
   const source = await Bun.file(new URL('./SidePane.tsx', import.meta.url)).text();
-  expect(source).toContain('surface: state.surface, cwd, open');
   expect(source).toContain('<SessionTasksSurface');
   expect(source).toContain('cwd={cwd}');
   expect(source).toContain('<PinSurface');
   expect(source).toContain('onTaskOpen={onTaskOpen}');
   expect(source).toContain('onCodeReferenceOpen={onCodeReferenceOpen}');
+  expect(source).toContain('onAttentionOpen={onAttentionOpen}');
+  expect(source).toContain('onPinOpen={onPinOpen}');
 });
 
 describe('tool bento', () => {
@@ -159,16 +160,19 @@ describe('desktop pane shell', () => {
 });
 
 describe('workspace', () => {
-  test('publishes task and code-reference openers from the same atomic host', () => {
+  test('publishes every reference opener and cwd from the same atomic host', () => {
     const html = renderToStaticMarkup(
-      <SidePaneWorkspace sessionId="session-a" compact={false}>
+      <SidePaneWorkspace sessionId="session-a" compact={false} cwd="/repo/worktree">
         <HostProbe />
       </SidePaneWorkspace>,
     );
     expect(html).toContain('data-host-probe="ready"');
     expect(capturedHost).not.toBeNull();
+    expect(capturedHost?.cwd).toBe('/repo/worktree');
     expect(typeof capturedHost?.openTask).toBe('function');
     expect(typeof capturedHost?.openCodeReference).toBe('function');
+    expect(typeof capturedHost?.openAttention).toBe('function');
+    expect(typeof capturedHost?.openPin).toBe('function');
   });
 
   test('code-reference delivery stays monotonic and clears only the handled sequence', async () => {
@@ -176,6 +180,15 @@ describe('workspace', () => {
     expect(source).toContain('const codeReferenceSequence = useRef(0);');
     expect(source).toContain('sequence: ++codeReferenceSequence.current');
     expect(source).toContain('requestedReference={requestedCodeReference}');
+    expect(source).toContain('current?.sequence === sequence ? null : current');
+  });
+
+  test('pin delivery is session-scoped, monotonic, and clears only the handled sequence', async () => {
+    const source = await Bun.file(new URL('./SidePane.tsx', import.meta.url)).text();
+    expect(source).toContain('const pinSequence = useRef(0);');
+    expect(source).toContain('reference.sessionId !== sessionId');
+    expect(source).toContain('sequence: ++pinSequence.current');
+    expect(source).toContain('requestedPin={requestedPin}');
     expect(source).toContain('current?.sequence === sequence ? null : current');
   });
 

@@ -38,6 +38,16 @@ const FAILED = entry({
   status: 'failed',
   error: 'Attachment is no longer available — re-add it',
 });
+const PDF = (() => {
+  const file = new File(['%PDF'], 'brief.pdf', { type: 'application/pdf' });
+  Object.defineProperty(file, 'size', { value: 123_456 });
+  return {
+    localId: 'pdf',
+    file,
+    status: 'ready' as const,
+    view: { textExtraction: { method: 'pdfjs' as const, characters: 92, truncated: true } },
+  } as Entry;
+})();
 
 describe('pending attachment chip density', () => {
   test('the thumbnail is the compact 36px box, not the old 48px one', () => {
@@ -85,7 +95,17 @@ describe('pending attachment chip density', () => {
 
   test('the strip itself stays a labelled single-row scroller', () => {
     const html = render([READY, UPLOADING, FAILED]);
-    expect(html).toContain('aria-label="Attached images"');
+    expect(html).toContain('aria-label="Attached files"');
     expect(html).toContain('overflow-x-auto');
+  });
+
+  test('a pending document has no image preview and preserves compact metadata at phone width', () => {
+    const html = render([PDF]);
+    expect(html).toContain('brief.pdf');
+    expect(html).toContain('PDF document');
+    expect(html).toContain('121 KB');
+    expect(html).toContain('text extracted for agent · truncated');
+    expect(html).not.toContain('src="blob:pdf"');
+    expect(html).toContain('min-w-0');
   });
 });

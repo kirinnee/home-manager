@@ -19,6 +19,7 @@ import {
   ATTENTION_SOURCES,
   AttentionError,
   parseAttentionId,
+  taskIdFromReopenedAttentionSourceRef,
   type AttentionId,
   type AttentionActor,
   type AttentionBy,
@@ -156,6 +157,9 @@ export class AttentionService {
     const why = requiredText(input.why, 'why', MAX_ATTENTION_DETAIL_LEN);
     const howToResolve = requiredText(input.howToResolve, 'howToResolve', MAX_ATTENTION_DETAIL_LEN);
     const sourceRef = optionalText(input.sourceRef, 'sourceRef', MAX_ATTENTION_SOURCE_REF_LEN);
+    if (taskIdFromReopenedAttentionSourceRef(sourceRef) !== null && provenance.by !== 'daemon') {
+      throw new AttentionError('forbidden', 'task-reopened source references are reserved for the daemon');
+    }
     const waitingSince =
       provenance.by === 'daemon' && input.waitingSince !== undefined
         ? validIso(input.waitingSince, 'waitingSince')
@@ -347,17 +351,32 @@ function resolveState(
   provenance: Provenance,
   resolutionNote: string | null,
 ): AttentionState {
+  const resolvedAt = now();
   const resolved: ResolvedAttentionItem = {
     ...target,
-    resolvedAt: now(),
+    resolvedAt,
     resolvedBy: provenance.by,
     resolvedBySession: provenance.session,
     resolvedByName: provenance.name,
     resolutionNote,
   };
+  const reopenedTaskId =
+    target.source === 'agent-raised' ? taskIdFromReopenedAttentionSourceRef(target.sourceRef) : null;
+  const previousReopenResolution = reopenedTaskId === null ? undefined : current.reopenResolvedAt?.[reopenedTaskId];
   return {
     ...current,
     items: current.items.filter(item => item.id !== target.id),
     resolved: [resolved, ...current.resolved],
+    ...(reopenedTaskId === null
+      ? {}
+      : {
+          reopenResolvedAt: {
+            ...(current.reopenResolvedAt ?? {}),
+            [reopenedTaskId]:
+              previousReopenResolution !== undefined && Date.parse(previousReopenResolution) > Date.parse(resolvedAt)
+                ? previousReopenResolution
+                : resolvedAt,
+          },
+        }),
   };
 }

@@ -515,7 +515,15 @@ export const TranscriptRow = memo(function TranscriptRow({
   const body = (() => {
     switch (block.kind) {
       case 'user':
-        return <UserMessage text={block.text} ts={block.ts} from={block.from} attachments={block.attachments} />;
+        return (
+          <UserMessage
+            text={block.text}
+            ts={block.ts}
+            from={block.from}
+            attachments={block.attachments}
+            sessionId={sessionId}
+          />
+        );
       case 'assistant':
         return <AssistantMessage text={block.text} ts={block.ts} source={block.source} sessionId={sessionId} />;
       case 'thinking':
@@ -536,11 +544,7 @@ export const TranscriptRow = memo(function TranscriptRow({
       case 'system':
         return <SystemRow info={block.info} ts={block.ts} />;
       case 'notice':
-        return (
-          <div className="kt-chrome mono truncate px-2" title={block.label}>
-            {block.label}
-          </div>
-        );
+        return <NoticeMessage text={block.label} sessionId={sessionId} />;
       case 'ledger':
         return (
           <LedgerMessage
@@ -644,6 +648,22 @@ export const ASSISTANT_LAYOUT = {
     'pointer-events-none absolute right-[32px] top-0.5 hidden w-[50px] text-right mono text-2xs tabular-nums text-faint opacity-0 transition-opacity sm:block group-hover:opacity-100',
 } as const;
 
+function NoticeMessage({ text, sessionId }: { text: string; sessionId?: string }) {
+  const sidePane = useSidePane();
+  return (
+    <Markdown
+      text={text}
+      sessionId={sessionId}
+      cwd={sidePane?.cwd}
+      onTaskOpen={sidePane?.openTask}
+      onCodeReferenceOpen={sidePane?.openCodeReference}
+      onAttentionOpen={sidePane?.openAttention}
+      onPinOpen={sidePane?.openPin}
+      className="kt-chrome mono truncate px-2"
+    />
+  );
+}
+
 function AssistantMessage({ text, ts, sessionId }: { text: string; ts?: string; source: string; sessionId?: string }) {
   const sidePane = useSidePane();
   if (!text.trim()) return null;
@@ -656,6 +676,8 @@ function AssistantMessage({ text, ts, sessionId }: { text: string; ts?: string; 
         cwd={sidePane?.cwd}
         onTaskOpen={sidePane?.openTask}
         onCodeReferenceOpen={sidePane?.openCodeReference}
+        onAttentionOpen={sidePane?.openAttention}
+        onPinOpen={sidePane?.openPin}
       />
     </div>
   );
@@ -690,11 +712,13 @@ function UserMessage({
   ts,
   from,
   attachments = [],
+  sessionId,
 }: {
   text: string;
   ts?: string;
   from?: PeerFrom;
   attachments?: StoredTranscriptImage[];
+  sessionId?: string;
 }) {
   const sidePane = useSidePane();
   const lines = text.split('\n');
@@ -741,10 +765,13 @@ function UserMessage({
         ) : text ? (
           <Markdown
             text={text}
+            sessionId={sessionId}
             // A peer may come from another repository and PeerFrom does not
             // carry authoritative filesystem provenance. Fleet task ids are
             // safe to route; code-shaped text deliberately stays inert.
             onTaskOpen={sidePane?.openTask}
+            onAttentionOpen={sidePane?.openAttention}
+            onPinOpen={sidePane?.openPin}
             className="kt-user-copy min-w-0 max-w-full px-panel pb-1.5 pt-0.5 text-row leading-base break-words text-fg"
           />
         ) : null}
@@ -786,11 +813,19 @@ function UserMessage({
             {preview}
           </button>
         ) : text ? (
-          // Line-height stays comfortable INSIDE prose: readability of the
-          // words outranks density; this pass reclaims chrome, not leading.
-          <div className="kt-user-copy min-w-0 max-w-full px-panel pb-1.5 pt-0.5 text-row leading-base whitespace-pre-wrap break-words text-[color:var(--bubble-fg)]">
-            {text}
-          </div>
+          // The human's message uses the exact same Markdown/reference pipeline
+          // as the agent's. The bubble remains presentation; it is no longer a
+          // second raw-text renderer that turns valid references dead.
+          <Markdown
+            text={text}
+            sessionId={sessionId}
+            cwd={sidePane?.cwd}
+            onTaskOpen={sidePane?.openTask}
+            onCodeReferenceOpen={sidePane?.openCodeReference}
+            onAttentionOpen={sidePane?.openAttention}
+            onPinOpen={sidePane?.openPin}
+            className="kt-user-copy min-w-0 max-w-full px-panel pb-1.5 pt-0.5 text-row leading-base break-words text-[color:var(--bubble-fg)]"
+          />
         ) : null}
         <TranscriptImageGallery images={attachments} className="px-panel pb-2 pt-1" />
       </div>

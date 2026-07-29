@@ -1,8 +1,8 @@
 // One composer trigger engine: `/` does something (commands and skills), while
-// `@` refers to something (agents, tasks, attention, and files). Trigger
-// recognition, query tracking, fuzzy ranking, keyboard navigation, and token
-// replacement live here. Providers deliberately do less: they receive the
-// active query and return candidate data.
+// a LEADING RUN of `@` selects one reference family. Trigger recognition,
+// query tracking, fuzzy ranking, keyboard navigation, and token replacement
+// live here. Providers deliberately do less: they receive the active query and
+// return candidate data.
 //
 // `!` shell mode is NOT here and is not coming back without a decision. It
 // needs a new `tmux.inject()` send path, which is the mechanism behind this
@@ -32,7 +32,33 @@ import {
 import { fieldScore } from '../lib/fuzzy';
 
 export type ComposerTrigger = '/' | '@';
-export type ComposerAutocompleteKind = 'command' | 'skill' | 'agent' | 'file' | 'directory' | 'task' | 'attention';
+export type ComposerReferenceTier = 1 | 2 | 3 | 4 | 5;
+export type ComposerAutocompleteKind =
+  | 'command'
+  | 'skill'
+  | 'agent'
+  | 'file'
+  | 'directory'
+  | 'task'
+  | 'attention'
+  | 'pin';
+
+export interface ComposerReferenceTierLegendItem {
+  tier: ComposerReferenceTier;
+  trigger: string;
+  label: string;
+}
+
+/** Frequency order, not alphabetical order. Files and source locations are
+ * typed most; people are next; durable fleet records follow. Kept as data so
+ * provider routing, UI teaching, and tests cannot drift independently. */
+export const COMPOSER_REFERENCE_TIERS: readonly ComposerReferenceTierLegendItem[] = [
+  { tier: 1, trigger: '@', label: 'Files' },
+  { tier: 2, trigger: '@@', label: 'Agents' },
+  { tier: 3, trigger: '@@@', label: 'Tasks' },
+  { tier: 4, trigger: '@@@@', label: 'Attention' },
+  { tier: 5, trigger: '@@@@@', label: 'Pins' },
+];
 
 export interface ComposerSelection {
   start: number;
@@ -41,6 +67,13 @@ export interface ComposerSelection {
 
 export interface ComposerTriggerMatch {
   trigger: ComposerTrigger;
+  /** Exact sigil bytes at the start of this token (`/`, `@`, `@@`, ...).
+   * Optional for manually constructed host/test matches; detector output always
+   * supplies it and consumers fall back to the legacy single trigger. */
+  triggerText?: string;
+  /** Present for @ runs. Counts beyond the known five stay detectable so the
+   * picker can teach the valid tiers instead of silently breaking the token. */
+  referenceTier?: number;
   /** Text after the trigger and before the caret. */
   query: string;
   /** Inclusive trigger offset. */
@@ -93,6 +126,8 @@ export interface ComposerAutocompleteProvider {
   id: string;
   trigger: ComposerTrigger;
   label: string;
+  /** Always-visible teaching rail for repetition-selected reference families. */
+  readonly legend?: readonly ComposerReferenceTierLegendItem[];
   /** Identity of an already-live backing snapshot. Store-backed providers use
    * this to refresh an open list when the store changes, without recreating
    * network-backed providers and throwing away their caches. */
@@ -182,6 +217,7 @@ function slashTrigger(value: string, caret: number): ComposerTriggerMatch | null
   if (TOKEN_SPACE.test(query)) return null;
   return {
     trigger: '/',
+    triggerText: '/',
     query,
     start: first,
     end: tokenEnd(value, caret),
@@ -204,12 +240,35 @@ const WORD_BEFORE_MENTION = /[\p{L}\p{N}_\-.\\/@]/u;
 
 function atTrigger(value: string, caret: number): ComposerTriggerMatch | null {
   const before = value.slice(0, caret);
-  const start = before.lastIndexOf('@');
-  if (start < 0) return null;
-  if (start > 0 && WORD_BEFORE_MENTION.test(value[start - 1]!)) return null;
-  const query = value.slice(start + 1, caret);
-  if (TOKEN_SPACE.test(query)) return null;
-  return { trigger: '@', query, start, end: tokenEnd(value, caret), caret };
+  let candidate = before.lastIndexOf('@');
+  while (candidate >= 0) {
+    // `lastIndexOf` lands on the FINAL sigil in `@@@`; walk to the start of the
+    // contiguous run so repetition is the tier rather than a word-boundary
+    // failure on the second character.
+    let start = candidate;
+    while (start > 0 && value[start - 1] === '@') start -= 1;
+    let runEnd = start;
+    while (runEnd < caret && value[runEnd] === '@') runEnd += 1;
+
+    if (start === 0 || !WORD_BEFORE_MENTION.test(value[start - 1]!)) {
+      const query = value.slice(runEnd, caret);
+      if (!TOKEN_SPACE.test(query)) {
+        const triggerText = value.slice(start, runEnd);
+        return {
+          trigger: '@',
+          triggerText,
+          referenceTier: triggerText.length,
+          query,
+          start,
+          end: tokenEnd(value, caret),
+          caret,
+        };
+      }
+    }
+
+    candidate = before.lastIndexOf('@', start - 1);
+  }
+  return null;
 }
 
 /** Detect the trigger at a collapsed textarea caret.
@@ -347,7 +406,11 @@ export function useComposerAutocomplete({
   // option in a hidden sibling pane.
   const resolvedListboxId = listboxId ?? `composer-autocomplete-${generatedId.replace(/:/g, '')}`;
   const [selection, setSelection] = useState<ComposerSelection>({ start: value.length, end: value.length });
-  const [dismissed, setDismissed] = useState<{ trigger: ComposerTrigger; start: number } | null>(null);
+  const [dismissed, setDismissed] = useState<{
+    trigger: ComposerTrigger;
+    triggerText: string;
+    start: number;
+  } | null>(null);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [load, setLoad] = useState<LoadState>(IDLE_LOAD);
   // Pinned to the EXACT string the caret was computed against. A bare selection
@@ -358,9 +421,15 @@ export function useComposerAutocomplete({
 
   const match = useMemo(() => detectComposerTrigger(value, selection), [selection, value]);
   const provider = match ? (providers.find(item => item.trigger === match.trigger) ?? null) : null;
-  const tokenDismissed = !!match && dismissed?.trigger === match.trigger && dismissed.start === match.start;
+  const matchTriggerText = match?.triggerText ?? match?.trigger;
+  const tokenDismissed =
+    !!match &&
+    dismissed?.trigger === match.trigger &&
+    dismissed.triggerText === matchTriggerText &&
+    dismissed.start === match.start;
   const open = !!match && !!provider && !disabled && !tokenDismissed && (provider.shouldOpen?.(match) ?? true);
-  const requestKey = open && match && provider ? `${provider.id}:${match.start}:${match.query}` : '';
+  const requestKey =
+    open && match && provider ? `${provider.id}:${match.start}:${matchTriggerText}:${match.query}` : '';
 
   useEffect(() => {
     if (match || !dismissed) return;
@@ -451,8 +520,10 @@ export function useComposerAutocomplete({
   );
 
   const close = useCallback(() => {
-    if (match) setDismissed({ trigger: match.trigger, start: match.start });
-  }, [match]);
+    if (match && matchTriggerText) {
+      setDismissed({ trigger: match.trigger, triggerText: matchTriggerText, start: match.start });
+    }
+  }, [match, matchTriggerText]);
 
   // Dismiss outside only at CLICK, after a pointer drag has had time to become
   // a real document Selection. Closing on textarea blur/pointerdown recreates

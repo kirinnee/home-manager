@@ -307,6 +307,175 @@ describe('v2 workflow, ask, DAG, and delegated completion', () => {
     expect(done).toMatchObject({ phase: 'done', status: 'done' });
   });
 
+  test('pre-ship deferral moves backward quietly while retaining its reason and actor-stamped history', async () => {
+    await created({ workflow: 'quick', phase: 'build' });
+    const events: KTeamEvent[] = [];
+    const unsubscribe = service.subscribe(event => events.push(event));
+    const deferred = await service.taskAct('F1', {
+      action: 'phase',
+      phase: 'todo',
+      reason: 'Park performance work until the feature backlog clears.',
+      actor: 'ms-lead',
+      actorName: 'zelda',
+    });
+    unsubscribe();
+
+    expect(deferred).toMatchObject({ phase: 'todo', status: 'todo' });
+    expect(deferred.statusReason).toBe('Park performance work until the feature backlog clears.');
+    expect(events.map(event => event.type)).toEqual(['tasks.updated']);
+    expect((await service.taskDetail('F1'))?.activity.at(-1)).toMatchObject({
+      actor: 'ms-lead',
+      actorName: 'zelda',
+      type: 'status',
+      data: {
+        phaseFrom: 'build',
+        phaseTo: 'todo',
+        reason: 'Park performance work until the feature backlog clears.',
+        backward: true,
+      },
+    });
+    expect((await service.taskDetail('F1'))?.activity.at(-1)?.data).not.toHaveProperty('reopened');
+  });
+
+  test('reopen atomically logs the verbatim ask, rewinds shipped work, and emits one loud event', async () => {
+    await created({ workflow: 'quick', phase: 'live' });
+    const events: KTeamEvent[] = [];
+    const unsubscribe = service.subscribe(event => events.push(event));
+    const reopened = await service.taskAct('F1', {
+      action: 'reopen',
+      reason: 'The deployed browser still returns 404.',
+      ask: 'The browser you shipped still returns 404; fix it in this task.',
+      source: 'kteam://messages/ms-lead/9',
+      actor: 'ms-lead',
+      actorName: 'zelda',
+    });
+    unsubscribe();
+
+    expect(reopened).toMatchObject({
+      phase: 'build',
+      status: 'in_progress',
+      statusReason: 'The deployed browser still returns 404.',
+    });
+    expect(reopened.clarifications.at(-1)).toMatchObject({
+      text: 'The browser you shipped still returns 404; fix it in this task.',
+      source: 'kteam://messages/ms-lead/9',
+      by: 'ms-lead',
+      byName: 'zelda',
+    });
+    const detail = await service.taskDetail('F1');
+    expect(detail?.activity.slice(-2)).toMatchObject([
+      {
+        seq: 2,
+        actor: 'ms-lead',
+        type: 'clarification',
+        data: {
+          text: 'The browser you shipped still returns 404; fix it in this task.',
+          source: 'kteam://messages/ms-lead/9',
+        },
+      },
+      {
+        seq: 3,
+        actor: 'ms-lead',
+        type: 'status',
+        data: {
+          phaseFrom: 'live',
+          phaseTo: 'build',
+          reason: 'The deployed browser still returns 404.',
+          backward: true,
+          reopened: true,
+        },
+      },
+    ]);
+    expect(events.map(event => event.type)).toEqual(['task.reopened', 'tasks.updated']);
+    expect(events[0]).toMatchObject({
+      sessionId: 'ms-lead',
+      source: 'peer:ms-lead',
+      data: {
+        id: 'F1',
+        from: 'live',
+        to: 'build',
+        reason: 'The deployed browser still returns 404.',
+        actorName: 'zelda',
+      },
+    });
+    expect(await service.sessionTaskActivityBaselines('ms-lead')).toMatchObject({
+      parseErrors: 0,
+      tasks: [
+        {
+          id: 'F1',
+          workflow: 'quick',
+          activityParseErrors: 0,
+          activity: [
+            expect.objectContaining({ type: 'created' }),
+            expect.objectContaining({ type: 'clarification' }),
+            expect.objectContaining({ type: 'status', data: expect.objectContaining({ reopened: true }) }),
+          ],
+        },
+      ],
+    });
+  });
+
+  test('an invalid reopen writes neither the clarification nor the phase change', async () => {
+    await created({ workflow: 'quick', phase: 'todo' });
+    await expect(
+      service.taskAct('F1', {
+        action: 'reopen',
+        reason: 'This is not shipped.',
+        ask: 'Try to reopen it anyway.',
+        source: 'kteam://messages/ms-lead/10',
+        actor: 'ms-lead',
+      }),
+    ).rejects.toThrow('only from built, live, or done');
+    const detail = await service.taskDetail('F1');
+    expect(detail?.task).toMatchObject({ phase: 'todo', clarifications: [] });
+    expect(detail?.activity).toHaveLength(1);
+  });
+
+  test('only the human verifies live work or reopens human-verified done', async () => {
+    await created({ workflow: 'quick', phase: 'live' });
+    await expect(
+      service.taskAct('F1', {
+        action: 'phase',
+        phase: 'done',
+        reason: 'Looks good to the agent.',
+        actor: 'ms-lead',
+      }),
+    ).rejects.toMatchObject({ code: 'approval-required' });
+    const verified = await service.taskAct('F1', {
+      action: 'phase',
+      phase: 'done',
+      reason: 'The human verified the deployed behavior.',
+      actor: 'user',
+    });
+    expect(verified).toMatchObject({ phase: 'done', status: 'done', statusReason: null });
+    expect((await service.taskDetail('F1'))?.activity.at(-1)?.data).toMatchObject({
+      phaseFrom: 'live',
+      phaseTo: 'done',
+      approvedByHuman: true,
+      verifiedByHuman: true,
+    });
+
+    await expect(
+      service.taskAct('F1', {
+        action: 'reopen',
+        reason: 'An agent disagrees with human verification.',
+        ask: 'Reopen it without the human.',
+        source: 'kteam://messages/ms-lead/11',
+        actor: 'ms-lead',
+      }),
+    ).rejects.toMatchObject({ code: 'approval-required' });
+    expect((await service.taskDetail('F1'))?.task.clarifications).toHaveLength(0);
+
+    const reopened = await service.taskAct('F1', {
+      action: 'reopen',
+      reason: 'The human found a regression after verification.',
+      ask: 'The verified behavior regressed; repair it.',
+      source: 'kteam://messages/user/12',
+      actor: 'user',
+    });
+    expect(reopened).toMatchObject({ phase: 'build', status: 'in_progress' });
+  });
+
   test('dependencies block visibly, cycles are refused, and dependents prevent dropping', async () => {
     await created({ title: 'Foundation' });
     await created({ title: 'Consumer', dependsOn: ['#f1'] });
@@ -612,19 +781,22 @@ describe('concurrent actions on one task cannot lose an update', () => {
   });
 
   test('two status writes both appear in history and the LAST one is declared', async () => {
-    await created({ status: 'in_progress' });
+    // From live, both candidate orders are legal: live → built → build and
+    // live → build → built. That keeps this a real concurrency/serialization
+    // test instead of depending on which adjacent-forward request wins first.
+    await created({ status: 'live' });
     await Promise.all([
       service.taskAct('F1', {
         action: 'status',
         status: 'built',
-        reason: 'The build is complete.',
+        reason: 'Return deployment to its built checkpoint.',
         actor: 'ms-lead',
         actorName: 'zelda',
       }),
       service.taskAct('F1', {
         action: 'status',
-        status: 'live',
-        reason: 'The built artifact was deployed.',
+        status: 'in_progress',
+        reason: 'Resume the implementation work.',
         actor: 'ms-lead',
         actorName: 'zelda',
       }),

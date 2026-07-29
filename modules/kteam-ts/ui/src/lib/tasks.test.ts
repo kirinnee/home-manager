@@ -178,6 +178,23 @@ describe('task-v2 pure projections', () => {
         time: '2026-07-21T00:00:00.000Z',
         actor: 'agent',
         actorName: null,
+        type: 'status',
+        data: {
+          phaseFrom: 'live',
+          phaseTo: 'build',
+          reason: 'broken after deploy',
+          backward: true,
+          reopened: true,
+        },
+      }),
+    ).toBe('Reopened · live → build: broken after deploy');
+    expect(
+      taskActivityText({
+        v: 2,
+        seq: 3,
+        time: '2026-07-21T00:00:00.000Z',
+        actor: 'agent',
+        actorName: null,
         type: 'session',
         data: { event: 'completion-claim', session: 'ms-a', turn: 4, phase: 'build' },
       }),

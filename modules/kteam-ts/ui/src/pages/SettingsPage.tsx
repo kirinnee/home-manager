@@ -4,6 +4,7 @@ import { ThemeSettings } from '../components/ThemeToggle';
 import { DictationSettings } from '../components/DictationSettings';
 import { ChatWidthControl } from '../components/ChatWidthControl';
 import { NotificationSettings } from '../components/NotificationSettings';
+import { MarkdownComposerSettings } from '../components/MarkdownComposerSettings';
 import { BottomSheet } from '../components/SessionDetails';
 import { DENSITY_OPTIONS, useDensity } from '../hooks/useDensity';
 import { useInputModality } from '../hooks/useInputModality';
@@ -176,6 +177,8 @@ export function SettingsContent({ target = null }: { target?: SettingId | null }
         );
       case 'chat-width':
         return <ChatWidthControl value={controls.chatWidth} onChange={chatWidth => setControls({ chatWidth })} />;
+      case 'composer-markdown':
+        return <MarkdownComposerSettings />;
       case 'theme':
         return <ThemeSettings theme={theme} />;
       case 'dictation':

@@ -58,6 +58,7 @@ export const TASK_CLI_USAGE = `kteam task <command>
   show   <id> [--after <seq>] [--md]
   status <id> <${TASK_STATUSES.join('|')}> [--reason <why>] [--note <text>]
   phase  <id> <${TASK_PHASES.join('|')}> --reason <why>
+  reopen <id> --reason <why> --ask <verbatim-new-ask> --source <message-link>
   clarify <id> <verbatim-text> --source <message-link>
   depend <id> <dependency-id> [--remove]
   file   <id> <path> [--remove] [--reason <why>]
@@ -71,7 +72,8 @@ export const TASK_CLI_USAGE = `kteam task <command>
                          KTEAM_SESSION_ID (an agent may only write its own)
   list --all             fleet-wide aggregate READ
 
-Every status/phase action REQUIRES --reason; creating blocked or dropped does too.
+Every status/phase/reopen action REQUIRES --reason; creating blocked or dropped does too.
+Reopen also requires the new human ask and its source so the move and its context land atomically.
 Research, design, and build remain audit phases but share the in_progress board lane.
 File claims are ADVISORY (never a lock); --reason on file is optional.`;
 
@@ -234,6 +236,23 @@ export function parseTaskCli(argv: readonly string[]): TaskCliCommand {
       const reason = one(flags, 'reason');
       if (reason === undefined || reason.trim() === '') return invalid('phase requires --reason');
       return { command: 'act', id, body: { action: 'phase', phase: phase as TaskPhase, reason }, ...scoped };
+    }
+    case 'reopen': {
+      const id = requireId(positional[1]);
+      const reason = one(flags, 'reason');
+      const ask = one(flags, 'ask');
+      const source = one(flags, 'source');
+      if (
+        reason === undefined ||
+        reason.trim() === '' ||
+        ask === undefined ||
+        ask.trim() === '' ||
+        source === undefined ||
+        source.trim() === ''
+      ) {
+        return invalid('reopen requires --reason, --ask with the verbatim new human ask, and --source');
+      }
+      return { command: 'act', id, body: { action: 'reopen', reason, ask, source }, ...scoped };
     }
     case 'clarify': {
       const id = requireId(positional[1]);

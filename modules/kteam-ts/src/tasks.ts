@@ -55,6 +55,7 @@ import {
   completionTarget,
   dependencySatisfied,
   inferTaskWorkflow,
+  taskPhaseMovesBackward,
   taskPhaseFromStatus,
   taskStatusFromPhase,
   withTaskBlocking,
@@ -78,6 +79,7 @@ import {
   type TaskLinks,
   type TaskPhase,
   type TaskView,
+  type TaskWorkflow,
 } from './tasks-types';
 
 export * from './tasks-types';
@@ -139,6 +141,14 @@ interface Provenance {
   actor: string;
   actorName: string | null;
   session: string | null;
+}
+
+interface ShippedReopen {
+  id: string;
+  title: string;
+  from: 'live' | 'done';
+  to: TaskPhase;
+  reason: string;
 }
 
 export class TaskService {
@@ -222,6 +232,33 @@ export class TaskService {
       task: { ...view, sessionId },
       activity,
       ...(activityParseErrors > 0 ? { activityParseErrors } : {}),
+    };
+  }
+
+  /** One-file startup baseline for durable source adapters. This deliberately
+   * returns stored activity without liveness/DAG annotation: Attention only
+   * needs the append-only reopen evidence, and reading task detail once per row
+   * would reread the same session file N times at daemon boot. */
+  async sessionTaskActivityBaselines(sessionId: string): Promise<{
+    tasks: Array<{
+      id: string;
+      workflow: TaskWorkflow;
+      activity: TaskActivity[];
+      activityParseErrors: number;
+    }>;
+    parseErrors: number;
+  }> {
+    await this.initialize();
+    this.assertSessionId(sessionId);
+    const read = await this.store.read(sessionId);
+    return {
+      tasks: read.file.tasks.map(entry => ({
+        id: entry.task.id,
+        workflow: entry.task.workflow,
+        activity: [...entry.activity],
+        activityParseErrors: read.activityParseErrors.get(entry.task.id) ?? 0,
+      })),
+      parseErrors: read.parseErrors,
     };
   }
 
@@ -432,6 +469,7 @@ export class TaskService {
     const outcome = await this.graphQueue.run('__task_graph__', async () => {
       const allTasks = await this.graphTasks();
       let satisfactionChanged = false;
+      let shippedReopen: ShippedReopen | null = null;
       const write = await this.store.transact(sessionId, id, current => {
         const at = now();
         let next: Task = {
@@ -441,8 +479,27 @@ export class TaskService {
           files: [...current.task.files],
           clarifications: current.task.clarifications.map(item => ({ ...item })),
         };
+        const activityBefore: Array<{ type: TaskActivity['type']; data: Record<string, unknown> }> = [];
         let activityType: TaskActivity['type'] = 'note';
         let data: Record<string, unknown> = {};
+
+        const appendClarification = (text: unknown, source: unknown): Record<string, unknown> => {
+          if (next.clarifications.length >= MAX_TASK_CLARIFICATIONS) {
+            throw new TaskError(
+              'too-long',
+              `${current.task.id} already has ${next.clarifications.length} clarifications; the maximum is ${MAX_TASK_CLARIFICATIONS}`,
+            );
+          }
+          const clarification = validateTaskMessage({ text, source }, 'clarification');
+          next = {
+            ...next,
+            clarifications: [
+              ...next.clarifications,
+              { ...clarification, at, by: provenance.actor, byName: provenance.actorName },
+            ],
+          };
+          return { text: clarification.text, source: clarification.source };
+        };
 
         const movePhase = (to: TaskPhase, rawReason: unknown, note?: string): void => {
           const reasonText = trimOrNull(rawReason);
@@ -455,13 +512,15 @@ export class TaskService {
           if (!clearingManualBlock) {
             assertTaskPhaseTransition(current.task, to, provenance.session === null);
           }
+          const backward = !clearingManualBlock && taskPhaseMovesBackward(current.task, to);
+          const reopeningShipped = backward && (current.task.phase === 'live' || current.task.phase === 'done');
           if (to === 'dropped') assertTaskCanDrop(allTasks, current.task.id);
           const status = taskStatusFromPhase(to);
           next = {
             ...next,
             phase: to,
             status,
-            statusReason: to === 'dropped' ? reason : null,
+            statusReason: to === 'dropped' || backward ? reason : null,
           };
           activityType = 'status';
           data = {
@@ -471,10 +530,26 @@ export class TaskService {
             phaseTo: to,
             reason,
             ...(transitionNote !== null ? { note: transitionNote } : {}),
-            ...((current.task.phase === 'research' || current.task.phase === 'design') && provenance.session === null
+            ...(backward ? { backward: true } : {}),
+            ...(reopeningShipped ? { reopened: true } : {}),
+            ...(!backward &&
+            (current.task.phase === 'research' || current.task.phase === 'design' || current.task.phase === 'live') &&
+            provenance.session === null
               ? { approvedByHuman: true }
               : {}),
+            ...(current.task.phase === 'live' && to === 'done' && provenance.session === null
+              ? { verifiedByHuman: true }
+              : {}),
           };
+          if (backward && (current.task.phase === 'live' || current.task.phase === 'done')) {
+            shippedReopen = {
+              id: current.task.id,
+              title: current.task.title,
+              from: current.task.phase,
+              to,
+              reason,
+            };
+          }
         };
 
         switch (input.action) {
@@ -502,6 +577,20 @@ export class TaskService {
             movePhase(validateTaskPhase(input.phase), input.reason);
             break;
           }
+          case 'reopen': {
+            if (current.task.phase !== 'built' && current.task.phase !== 'live' && current.task.phase !== 'done') {
+              throw new TaskError(
+                'transition',
+                `${current.task.id} can be reopened only from built, live, or done; use task phase with --reason for other moves`,
+              );
+            }
+            activityBefore.push({
+              type: 'clarification',
+              data: appendClarification(input.ask, input.source),
+            });
+            movePhase('build', input.reason);
+            break;
+          }
           case 'note':
           case 'feedback': {
             activityType = input.action;
@@ -509,22 +598,8 @@ export class TaskService {
             break;
           }
           case 'clarify': {
-            if (next.clarifications.length >= MAX_TASK_CLARIFICATIONS) {
-              throw new TaskError(
-                'too-long',
-                `${current.task.id} already has ${next.clarifications.length} clarifications; the maximum is ${MAX_TASK_CLARIFICATIONS}`,
-              );
-            }
-            const clarification = validateTaskMessage({ text: input.text, source: input.source }, 'clarification');
-            next = {
-              ...next,
-              clarifications: [
-                ...next.clarifications,
-                { ...clarification, at, by: provenance.actor, byName: provenance.actorName },
-              ],
-            };
             activityType = 'clarification';
-            data = { text: clarification.text, source: clarification.source };
+            data = appendClarification(input.text, input.source);
             break;
           }
           case 'dependency': {
@@ -608,20 +683,22 @@ export class TaskService {
         }
 
         const highest = current.activity.reduce((value, item) => Math.max(value, item.seq), 0);
-        const activity: TaskActivity = {
-          v: TASK_SCHEMA_VERSION,
-          seq: highest + 1,
-          time: at,
-          actor: provenance.actor,
-          actorName: provenance.actorName,
-          type: activityType,
-          data,
-        };
+        const activities: TaskActivity[] = [...activityBefore, { type: activityType, data }].map(
+          (inputActivity, index) => ({
+            v: TASK_SCHEMA_VERSION,
+            seq: highest + index + 1,
+            time: at,
+            actor: provenance.actor,
+            actorName: provenance.actorName,
+            type: inputActivity.type,
+            data: inputActivity.data,
+          }),
+        );
         satisfactionChanged = dependencySatisfied(current.task) !== dependencySatisfied(next);
-        return { task: { ...next, updatedAt: at }, activity: [...current.activity, activity] };
+        return { task: { ...next, updatedAt: at }, activity: [...current.activity, ...activities] };
       });
       const graph = replaceGraphTask(allTasks, write.value.task);
-      return { write, graph, satisfactionChanged };
+      return { write, graph, satisfactionChanged, shippedReopen };
     });
     const view = await this.view(outcome.write.value, sessionId, outcome.graph);
     const emitSessions = new Set([sessionId]);
@@ -630,7 +707,9 @@ export class TaskService {
         emitSessions.add(dependentSession);
       }
     }
-    for (const targetSession of emitSessions) await this.emit(targetSession, provenance);
+    for (const targetSession of emitSessions) {
+      await this.emit(targetSession, provenance, targetSession === sessionId ? outcome.shippedReopen : null);
+    }
     return view;
   }
 
@@ -908,8 +987,27 @@ export class TaskService {
     );
   }
 
-  private async emit(sessionId: string, provenance: Provenance): Promise<void> {
+  private async emit(
+    sessionId: string,
+    provenance: Provenance,
+    shippedReopen: ShippedReopen | null = null,
+  ): Promise<void> {
     if (this.listeners.size === 0) return;
+    if (shippedReopen !== null) {
+      this.notify({
+        sequence: 0,
+        time: now(),
+        sessionId,
+        turn: 0,
+        type: 'task.reopened',
+        source: provenance.session ? `peer:${provenance.session}` : 'client',
+        data: {
+          ...shippedReopen,
+          actor: provenance.actor,
+          actorName: provenance.actorName,
+        },
+      });
+    }
     const snapshot = await this.sessionTaskList(sessionId);
     const event: KTeamEvent<SessionTaskListResponse> = {
       sequence: 0,
@@ -920,6 +1018,10 @@ export class TaskService {
       source: provenance.session ? `peer:${provenance.session}` : 'client',
       data: snapshot,
     };
+    this.notify(event);
+  }
+
+  private notify(event: KTeamEvent): void {
     for (const listener of this.listeners) {
       try {
         listener(event);

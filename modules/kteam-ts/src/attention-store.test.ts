@@ -17,6 +17,7 @@ import {
   AttentionError,
   type AttentionId,
   type AttentionItem,
+  type ResolvedAttentionItem,
 } from './attention-types';
 
 let home: string;
@@ -116,6 +117,35 @@ describe('parseAttentionFile', () => {
       SID,
     );
     expect(parsed.parseErrorIds).toContain('<nextId>');
+  });
+
+  test('migrates a reopen resolution into an additive watermark that survives audit pruning', () => {
+    const resolved: ResolvedAttentionItem = {
+      ...item({ source: 'agent-raised', sourceRef: 'task-reopened:F31' }),
+      resolvedAt: '2026-07-28T04:00:00.000Z',
+      resolvedBy: 'human',
+      resolvedBySession: null,
+      resolvedByName: null,
+      resolutionNote: 'Reviewed.',
+    };
+    const parsed = parseAttentionFile(
+      JSON.stringify({
+        v: 1,
+        sessionId: SID,
+        nextId: 2,
+        items: [],
+        resolved: [resolved],
+        count: 0,
+        updatedAt: '2026-07-28T04:00:00.000Z',
+      }),
+      SID,
+    );
+    expect(parsed.parseErrors).toBe(0);
+    expect(parsed.file.reopenResolvedAt).toEqual({ F31: '2026-07-28T04:00:00.000Z' });
+
+    const pruned = parseAttentionFile(JSON.stringify(serializeAttentionFile({ ...parsed.file, resolved: [] })), SID);
+    expect(pruned.parseErrors).toBe(0);
+    expect(pruned.file.reopenResolvedAt).toEqual({ F31: '2026-07-28T04:00:00.000Z' });
   });
 });
 

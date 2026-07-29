@@ -872,4 +872,14 @@ describe('the tab shell', () => {
       switching.unmount();
     }
   });
+
+  test('rendered Markdown receives session provenance and every available opener', async () => {
+    const source = await Bun.file(new URL('./FilesTab.tsx', import.meta.url)).text();
+    expect(source).toContain('sessionId={sessionId}');
+    expect(source).toContain('cwd={cwd}');
+    expect(source).toContain('onTaskOpen={onTaskOpen}');
+    expect(source).toContain('onCodeReferenceOpen={onCodeReferenceOpen}');
+    expect(source).toContain('onAttentionOpen={onAttentionOpen}');
+    expect(source).toContain('onPinOpen={onPinOpen}');
+  });
 });

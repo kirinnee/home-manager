@@ -519,6 +519,34 @@ describe('task actions', () => {
     expect(() => parseTaskCli(['phase', 'F21', 'todo', '--reason', ''])).toThrow('--reason');
   });
 
+  test('reopen carries the verbatim new ask, source, and reason in one request', () => {
+    expect(
+      parseTaskCli([
+        'reopen',
+        '#F21',
+        '--reason',
+        'The deployed browser still returns 404.',
+        '--ask',
+        'The browser you shipped still returns 404; fix it in this task.',
+        '--source',
+        'session:lead#44',
+      ]),
+    ).toEqual({
+      command: 'act',
+      id: 'F21',
+      body: {
+        action: 'reopen',
+        reason: 'The deployed browser still returns 404.',
+        ask: 'The browser you shipped still returns 404; fix it in this task.',
+        source: 'session:lead#44',
+      },
+    });
+    expect(() => parseTaskCli(['reopen', 'F21', '--reason', 'broken', '--source', 'session:lead#44'])).toThrow(
+      'verbatim new human ask',
+    );
+    expect(() => parseTaskCli(['reopen', 'F21', '--ask', 'fix it', '--source', 'session:lead#44'])).toThrow('--reason');
+  });
+
   test('note and feedback join their words', () => {
     expect(parseTaskCli(['note', 'F21', 'fs', 'API', 'needs', 'a', 'guard'])).toEqual({
       command: 'act',

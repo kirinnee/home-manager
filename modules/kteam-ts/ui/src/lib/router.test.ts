@@ -10,6 +10,10 @@ describe('parseRoute', () => {
     expect(parseRoute('/warden')).toEqual({ path: '/warden', isWarden: true });
   });
 
+  test('recognises fleet analytics as a separate first-class route', () => {
+    expect(parseRoute('/analytics')).toEqual({ path: '/analytics', isAnalytics: true });
+  });
+
   test('redirects a stale fleet Tasks URL to the session list', () => {
     expect(parseRoute('/tasks')).toEqual({ path: '/', redirectTo: '/' });
   });

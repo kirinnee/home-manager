@@ -7,12 +7,13 @@ import { forwardRef, useEffect, useState, type AnchorHTMLAttributes, type MouseE
 
 export interface Route {
   path: string;
-  // path === '/' | '/new' | '/settings' | '/warden' | '/learning' | '/session/:id' | unknown → list
+  // path === '/' | '/new' | '/analytics' | '/settings' | '/warden' | '/learning' | '/session/:id' | unknown → list
   sessionId?: string;
   isNew?: boolean;
   isSettings?: boolean;
   isWarden?: boolean;
   isLearning?: boolean;
+  isAnalytics?: boolean;
   /** Compatibility-only URL normalization; the resolved surface is `path`. */
   redirectTo?: string;
 }
@@ -21,6 +22,7 @@ export function parseRoute(pathname: string): Route {
   if (pathname === '/new') return { path: '/new', isNew: true };
   if (pathname === '/settings') return { path: '/settings', isSettings: true };
   if (pathname === '/warden') return { path: '/warden', isWarden: true };
+  if (pathname === '/analytics') return { path: '/analytics', isAnalytics: true };
   // The fleet-wide Tasks surface was removed. Bookmarks land on the session
   // list and the hook below replaces the stale URL so Back cannot loop here.
   if (pathname === '/tasks') return { path: '/', redirectTo: '/' };

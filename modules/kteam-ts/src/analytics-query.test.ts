@@ -2,17 +2,42 @@ import { describe, expect, test } from 'bun:test';
 import {
   AnalyticsQueryError,
   DEFAULT_ANALYTICS_QUERY,
+  DEFAULT_SESSION_ANALYTICS_QUERY,
   matcherLikePattern,
   parseAnalyticsQuery,
+  scopeAnalyticsQuery,
 } from './analytics-query';
 
 describe('analytics query language', () => {
-  test('defaults to an all-session status count', () => {
+  test('defaults to a daily fleet aggregate that includes token and cost measures', () => {
     const parsed = parseAnalyticsQuery();
     expect(parsed.source).toBe(DEFAULT_ANALYTICS_QUERY);
-    expect(parsed.aggregation).toBe('count');
-    expect(parsed.groupBy).toEqual(['status']);
+    expect(parsed.aggregation).toBe('sum');
+    expect(parsed.groupBy).toEqual(['day']);
     expect(parsed.matchers).toEqual([]);
+  });
+
+  test('forces the session scope into the canonical query and replaces a caller-supplied id', () => {
+    expect(scopeAnalyticsQuery(undefined, 'ms59')).toBe(`${DEFAULT_SESSION_ANALYTICS_QUERY} {id=ms59}`);
+    expect(scopeAnalyticsQuery('avg by (model) {status=completed, id=some-other-session}', 'session/odd ?')).toBe(
+      'avg by (model) {status=completed, id=="session/odd ?"}',
+    );
+    expect(parseAnalyticsQuery(scopeAnalyticsQuery('{id=~fleet-*}', 'one')).matchers).toContainEqual({
+      label: 'id',
+      op: '=',
+      value: 'one',
+      wildcard: false,
+    });
+
+    for (const id of ['session-*', 'session/odd ?']) {
+      const scoped = parseAnalyticsQuery(scopeAnalyticsQuery('{}', id));
+      expect(scoped.matchers).toEqual([{ label: 'id', op: '=', value: id, wildcard: false }]);
+      expect(scoped.canonical).toBe(scopeAnalyticsQuery('{}', id));
+    }
+  });
+
+  test('refuses an empty session scope', () => {
+    expect(() => scopeAnalyticsQuery('sum', '   ')).toThrow('exact session id');
   });
 
   test('matches kloop aggregation, grouping, and matcher syntax', () => {

@@ -17,7 +17,7 @@
 // a second, drifting copy.
 
 import { describe, expect, test } from 'bun:test';
-import { SETTINGS_ENTRY, UPDATE_CHIP, WARDEN_ENTRY } from './AppBar';
+import { ANALYTICS_ENTRY, SETTINGS_ENTRY, UPDATE_CHIP, WARDEN_ENTRY } from './AppBar';
 import type { UpdateReason } from '../hooks/useServiceWorkerUpdate';
 
 /** Words that assert a REASON the app cannot know at chip time. A title
@@ -92,6 +92,20 @@ describe('Settings entry point', () => {
     expect(source).toContain('to="/warden"');
     expect(source).toContain("wardenActive ? 'page'");
     expect(source).toContain("layout !== 'drawer' && <ThemeToggle");
+  });
+
+  test('keeps the separate global analytics tab outside the desktop-only nav', async () => {
+    expect(ANALYTICS_ENTRY).toEqual({
+      label: 'Analytics',
+      title: 'Query all sessions and graph daily usage',
+    });
+    const source = await Bun.file(new URL('./AppBar.tsx', import.meta.url).pathname).text();
+    expect(source).toContain('to="/analytics"');
+    expect(source).toContain("analyticsActive ? 'page'");
+    const analytics = source.indexOf('to="/analytics"');
+    const desktopOnlyNav = source.indexOf('min-[1100px]:flex');
+    expect(analytics).toBeGreaterThan(-1);
+    expect(analytics).toBeLessThan(desktopOnlyNav);
   });
 
   test('does not expose a fleet-wide Tasks destination', async () => {

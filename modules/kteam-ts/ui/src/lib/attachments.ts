@@ -6,7 +6,16 @@
 
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
-export const ATTACHMENT_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
+export const IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
+export const DOCUMENT_MIME_TYPES = [
+  'application/pdf',
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'application/json',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+] as const;
+export const ATTACHMENT_MIME_TYPES = [...IMAGE_MIME_TYPES, ...DOCUMENT_MIME_TYPES] as const;
 export type AttachmentMime = (typeof ATTACHMENT_MIME_TYPES)[number];
 
 export type AttachmentErrorCode =
@@ -28,9 +37,16 @@ export interface AttachmentView {
   /** Daemon-local audit metadata only. The UI must never render or fetch it. */
   path: string;
   createdAt: string;
+  textExtraction?: {
+    method: 'pdfjs' | 'docx-xml';
+    characters: number;
+    truncated: boolean;
+    totalPages?: number;
+    pagesRead?: number;
+  };
 }
 
-export interface StoredTranscriptImage {
+export interface StoredTranscriptAttachment {
   kind: 'attachment';
   sessionId: string;
   attachmentId: string;
@@ -39,7 +55,11 @@ export interface StoredTranscriptImage {
   size?: number;
   /** A tool path is useful alt text, but is never used as a fetch target. */
   alt?: string;
+  textExtraction?: AttachmentView['textExtraction'];
 }
+
+/** Compatibility name while callers migrate from image-only presentation. */
+export type StoredTranscriptImage = StoredTranscriptAttachment;
 
 export interface InlineTranscriptImage {
   kind: 'inline';
@@ -47,17 +67,22 @@ export interface InlineTranscriptImage {
   alt: string;
 }
 
-export type TranscriptImage = StoredTranscriptImage | InlineTranscriptImage;
+export type TranscriptImage = StoredTranscriptAttachment | InlineTranscriptImage;
 
 const MIME_ALIASES: Readonly<Record<string, AttachmentMime>> = {
   'image/jpg': 'image/jpeg',
   'image/pjpeg': 'image/jpeg',
+  'application/x-pdf': 'application/pdf',
+  'text/x-markdown': 'text/markdown',
+  'text/x-csv': 'text/csv',
 };
 
+const GENERIC_DECLARED_MIME_TYPES = new Set(['', 'application/octet-stream', 'binary/octet-stream']);
+
 const ERROR_COPY: Record<AttachmentErrorCode, string> = {
-  attachment_too_large: 'Images must be under 20 MB',
-  unsupported_mime: 'Only PNG, JPEG, GIF or WebP images work',
-  mime_mismatch: 'Only PNG, JPEG, GIF or WebP images work',
+  attachment_too_large: 'Files must be 20 MiB or smaller',
+  unsupported_mime: "That file type isn't supported",
+  mime_mismatch: 'The file type does not match its contents',
   empty_attachment: 'That file is empty',
   invalid_filename: "That file can't be attached",
   invalid_identifier: "That file can't be attached",
@@ -75,9 +100,43 @@ export function validateAttachmentFile(file: Pick<File, 'size' | 'type'>): Attac
   if (file.size === 0) return 'empty_attachment';
   if (file.size > MAX_ATTACHMENT_BYTES) return 'attachment_too_large';
   const declared = file.type.trim().toLowerCase();
-  if (!declared) return null;
-  const normalized = MIME_ALIASES[declared] ?? declared;
+  const normalized = normalizeAttachmentMime(declared);
+  if (GENERIC_DECLARED_MIME_TYPES.has(normalized)) return null;
   return (ATTACHMENT_MIME_TYPES as readonly string[]).includes(normalized) ? null : 'unsupported_mime';
+}
+
+export function normalizeAttachmentMime(mime: string | undefined): string {
+  const bare = (mime ?? '').split(';', 1)[0]!.trim().toLowerCase();
+  return MIME_ALIASES[bare] ?? bare;
+}
+
+export function isImageMime(mime: string | undefined): boolean {
+  return (IMAGE_MIME_TYPES as readonly string[]).includes(normalizeAttachmentMime(mime));
+}
+
+export function attachmentTypeLabel(mime: string | undefined): string {
+  switch (normalizeAttachmentMime(mime)) {
+    case 'application/pdf':
+      return 'PDF document';
+    case 'text/plain':
+      return 'Text file';
+    case 'text/markdown':
+      return 'Markdown file';
+    case 'text/csv':
+      return 'CSV file';
+    case 'application/json':
+      return 'JSON file';
+    case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+      return 'Word document';
+    default:
+      return mime || 'File';
+  }
+}
+
+export function isBrowserOpenableAttachment(mime: string | undefined): boolean {
+  return ['application/pdf', 'text/plain', 'text/markdown', 'text/csv', 'application/json'].includes(
+    normalizeAttachmentMime(mime),
+  );
 }
 
 /** The current daemon returns an error string; newer versions may also return
@@ -88,7 +147,8 @@ export function attachmentErrorMessage(error: unknown): string {
   if (typeof obj?.code === 'string' && obj.code in ERROR_COPY) return ERROR_COPY[obj.code as AttachmentErrorCode];
   if (obj?.status === 404) return ERROR_COPY.attachment_not_found;
 
-  const message = String(obj?.message ?? error ?? '').toLowerCase();
+  const rawMessage = String(obj?.message ?? error ?? '');
+  const message = rawMessage.toLowerCase();
   if (/larger than|too large|byte limit/.test(message)) return ERROR_COPY.attachment_too_large;
   if (/declared mime.*does not match|mime mismatch/.test(message)) return ERROR_COPY.mime_mismatch;
   if (/unsupported (declared )?(mime|image type)/.test(message)) return ERROR_COPY.unsupported_mime;
@@ -97,10 +157,12 @@ export function attachmentErrorMessage(error: unknown): string {
   if (/invalid (attachment|kteam session) id/.test(message)) return ERROR_COPY.invalid_identifier;
   if (/not found|no longer available/.test(message)) return ERROR_COPY.attachment_not_found;
   if (/corrupt|manifest|escapes .*storage|content size/.test(message)) return ERROR_COPY.corrupt_attachment;
-  return 'Image could not be attached — try again';
+  if (/(?:^|[\\/])(?:home|tmp|var|private|attachments?)(?:[\\/]|$)/.test(message)) return ERROR_COPY.corrupt_attachment;
+  if (typeof obj?.status === 'number' && obj.status >= 400 && obj.status < 500 && rawMessage) return rawMessage;
+  return 'File could not be attached — try again';
 }
 
-export function attachmentFromView(sessionId: string, view: AttachmentView): StoredTranscriptImage {
+export function attachmentFromView(sessionId: string, view: AttachmentView): StoredTranscriptAttachment {
   return {
     kind: 'attachment',
     sessionId,
@@ -108,6 +170,7 @@ export function attachmentFromView(sessionId: string, view: AttachmentView): Sto
     filename: view.filename,
     mime: view.mime,
     size: view.size,
+    ...(view.textExtraction ? { textExtraction: view.textExtraction } : {}),
   };
 }
 

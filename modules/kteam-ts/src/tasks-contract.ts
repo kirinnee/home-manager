@@ -308,6 +308,15 @@ export function parseTaskActionBody(body: unknown): TaskActionInput {
       if (reason === undefined) throw new TaskError('invalid', 'phase requires a reason');
       return { action: 'phase', phase: phase as TaskPhase, reason };
     }
+    case 'reopen': {
+      const reason = optionalString(raw, 'reason');
+      const ask = optionalString(raw, 'ask');
+      const source = optionalString(raw, 'source');
+      if (reason === undefined || ask === undefined || source === undefined) {
+        throw new TaskError('invalid', 'reopen requires a reason, the verbatim new ask, and its source message link');
+      }
+      return { action: 'reopen', reason, ask, source };
+    }
     case 'note':
     case 'feedback': {
       const text = optionalString(raw, 'text');
@@ -556,7 +565,9 @@ export function summariseActivity(entry: TaskActivity): string {
     case 'created':
       return `as ${String(data['status'] ?? 'todo')}`;
     case 'status':
-      return `${String(data['from'] ?? '?')} → ${String(data['to'] ?? '?')}${
+      return `${data['reopened'] === true ? 'REOPENED ' : data['backward'] === true ? 'MOVED BACK ' : ''}${String(
+        data['phaseFrom'] ?? data['from'] ?? '?',
+      )} → ${String(data['phaseTo'] ?? data['to'] ?? '?')}${
         data['reason'] ? ` (${String(data['reason'])})` : ''
       }${note ? `: ${note}` : ''}`;
     case 'note':

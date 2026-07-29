@@ -5,6 +5,7 @@ import { appendFile, mkdtemp, rm, stat, utimes, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import { AnalyticsIndex } from './analytics-index';
+import { scopeAnalyticsQuery } from './analytics-query';
 import { estimateEquivalentApiCost } from './model-cost';
 
 const opened: AnalyticsIndex[] = [];
@@ -146,6 +147,41 @@ function addChatSource(database: Database, sessionId: string, file: string, info
 }
 
 describe('AnalyticsIndex', () => {
+  test('keeps wildcard-shaped enforced session ids literal at the index boundary', async () => {
+    const { file, source } = await fixture();
+    for (const id of ['session-*', 'session-other', 'session/odd ?', 'session/odd X'])
+      insertSession(source, { id, status: 'completed' });
+
+    const index = new AnalyticsIndex({ databasePath: file });
+    opened.push(index);
+    for (const id of ['session-*', 'session/odd ?']) {
+      const response = index.query(scopeAnalyticsQuery('{}', id));
+      expect(response.kind).toBe('raw');
+      if (response.kind !== 'raw') throw new Error('expected raw session rows');
+      expect(response.scope.matched).toBe(1);
+      expect(response.results.map(row => row.id)).toEqual([id]);
+    }
+    source.close();
+  });
+
+  test('groups fleet history by its existing indexed day dimension', async () => {
+    const { file, source } = await fixture();
+    insertSession(source, { id: 'day-one', status: 'completed', createdAt: '2026-07-01T23:59:59.000Z' });
+    insertSession(source, { id: 'day-two-a', status: 'completed', createdAt: '2026-07-02T00:00:00.000Z' });
+    insertSession(source, { id: 'day-two-b', status: 'failed', createdAt: '2026-07-02T18:00:00.000Z' });
+
+    const index = new AnalyticsIndex({ databasePath: file });
+    opened.push(index);
+    const response = index.query('sum by (day)');
+    expect(response.kind).toBe('aggregate');
+    if (response.kind !== 'aggregate') throw new Error('expected aggregate');
+    expect(response.results.map(result => ({ day: result.labels.day, sessions: result.sessions }))).toEqual([
+      { day: '2026-07-01', sessions: 1 },
+      { day: '2026-07-02', sessions: 2 },
+    ]);
+    source.close();
+  });
+
   test('reopens a complete warm materialization without rebuilding every session', async () => {
     const { file, source } = await fixture();
     insertSession(source, {

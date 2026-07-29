@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   BrowserRuntime,
+  browserEnvironment,
   chromeExecutableCandidates,
   chromeLaunchArguments,
   normalizeBrowserUrl,
@@ -40,7 +41,7 @@ describe('viewport bounds', () => {
   });
 });
 
-describe('cross-platform headless Chrome', () => {
+describe('honest cross-platform Chrome', () => {
   test('knows standard macOS and Linux system-browser locations', () => {
     expect(chromeExecutableCandidates('darwin')[0]).toContain('Google Chrome.app');
     expect(chromeExecutableCandidates('linux')).toContain('/usr/bin/google-chrome');
@@ -53,16 +54,66 @@ describe('cross-platform headless Chrome', () => {
     expect(() => resolveChromeExecutable('darwin', undefined, () => false)).toThrow(/KTEAM_CHROME_BIN/);
   });
 
-  test('launches the same headless persistent-profile CDP shape on both platforms', () => {
-    const argv = chromeLaunchArguments('/Applications/Google Chrome', '/private/profile', 9222, {
-      width: 1280,
-      height: 800,
-    });
-    expect(argv).toContain('--headless=new');
+  test('launches Linux genuinely headful on X11 while retaining SwiftShader WebGL', () => {
+    const argv = chromeLaunchArguments(
+      '/usr/bin/google-chrome',
+      '/private/profile',
+      9222,
+      { width: 1280, height: 800 },
+      'linux',
+    );
+    expect(argv).not.toContain('--headless=new');
+    expect(argv).toContain('--ozone-platform=x11');
+    expect(argv).toContain('--use-gl=angle');
+    expect(argv).toContain('--use-angle=swiftshader');
+    expect(argv).toContain('--enable-unsafe-swiftshader');
+    expect(argv).not.toContain('--disable-gpu');
     expect(argv).toContain('--user-data-dir=/private/profile');
     expect(argv).toContain('--remote-debugging-address=127.0.0.1');
     expect(argv).toContain('--window-size=1280,800');
-    expect(argv.join(' ')).not.toMatch(/Xvfb|x11vnc|DISPLAY/);
+  });
+
+  test('leaves the existing macOS launch path unchanged', () => {
+    const argv = chromeLaunchArguments(
+      '/Applications/Google Chrome',
+      '/private/profile',
+      9222,
+      { width: 1280, height: 800 },
+      'darwin',
+    );
+    expect(argv).toContain('--headless=new');
+    expect(argv).not.toContain('--ozone-platform=x11');
+    expect(argv).not.toContain('--enable-unsafe-swiftshader');
+  });
+
+  test('passes only an explicitly owned display and still scrubs daemon capabilities', () => {
+    const env = browserEnvironment(':117', {
+      PATH: '/bin',
+      HOME: '/home/browser',
+      DISPLAY: ':0',
+      KTEAM_TOKEN: 'must-not-leak',
+      KTEAM_SESSION_TOKEN: 'must-not-leak-either',
+    });
+    expect(env).toEqual({ PATH: '/bin', HOME: '/home/browser', DISPLAY: ':117' });
+    expect(env.KTEAM_TOKEN).toBeUndefined();
+  });
+
+  test('keeps the honest Linux fingerprint but removes CDP entirely for human login', () => {
+    const argv = chromeLaunchArguments(
+      '/usr/bin/google-chrome',
+      '/private/profile',
+      0,
+      { width: 1280, height: 800 },
+      'linux',
+      { cdp: false, initialUrl: 'https://accounts.google.com/' },
+    );
+    expect(argv).toContain('--ozone-platform=x11');
+    expect(argv).toContain('--enable-unsafe-swiftshader');
+    expect(argv).toContain('--password-store=basic');
+    expect(argv).toContain('https://accounts.google.com/');
+    expect(argv.some(argument => argument.startsWith('--remote-debugging'))).toBe(false);
+    expect(argv).not.toContain('--remote-allow-origins=*');
+    expect(argv).not.toContain('--disable-gpu');
   });
 });
 

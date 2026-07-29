@@ -24,17 +24,18 @@ import type { PushApi } from './push-api';
 import { isPushPath, pushWardenDenial } from './push-api';
 import { isTaskPath, taskWardenDenial } from './tasks-contract';
 import type { AnalyticsQueryService } from './analytics-types';
-import { AnalyticsQueryError } from './analytics-query';
+import { AnalyticsQueryError, scopeAnalyticsQuery } from './analytics-query';
 import type { TerminalApi } from './terminal-api';
 import { isTerminalPath, matchTerminalRoute, terminalWardenDenial } from './terminal-api';
 import type { TerminalStreamBridge, TerminalStreamChunk } from './terminal-stream';
 import { isTerminalError } from './terminal-types';
-import type { BrowserApi } from './browser-api';
-import { browserWardenDenial, isBrowserPath, matchBrowserRoute } from './browser-api';
+import type { BrowserApi, BrowserLoginApi } from './browser-api';
+import { browserWardenDenial, isBrowserLoginPath, isBrowserPath, matchBrowserRoute } from './browser-api';
 import type { BrowserStreamBridge, BrowserStreamChunk } from './browser-stream';
 import { isBrowserError } from './browser-types';
 import type { RuntimeModelsApi } from './runtime-models-api';
 import { isRuntimeModelsPath, runtimeModelsWardenDenial } from './runtime-models-api';
+import { AttachmentError, type AttachmentErrorCode } from './attachments';
 
 // Built chat UI (Vite output, committed): served when present; the legacy
 // single-file shell remains the fallback so the daemon never 404s its own UI.
@@ -118,6 +119,12 @@ export interface ApiServerOptions {
   terminals?: TerminalApi;
   /** Per-session remote browser actions and the human-admin screencast. */
   browser?: BrowserApi;
+  /** The daemon-global human sign-in window. Separate from `browser` on
+   *  purpose: it is not a session action, it is gated more tightly than the
+   *  session browser, and its responses carry a live VNC credential. Omitted
+   *  in tests and on platforms without the login lifecycle, where the route
+   *  answers a truthful 404 rather than pretending the window is closed. */
+  browserLogin?: BrowserLoginApi;
   /** Human-admin session-scoped model catalogs for Claude and Codex. */
   runtimeModels?: RuntimeModelsApi;
   /** Durable, daemon-owned per-session attention records. */
@@ -356,6 +363,34 @@ class HttpError extends Error {
   }
 }
 
+function attachmentErrorStatus(code: AttachmentErrorCode): number {
+  switch (code) {
+    case 'attachment_too_large':
+      return 413;
+    case 'unsupported_mime':
+    case 'mime_mismatch':
+      return 415;
+    case 'attachment_not_found':
+      return 404;
+    case 'corrupt_attachment':
+      return 409;
+    case 'password_protected_document':
+    case 'no_extractable_text':
+    case 'unreadable_document':
+    case 'document_extraction_timeout':
+    case 'document_too_complex':
+      return 422;
+    default:
+      return 400;
+  }
+}
+
+function attachmentErrorMessage(error: AttachmentError): string {
+  // Some corrupt-manifest errors contain an OS read error. Keep that path out
+  // of the public API while preserving every actionable upload failure verbatim.
+  return error.code === 'corrupt_attachment' ? 'attachment is corrupt or unavailable' : error.message;
+}
+
 export function startApiServer(options: ApiServerOptions): Server<SocketData> {
   const sockets = new Set<ServerWebSocket<SocketData>>();
   const recentRequests = new RecentRequestIds();
@@ -476,7 +511,14 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           options.service,
           request.headers.get('x-kteam-stop-capability') ?? undefined,
         );
-        if (denial) return denial;
+        if (denial) {
+          // The login route's no-store policy is per-ROUTE, not per-branch:
+          // this denial is produced ABOVE the mount, so it would otherwise be
+          // the one cacheable response on a path whose every other answer
+          // carries a live VNC credential.
+          if (isBrowserLoginPath(url.pathname)) denial.headers.set('cache-control', 'no-store');
+          return denial;
+        }
       }
 
       // Attribute events caused by this request to WHOEVER caused it — the human
@@ -555,7 +597,13 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           if (url.pathname === '/v1/analytics' && request.method === 'GET') {
             if (!options.analytics) return json({ error: 'analytics index is initializing or unavailable' }, 503);
             try {
-              return json(options.analytics.query(url.searchParams.get('q') ?? undefined));
+              const query = url.searchParams.get('q') ?? undefined;
+              const sessionId = url.searchParams.get('session');
+              // One existing read route serves both products. `session` makes
+              // it narrower: the server replaces every caller-supplied id
+              // matcher with this exact id before the index sees the query.
+              // Omitting it is the explicit fleet-wide global tab/CLI path.
+              return json(options.analytics.query(sessionId === null ? query : scopeAnalyticsQuery(query, sessionId)));
             } catch (error) {
               if (error instanceof AnalyticsQueryError) return json({ error: error.message }, 400);
               throw error;
@@ -739,6 +787,36 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             });
             if (terminalResponse) return json(terminalResponse.body, terminalResponse.status);
             return json(unknownRoute(request.method, url.pathname), 404);
+          }
+
+          // The daemon-global human sign-in window. Deliberately NOT folded
+          // into the fleet payload: `/v1/sessions` is warden-readable through
+          // the generic GET allowance in wardenScopeDenial, so putting this
+          // window's state — let alone its port and password — there would hand
+          // a warden exactly what the separate, separately-gated route exists to
+          // withhold. `browserWardenDenial` already 403s the warden token above
+          // that allowance; BrowserLoginApi additionally refuses a `peer:<id>`
+          // holding the shared admin bearer.
+          //
+          // EVERY response here is no-store, GET and POST alike, because the
+          // body carries a live VNC credential and must never enter a private
+          // HTTP cache. The policy is per-ROUTE, not per-status-code.
+          if (isBrowserLoginPath(pathname)) {
+            if (!options.browserLogin) return json(unknownRoute(request.method, pathname), 404);
+            // Refuse a non-human actor BEFORE the body is parsed, so a denied
+            // caller gets the 403 it earned rather than a 400 about its JSON.
+            // BrowserLoginApi repeats the same check — it has to stay safe when
+            // called directly, and this is only about which failure is shown.
+            const loginResponse = isHumanAdminActor(actor)
+              ? await options.browserLogin.handle({
+                  method: request.method,
+                  body: request.method === 'POST' ? await optionalBody<Record<string, unknown>>(request) : undefined,
+                  actor,
+                })
+              : await options.browserLogin.handle({ method: request.method, actor });
+            const response = json(loginResponse.body, loginResponse.status);
+            response.headers.set('cache-control', 'no-store');
+            return response;
           }
 
           // MUST precede the generic session match: `browser` is a daemon API,
@@ -1062,11 +1140,14 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           const attachment = action?.match(/^attachments\/([^/]+)$/);
           if (attachment && request.method === 'GET') {
             const result = await options.service.getAttachment(id, decodeURIComponent(attachment[1]!));
+            const disposition = result.attachment.mime.startsWith('image/') ? 'inline' : 'attachment';
             return new Response(Uint8Array.from(result.bytes).buffer, {
               headers: {
                 'content-type': result.attachment.mime,
                 'content-length': String(result.attachment.size),
-                'content-disposition': `inline; filename="${result.attachment.filename.replace(/["\\]/g, '_')}"`,
+                'content-disposition': `${disposition}; filename="${result.attachment.filename.replace(/["\\]/g, '_')}"`,
+                'cache-control': 'no-store',
+                'x-content-type-options': 'nosniff',
               },
             });
           }
@@ -1076,6 +1157,9 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           const unknown = unknownRoute(request.method, url.pathname);
           return isFsPath(url.pathname) ? fsJson(unknown, 404) : json(unknown, 404);
         } catch (error) {
+          if (error instanceof AttachmentError) {
+            return json({ error: attachmentErrorMessage(error), code: error.code }, attachmentErrorStatus(error.code));
+          }
           if (isBrowserError(error)) {
             return json({ error: error.message, code: error.code }, error.status);
           }

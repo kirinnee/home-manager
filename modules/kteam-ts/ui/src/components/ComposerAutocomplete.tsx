@@ -33,6 +33,7 @@ import {
   Folder,
   ListTodo,
   LoaderCircle,
+  Pin,
   SearchX,
   ShieldAlert,
   Terminal,
@@ -99,6 +100,7 @@ function iconFor(kind: ComposerAutocompleteKind) {
   if (kind === 'directory') return Folder;
   if (kind === 'task') return ListTodo;
   if (kind === 'attention') return CircleHelp;
+  if (kind === 'pin') return Pin;
   return File;
 }
 
@@ -127,12 +129,18 @@ export function groupAutocompleteCandidates(
 
 function resultCopy(controller: ComposerAutocompleteController): string {
   if (!controller.open || !controller.provider) return '';
-  if (controller.status === 'loading') return `Loading ${controller.provider.label.toLowerCase()}`;
-  if (controller.status === 'error') return `${controller.provider.label} unavailable`;
+  const label = activeProviderLabel(controller);
+  if (controller.status === 'loading') return `Loading ${label.toLowerCase()}`;
+  if (controller.status === 'error') return `${label} unavailable`;
   const count = controller.candidates.length;
   return count === 0
-    ? `No matching ${controller.provider.label.toLowerCase()}`
-    : `${count} ${controller.provider.label.toLowerCase()} ${count === 1 ? 'result' : 'results'}`;
+    ? `No matching ${label.toLowerCase()}`
+    : `${count} ${label.toLowerCase()} ${count === 1 ? 'result' : 'results'}`;
+}
+
+function activeProviderLabel(controller: ComposerAutocompleteController): string {
+  const tier = controller.match?.referenceTier;
+  return controller.provider?.legend?.find(item => item.tier === tier)?.label ?? controller.provider?.label ?? '';
 }
 
 export function autocompleteEmptyCopy(providerLabel: string): string {
@@ -255,8 +263,11 @@ export function ComposerAutocompletePopover({
   if (!controller.open || !controller.provider || !controller.match) return null;
   const copy = resultCopy(controller);
   const trigger = controller.match.trigger;
+  const triggerText = controller.match.triggerText ?? controller.match.trigger;
   const groups = groupAutocompleteCandidates(controller.candidates);
   const surface = trigger === '/' ? 'commands-skills' : 'references';
+  const providerLabel = activeProviderLabel(controller);
+  const legend = controller.provider.legend;
 
   return (
     <div
@@ -269,12 +280,42 @@ export function ComposerAutocompletePopover({
       )}
       data-composer-autocomplete={surface}
     >
+      {legend && (
+        <div
+          data-reference-tier-legend=""
+          aria-label="Reference autocomplete tiers"
+          className="grid grid-cols-5 border-b border-border-soft bg-surface-2"
+        >
+          {legend.map(item => {
+            const active = item.tier === controller.match?.referenceTier;
+            return (
+              <div
+                key={item.tier}
+                data-reference-tier={item.tier}
+                data-active={active || undefined}
+                aria-current={active ? 'true' : undefined}
+                className={cn(
+                  'flex min-w-0 flex-col items-center justify-center gap-px border-r border-border-soft px-0.5 py-1 text-center last:border-r-0',
+                  active ? 'bg-accent-soft text-accent' : 'text-faint',
+                )}
+              >
+                <span className="mono block max-w-full truncate text-2xs font-semibold leading-tight">
+                  {item.trigger}
+                </span>
+                <span className="block max-w-full truncate text-[9px] font-semibold uppercase leading-tight tracking-label">
+                  {item.label}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div className="flex min-h-[34px] items-center gap-sm border-b border-border-soft bg-surface-2 px-control-x py-1">
         <span className="mono inline-flex h-6 min-w-6 items-center justify-center rounded-control border border-accent-border bg-accent-soft px-1.5 font-semibold text-accent">
-          {trigger}
+          {triggerText}
         </span>
         <span className="min-w-0 flex-1 truncate text-meta font-semibold uppercase tracking-label text-fg-soft">
-          {controller.provider.label}
+          {providerLabel}
         </span>
         {controller.contextLabel && (
           <span className="mono max-w-[58%] truncate text-2xs text-faint" title={controller.contextLabel}>
@@ -306,7 +347,7 @@ export function ComposerAutocompletePopover({
             role="status"
           >
             <LoaderCircle size={15} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
-            Loading {controller.provider.label.toLowerCase()}…
+            Loading {providerLabel.toLowerCase()}…
           </div>
         ) : controller.status === 'error' ? (
           <div className="flex min-h-[44px] items-center gap-sm px-control-x py-row-y text-meta text-err" role="alert">
@@ -321,10 +362,10 @@ export function ComposerAutocompletePopover({
             role="status"
           >
             <SearchX size={15} className="shrink-0" aria-hidden="true" />
-            {autocompleteEmptyCopy(controller.provider.label)}
+            {autocompleteEmptyCopy(providerLabel)}
           </div>
         ) : (
-          <div id={controller.listboxId} role="listbox" aria-label={`${controller.provider.label} suggestions`}>
+          <div id={controller.listboxId} role="listbox" aria-label={`${providerLabel} suggestions`}>
             {groups.map((group, groupIndex) => {
               const headingId = group.label ? `${controller.listboxId}-group-${groupIndex}` : undefined;
               return (

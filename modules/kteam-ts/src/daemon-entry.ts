@@ -18,7 +18,10 @@ import { loadDaemonSecretsEnvironment } from './daemon-secrets';
 import { PushService } from './push-service';
 import { TerminalApi } from './terminal-api';
 import { TerminalService } from './terminal-service';
-import { BrowserApi } from './browser-api';
+import { BrowserApi, BrowserLoginApi } from './browser-api';
+import { BrowserDisplayService } from './browser-display';
+import { createBrowserLoginService } from './browser-login';
+import { createBrowserProfile } from './browser-profile';
 import { BrowserService } from './browser-service';
 import { RuntimeModelsApi } from './runtime-models-api';
 import { WardenAttentionProvider } from './warden-attention';
@@ -121,16 +124,46 @@ const terminalService = new TerminalService(paths, {
     ),
 });
 const terminalApi = new TerminalApi(terminalService);
-// Remote browsers share the daemon's canonical session registry. The service
-// owns all Chrome/Playwright children so daemon shutdown can drain them.
-const browserService = new BrowserService(paths, {
-  resolve: async ref =>
-    manager.get(ref).then(
-      view => view.config.id,
-      () => undefined,
-    ),
+// Remote browsers and the human-only login window share one daemon-owned Xvfb
+// and one durable profile. The login service flips its state before evicting
+// agent browsers, so this predicate closes the start/action/viewer race while
+// the CDP-free Chrome owns the human's credentials.
+const browserDisplay = new BrowserDisplayService();
+const browserProfile = createBrowserProfile(paths);
+let browserLoginService: ReturnType<typeof createBrowserLoginService> | undefined;
+const browserService = new BrowserService(
+  paths,
+  {
+    resolve: async ref =>
+      manager.get(ref).then(
+        view => view.config.id,
+        () => undefined,
+      ),
+  },
+  {
+    displayService: browserDisplay,
+    profileService: browserProfile,
+    loginWindowOpen: () => browserLoginService?.isOpen() ?? false,
+  },
+);
+browserLoginService = createBrowserLoginService({
+  paths,
+  profile: browserProfile,
+  display: browserDisplay,
+  agentBrowsers: browserService,
 });
+// A SIGKILL can leave the direct Chrome child and the externally-supervised
+// x11vnc group behind. Reconcile the pid-checked state file before the route is
+// exposed, so a new daemon never advertises control alongside an old window.
+await browserLoginService.reconcile();
 const browserApi = new BrowserApi(browserService);
+const browserLoginApi = new BrowserLoginApi(browserLoginService);
+// Shutdown order is load-bearing: remove the VNC exposure and flush the login
+// Chrome before BrowserService closes the shared Xvfb.
+const closeBrowserStack = async (): Promise<void> => {
+  await browserLoginService.close();
+  await browserService.close();
+};
 // Attention is a separate durable primitive; its source adapter listens to the
 // existing task/session streams but never presents notifications itself.
 const attentionSessions = {
@@ -177,6 +210,7 @@ const apiOptions = {
   pins: pinApi,
   terminals: terminalApi,
   browser: browserApi,
+  browserLogin: browserLoginApi,
   runtimeModels: runtimeModelsApi,
   attention: attentionApi,
   wardenAttention,
@@ -188,7 +222,7 @@ const apiOptions = {
 const server = await bindWithRetry(() => startApiServer(apiOptions)).catch(async error => {
   attentionSources.close();
   await pushService.close();
-  await Promise.allSettled([manager.close(), stt.close(), terminalService.close(), browserService.close()]);
+  await Promise.allSettled([manager.close(), stt.close(), terminalService.close(), closeBrowserStack()]);
   throw error;
 });
 // Write the pid file only AFTER the bind succeeded — a loser of the bind race
@@ -224,7 +258,7 @@ const stop = async (reason: string) => {
         manager.close(),
         stt.close(),
         terminalService.close(),
-        browserService.close(),
+        closeBrowserStack(),
         ...(analytics ? [analytics.close()] : []),
       ]);
       return true;

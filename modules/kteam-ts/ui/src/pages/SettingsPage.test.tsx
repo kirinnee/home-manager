@@ -11,6 +11,8 @@ describe('SettingsPage', () => {
     expect(html).toContain('aria-label="Text size"');
     expect(html).toContain('aria-label="Dashboard density"');
     expect(html).toContain('aria-label="Conversation width"');
+    expect(html).toContain('>Composer Markdown</h2>');
+    expect(html).toContain('>Highlight Markdown syntax<');
     expect(html).toContain('aria-label="Colour mode"');
     expect(html).toContain('aria-label="Theme family"');
     expect(html).toContain('aria-label="Where speech is transcribed"');
@@ -84,5 +86,6 @@ describe('SettingsPage', () => {
       expect(html).toContain(`data-setting-id="${definition.id}"`);
       expect(html).toContain(`>${definition.label}<`);
     }
+    expect(html).toContain('>Highlight Markdown syntax<');
   });
 });

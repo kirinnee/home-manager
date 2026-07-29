@@ -1,7 +1,19 @@
 import path from 'node:path';
+import { BrowserDisplayService, type BrowserDisplay } from './browser-display';
+import {
+  BrowserProfileBusyError,
+  createBrowserProfile,
+  type BrowserProfile,
+  type BrowserProfileLease,
+} from './browser-profile';
 import type { KTeamPaths } from './paths';
 import { isSafeSessionId } from './pins-store';
-import { BrowserRuntime, type BrowserRuntimeFailure } from './browser-runtime';
+import {
+  BrowserRuntime,
+  readChromeExecutableVersion,
+  resolveChromeExecutable,
+  type BrowserRuntimeFailure,
+} from './browser-runtime';
 import {
   BROWSER_DEFAULT_VIEWPORT,
   BROWSER_IDLE_TIMEOUT_MS,
@@ -15,6 +27,7 @@ import {
   type BrowserInputEvent,
   type BrowserPageActionSnapshot,
   type BrowserPageSnapshot,
+  type BrowserProfileKind,
   type BrowserScreencastFrame,
   type BrowserStatusView,
   type BrowserViewport,
@@ -51,7 +64,20 @@ export type BrowserRuntimeFactory = (
   sessionId: string,
   root: string,
   viewport: BrowserViewport,
+  options?: BrowserRuntimeLaunchOptions,
 ) => Promise<ManagedBrowserRuntime>;
+
+export interface BrowserRuntimeLaunchOptions {
+  display?: string;
+  profile?: string;
+  chromeExecutable?: string;
+  onChromeSpawn?: (pid: number) => Promise<void> | void;
+}
+
+export interface BrowserChromeInstallation {
+  executable: string;
+  version: string;
+}
 
 export interface BrowserServiceClock {
   now(): number;
@@ -63,6 +89,11 @@ export interface BrowserServiceOptions {
   maximumInstances?: number;
   idleTimeoutMs?: number;
   runtimeFactory?: BrowserRuntimeFactory;
+  displayService?: Pick<BrowserDisplayService, 'start' | 'close'>;
+  profileService?: BrowserProfile;
+  chromeInstallation?: () => Promise<BrowserChromeInstallation>;
+  /** True while the human-only, CDP-free login window owns browser control. */
+  loginWindowOpen?: () => boolean;
   clock?: BrowserServiceClock;
 }
 
@@ -80,6 +111,17 @@ interface RunningBrowser {
   snapshot?: BrowserPageSnapshot;
   /** Concurrent status calls can report a pending navigation without queueing behind it. */
   pendingNavigations: number;
+  profileKind?: BrowserProfileKind;
+  profileSignedIn?: boolean;
+  profileLease?: BrowserProfileLease;
+}
+
+interface BrowserLaunchResources {
+  display?: BrowserDisplay;
+  profileKind?: BrowserProfileKind;
+  profileSignedIn?: boolean;
+  profileLease?: BrowserProfileLease;
+  runtime: BrowserRuntimeLaunchOptions;
 }
 
 interface BrowserViewer {
@@ -188,6 +230,10 @@ export class BrowserService {
   private readonly maximumInstances: number;
   private readonly idleTimeoutMs: number;
   private readonly runtimeFactory: BrowserRuntimeFactory;
+  private readonly displayService?: Pick<BrowserDisplayService, 'start' | 'close'>;
+  private readonly profileService?: BrowserProfile;
+  private readonly chromeInstallation?: () => Promise<BrowserChromeInstallation>;
+  private readonly loginWindowOpen?: () => boolean;
   private readonly clock: BrowserServiceClock;
   private readonly sweepTimer: unknown;
   private closed = false;
@@ -197,16 +243,94 @@ export class BrowserService {
     private readonly sessions: BrowserSessionRegistry,
     options: BrowserServiceOptions = {},
   ) {
+    const productionRuntime = options.runtimeFactory === undefined;
     this.maximumInstances = options.maximumInstances ?? BROWSER_MAX_INSTANCES;
     this.idleTimeoutMs = options.idleTimeoutMs ?? BROWSER_IDLE_TIMEOUT_MS;
     this.runtimeFactory =
-      options.runtimeFactory ?? ((sessionId, root, viewport) => BrowserRuntime.launch(sessionId, root, viewport));
+      options.runtimeFactory ??
+      ((sessionId, root, viewport, launch = {}) => BrowserRuntime.launch(sessionId, root, viewport, launch));
+    this.displayService = options.displayService ?? (productionRuntime ? new BrowserDisplayService() : undefined);
+    this.profileService = options.profileService ?? (productionRuntime ? createBrowserProfile(paths) : undefined);
+    this.chromeInstallation =
+      options.chromeInstallation ??
+      (productionRuntime
+        ? async () => {
+            const executable = resolveChromeExecutable();
+            return { executable, version: await readChromeExecutableVersion(executable) };
+          }
+        : undefined);
+    this.loginWindowOpen = options.loginWindowOpen;
     this.clock = options.clock ?? systemClock;
     this.sweepTimer = this.clock.setInterval(() => void this.sweepIdle(), Math.min(30_000, this.idleTimeoutMs));
   }
 
   private browserRoot(sessionId: string): string {
     return path.join(this.paths.sessions, sessionId, 'browser');
+  }
+
+  private async prepareLaunch(sessionId: string, root: string): Promise<BrowserLaunchResources> {
+    const installation = await this.chromeInstallation?.();
+    let profileLease: BrowserProfileLease | undefined;
+    let profileKind: BrowserProfileKind | undefined;
+    let profileSignedIn: boolean | undefined;
+    let profile: string | undefined;
+
+    if (this.profileService) {
+      try {
+        profileLease = await this.profileService.acquire({
+          sessionId,
+          ...(installation ? { chromeVersion: installation.version } : {}),
+        });
+        if (installation) await this.profileService.assertChromeVersionCompatible(installation.version);
+        await profileLease.cleanupStaleChromeLocks();
+        profile = profileLease.profile;
+        profileKind = 'shared';
+        profileSignedIn = await this.profileService.isPrimed();
+      } catch (error) {
+        if (!(error instanceof BrowserProfileBusyError) || error.reason !== 'lease') {
+          await profileLease?.release().catch(() => undefined);
+          throw error;
+        }
+        // Acquisition itself can race a foreign Chrome appearing before the
+        // guarded Singleton cleanup. If that happens after we obtained the
+        // lease, release it before deliberately selecting the session profile.
+        await profileLease?.release().catch(() => undefined);
+        // One user-data-dir can back only one live Chrome. Other sessions keep
+        // working against their existing durable per-session profile, and the
+        // status contract says plainly that it is not the human-primed one.
+        profileLease = undefined;
+        profile = path.join(root, 'profile');
+        profileKind = 'session';
+        profileSignedIn = false;
+      }
+    }
+
+    try {
+      const display = await this.displayService?.start();
+      return {
+        ...(display ? { display } : {}),
+        ...(profileKind ? { profileKind } : {}),
+        ...(profileSignedIn === undefined ? {} : { profileSignedIn }),
+        ...(profileLease ? { profileLease } : {}),
+        runtime: {
+          ...(display?.display ? { display: display.display } : {}),
+          ...(profile ? { profile } : {}),
+          ...(installation ? { chromeExecutable: installation.executable } : {}),
+          ...(profileLease && installation
+            ? { onChromeSpawn: (pid: number) => profileLease!.updateChromePid(pid, installation.version) }
+            : profileLease
+              ? { onChromeSpawn: (pid: number) => profileLease!.updateChromePid(pid) }
+              : {}),
+        },
+      };
+    } catch (error) {
+      await profileLease?.release().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async releaseProfile(entry: Pick<RunningBrowser, 'profileLease'>): Promise<void> {
+    await entry.profileLease?.release().catch(() => undefined);
   }
 
   private activeCount(): number {
@@ -228,6 +352,15 @@ export class BrowserService {
 
   private assertServiceOpen(): void {
     if (this.closed) throw new BrowserError('not_running', 'remote browser service is shutting down', 503);
+  }
+
+  private assertAgentControlAvailable(): void {
+    if (!this.loginWindowOpen?.()) return;
+    throw new BrowserError(
+      'login_window_open',
+      'the human browser login window is open; agent browser control is unavailable until it closes',
+      409,
+    );
   }
 
   private rememberFailure(sessionId: string, error: unknown): void {
@@ -275,7 +408,7 @@ export class BrowserService {
     }
   }
 
-  private statusFor(sessionId: string, entry?: RunningBrowser): BrowserStatusView {
+  private async statusFor(sessionId: string, entry?: RunningBrowser): Promise<BrowserStatusView> {
     const now = this.clock.now();
     const starting = this.starting.has(sessionId);
     const failure = this.failures.get(sessionId);
@@ -290,6 +423,24 @@ export class BrowserService {
       pages: [],
       capacity: { running: this.activeCount(), maximum: this.maximumInstances },
     };
+    if (entry?.profileKind) {
+      view.profileKind = entry.profileKind;
+      if (entry.profileSignedIn !== undefined) view.profileSignedIn = entry.profileSignedIn;
+    } else if (this.profileService) {
+      const anotherSessionOwnsShared = [...this.entries.entries()].some(
+        ([ownerId, owner]) => ownerId !== sessionId && owner.profileKind === 'shared',
+      );
+      if (anotherSessionOwnsShared) {
+        view.profileKind = 'session';
+        view.profileSignedIn = false;
+      } else if (this.starting.size === 0) {
+        // Stopped status describes the durable profile a first launch will try.
+        // While any launch is unresolved the profile choice is unknown, so the
+        // optional fields stay absent rather than claiming shared availability.
+        view.profileKind = 'shared';
+        view.profileSignedIn = await this.profileService.isPrimed();
+      }
+    }
     if (entry) {
       view.startedAt = new Date(entry.startedAt).toISOString();
       const snapshot = entry.snapshot;
@@ -346,33 +497,35 @@ export class BrowserService {
     // The runtime can exit while location() is pending. Re-read the map so the
     // recorded failure wins over the stale entry that handleUnexpectedExit()
     // has already marked as stopping and removed.
-    return this.statusFor(sessionId, this.entries.get(sessionId));
+    return await this.statusFor(sessionId, this.entries.get(sessionId));
   }
 
   async start(sessionRef: string, actor: BrowserActorKind): Promise<BrowserStatusView> {
     this.assertServiceOpen();
+    this.assertAgentControlAvailable();
     const sessionId = await this.resolveSession(sessionRef);
     // Resolution may await mutable daemon state. A shutdown begun during that
     // await must prevent a late launch from escaping close()'s snapshot.
     this.assertServiceOpen();
+    this.assertAgentControlAvailable();
     const existing = this.entries.get(sessionId);
     if (existing) {
       if (existing.pendingNavigations === 0) {
         const snapshot = await existing.runtime.location();
         const current = this.entries.get(sessionId);
-        if (current !== existing || current.state !== 'running') return this.statusFor(sessionId, current);
+        if (current !== existing || current.state !== 'running') return await this.statusFor(sessionId, current);
         this.rememberSnapshot(existing, snapshot);
       }
       this.touch(existing, actor, 'start');
-      return this.statusFor(sessionId, existing);
+      return await this.statusFor(sessionId, existing);
     }
     const pending = this.starting.get(sessionId);
     if (pending) {
       const launched = await pending;
       const entry = this.entries.get(sessionId);
-      if (entry !== launched || entry.state !== 'running') return this.statusFor(sessionId, entry);
+      if (entry !== launched || entry.state !== 'running') return await this.statusFor(sessionId, entry);
       this.touch(entry, actor, 'start');
-      return this.statusFor(sessionId, entry);
+      return await this.statusFor(sessionId, entry);
     }
     if (this.activeCount() >= this.maximumInstances) {
       throw new BrowserError(
@@ -383,11 +536,21 @@ export class BrowserService {
     }
     this.failures.delete(sessionId);
     const startedAt = this.clock.now();
-    const launch = this.runtimeFactory(sessionId, this.browserRoot(sessionId), BROWSER_DEFAULT_VIEWPORT).then(
-      async runtime => {
-        if (this.closed) {
+    const root = this.browserRoot(sessionId);
+    const launch = this.prepareLaunch(sessionId, root).then(async resources => {
+      let runtime: ManagedBrowserRuntime | undefined;
+      try {
+        runtime = await this.runtimeFactory(sessionId, root, BROWSER_DEFAULT_VIEWPORT, resources.runtime);
+        const serviceClosed = this.closed;
+        const loginBlocked = this.loginWindowOpen?.() === true;
+        if (serviceClosed || loginBlocked) {
           await runtime.close().catch(() => undefined);
-          throw new BrowserError('not_running', 'remote browser service is shutting down', 503);
+          if (serviceClosed) throw new BrowserError('not_running', 'remote browser service is shutting down', 503);
+          throw new BrowserError(
+            'login_window_open',
+            'the human browser login window is open; agent browser control is unavailable until it closes',
+            409,
+          );
         }
         let snapshot: BrowserPageSnapshot;
         try {
@@ -404,6 +567,9 @@ export class BrowserService {
           viewers: new Map(),
           pendingNavigations: 0,
           snapshot,
+          ...(resources.profileKind ? { profileKind: resources.profileKind } : {}),
+          ...(resources.profileSignedIn === undefined ? {} : { profileSignedIn: resources.profileSignedIn }),
+          ...(resources.profileLease ? { profileLease: resources.profileLease } : {}),
         };
         this.touch(entry, actor, 'start');
         this.entries.set(sessionId, entry);
@@ -411,12 +577,16 @@ export class BrowserService {
           void runtime.unexpectedExit.then(failure => this.handleUnexpectedExit(sessionId, entry, failure));
         }
         return entry;
-      },
-    );
+      } catch (error) {
+        await runtime?.close().catch(() => undefined);
+        await resources.profileLease?.release().catch(() => undefined);
+        throw error;
+      }
+    });
     this.starting.set(sessionId, launch);
     try {
       await launch;
-      return this.statusFor(sessionId, this.entries.get(sessionId));
+      return await this.statusFor(sessionId, this.entries.get(sessionId));
     } catch (error) {
       this.rememberFailure(sessionId, error);
       throw error;
@@ -442,7 +612,11 @@ export class BrowserService {
       ),
     );
     this.terminateViewers(entry, { code: 1011, reason: 'remote browser exited' });
-    await entry.runtime.close().catch(() => undefined);
+    try {
+      await entry.runtime.close().catch(() => undefined);
+    } finally {
+      await this.releaseProfile(entry);
+    }
   }
 
   async stop(sessionRef: string, actor: BrowserActorKind): Promise<BrowserStatusView> {
@@ -451,7 +625,7 @@ export class BrowserService {
     const entry = this.entries.get(sessionId) ?? (pending ? await pending : undefined);
     if (!entry) {
       this.failures.delete(sessionId);
-      return this.statusFor(sessionId);
+      return await this.statusFor(sessionId);
     }
     entry.state = 'stopping';
     this.touch(entry, actor, 'stop');
@@ -459,10 +633,11 @@ export class BrowserService {
     try {
       await entry.runtime.close();
     } finally {
+      await this.releaseProfile(entry);
       this.entries.delete(sessionId);
       this.failures.delete(sessionId);
     }
-    return this.statusFor(sessionId);
+    return await this.statusFor(sessionId);
   }
 
   private running(sessionId: string): RunningBrowser {
@@ -478,7 +653,9 @@ export class BrowserService {
     onFrame: (frame: BrowserScreencastFrame) => void,
     onTerminal?: (terminal: BrowserViewerTerminal) => void,
   ): Promise<BrowserViewerAttachment> {
+    this.assertAgentControlAvailable();
     const sessionId = await this.resolveSession(sessionRef);
+    this.assertAgentControlAvailable();
     const entry = this.running(sessionId);
     const id = crypto.randomUUID();
     entry.viewers.set(id, { onFrame, onTerminal });
@@ -528,7 +705,9 @@ export class BrowserService {
   }
 
   async dispatchHumanInput(sessionRef: string, input: BrowserInputEvent): Promise<void> {
+    this.assertAgentControlAvailable();
     const sessionId = await this.resolveSession(sessionRef);
+    this.assertAgentControlAvailable();
     const entry = this.running(sessionId);
     await entry.runtime.dispatchInput(boundHumanInput(input, entry.runtime.viewport));
     // The hot stream includes mouse moves and key repeats, so do not make each
@@ -551,7 +730,7 @@ export class BrowserService {
     const sessionId = await this.resolveSession(sessionRef);
     const entry = this.running(sessionId);
     this.touch(entry, 'human', action);
-    return this.statusFor(sessionId, entry);
+    return await this.statusFor(sessionId, entry);
   }
 
   private async agentResult(
@@ -571,23 +750,25 @@ export class BrowserService {
     }
     const current = this.entries.get(sessionId);
     if (current !== entry || current.state !== 'running') {
-      return { status: this.statusFor(sessionId, current), result };
+      return { status: await this.statusFor(sessionId, current), result };
     }
     const at = this.touch(current, actor, action);
     // The worker serializes selection and the verb, so this identity is atomic
     // even when a click opens a popup or a close selects a neighbour.
     this.rememberAgentPage(current, actor, action, result.actedPageId, at);
-    return { status: this.statusFor(sessionId, current), result };
+    return { status: await this.statusFor(sessionId, current), result };
   }
 
   async act(sessionRef: string, action: BrowserAction, actor: BrowserActorKind): Promise<BrowserActionResult> {
+    this.assertAgentControlAvailable();
     const sessionId = await this.resolveSession(sessionRef);
+    this.assertAgentControlAvailable();
     switch (action.action) {
       case 'start':
         return { status: await this.start(sessionId, actor) };
       case 'open': {
         await this.start(sessionId, actor);
-        if (!action.url) return { status: this.statusFor(sessionId, this.running(sessionId)) };
+        if (!action.url) return { status: await this.statusFor(sessionId, this.running(sessionId)) };
         return await this.agentResult(sessionId, 'navigate', actor, runtime => runtime.navigate(action.url!));
       }
       case 'stop':
@@ -637,11 +818,39 @@ export class BrowserService {
         try {
           await entry.runtime.close();
         } finally {
+          await this.releaseProfile(entry);
           this.entries.delete(sessionId);
         }
       }),
     );
     return expired.length;
+  }
+
+  /** Drain every CDP-controlled browser before the human types credentials. */
+  async closeForLoginWindow(): Promise<void> {
+    const pending = await Promise.allSettled([...this.starting.values()]);
+    const launched = pending
+      .filter((result): result is PromiseFulfilledResult<RunningBrowser> => result.status === 'fulfilled')
+      .map(result => result.value);
+    const browserEntries = new Set([...this.entries.values(), ...launched]);
+    for (const entry of browserEntries) {
+      entry.state = 'stopping';
+      this.terminateViewers(entry, { code: 1001, reason: 'human browser login window opened' });
+    }
+    await Promise.allSettled(
+      [...browserEntries].map(async entry => {
+        try {
+          await entry.runtime.close();
+        } finally {
+          await this.releaseProfile(entry);
+        }
+      }),
+    );
+    for (const [sessionId, entry] of this.entries) {
+      if (!browserEntries.has(entry)) continue;
+      this.entries.delete(sessionId);
+      this.failures.delete(sessionId);
+    }
   }
 
   async close(): Promise<void> {
@@ -657,8 +866,16 @@ export class BrowserService {
       entry.state = 'stopping';
       this.terminateViewers(entry, { code: 1001, reason: 'browser service shutting down' });
     }
-    const runtimes = new Set([...browserEntries].map(entry => entry.runtime));
-    await Promise.allSettled([...runtimes].map(runtime => runtime.close()));
+    await Promise.allSettled(
+      [...browserEntries].map(async entry => {
+        try {
+          await entry.runtime.close();
+        } finally {
+          await this.releaseProfile(entry);
+        }
+      }),
+    );
+    await this.displayService?.close().catch(() => undefined);
     this.entries.clear();
     this.starting.clear();
   }

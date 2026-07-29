@@ -370,6 +370,28 @@ describe('action body parsing', () => {
     );
   });
 
+  test('reopen requires the reason and verbatim sourced ask as one atomic action', () => {
+    expect(
+      parseTaskActionBody({
+        action: 'reopen',
+        reason: 'The deployed route is still broken.',
+        ask: 'The browser still returns 404; fix it here.',
+        source: 'session:lead#44',
+      }),
+    ).toEqual({
+      action: 'reopen',
+      reason: 'The deployed route is still broken.',
+      ask: 'The browser still returns 404; fix it here.',
+      source: 'session:lead#44',
+    });
+    expect(() => parseTaskActionBody({ action: 'reopen', reason: 'broken', source: 'session:lead#44' })).toThrow(
+      'verbatim new ask',
+    );
+    expect(() => parseTaskActionBody({ action: 'reopen', ask: 'fix it', source: 'session:lead#44' })).toThrow(
+      'requires a reason',
+    );
+  });
+
   test('dependency takes a task id (or its dependsOn alias) and an optional remove flag', () => {
     expect(parseTaskActionBody({ action: 'dependency', taskId: 'F5' })).toEqual({
       action: 'dependency',
@@ -579,6 +601,19 @@ describe('markdown renders (a VIEW, never storage)', () => {
     });
     expect(summariseActivity(entry('created', { status: 'todo' }))).toBe('as todo');
     expect(summariseActivity(entry('status', { from: 'todo', to: 'built', reason: 'r' }))).toContain('todo → built');
+    expect(
+      summariseActivity(
+        entry('status', {
+          from: 'live',
+          to: 'in_progress',
+          phaseFrom: 'live',
+          phaseTo: 'build',
+          reason: 'broken after deploy',
+          backward: true,
+          reopened: true,
+        }),
+      ),
+    ).toBe('REOPENED live → build (broken after deploy)');
     expect(summariseActivity(entry('note', { text: 'hi' }))).toBe('hi');
     expect(summariseActivity(entry('feedback', { text: 'later' }))).toBe('later');
     expect(summariseActivity(entry('link', { field: 'pr', value: 'u' }))).toBe('pr = u');

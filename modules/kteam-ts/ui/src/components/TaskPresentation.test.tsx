@@ -157,6 +157,22 @@ describe('task-v2 presentation', () => {
     expect(html).toContain('href="/session/ms-other"');
     expect(html).toContain('not a blocker'); // advisory framing, never a blocker
   });
+  test('a backward-move reason stays visible on the row and detail without claiming the task is blocked', () => {
+    const movedBack = {
+      ...task,
+      blocked: false,
+      blockedReason: null,
+      blockedSince: null,
+      blockedBy: [],
+      statusReason: 'The deployed browser still returns 404.',
+    };
+    const row = renderToStaticMarkup(<TaskRow task={movedBack} onOpen={() => undefined} />);
+    const detail = renderToStaticMarkup(<TaskDetail task={movedBack} activity={[]} />);
+    for (const html of [row, detail]) {
+      expect(html).toContain('Phase note · The deployed browser still returns 404.');
+      expect(html).not.toContain('>Blocked<');
+    }
+  });
   test('a dropped reason is not mislabeled as a current blocker', () => {
     const html = renderToStaticMarkup(
       <TaskDetail
@@ -279,8 +295,8 @@ describe('task-v2 presentation', () => {
     expect(html).toContain('whitespace-pre-wrap');
     expect(html).toContain('<ul>');
     expect(html).toContain('opaque #F99 &lt;tag&gt;');
-    expect(html).toContain('data-task-reference="F12"');
-    expect(html).toContain('href="/tasks/F12"');
+    expect(html).not.toContain('data-task-reference="F12"');
+    expect(html).not.toContain('href="/tasks/F12"');
   });
 
   test('a same-session task receives the hosting Files resolution context', () => {

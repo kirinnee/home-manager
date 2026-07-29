@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdir, mkdtemp, rm } from 'fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import path from 'path';
 import { createPaths, sessionDir, type KTeamPaths } from './paths';
 import type { SessionView } from './service';
 import type { KTeamEvent } from './types';
-import { MAX_TASK_NOTE_LEN, type ScopedTaskSummary, type SessionTaskListResponse } from './tasks-types';
+import {
+  MAX_TASK_NOTE_LEN,
+  type ScopedTaskSummary,
+  type SessionTaskListResponse,
+  type TaskActivity,
+} from './tasks-types';
 import { AttentionService } from './attention-service';
 import { AttentionSources } from './attention-sources';
 import type { AttentionSnapshot } from './attention-types';
@@ -133,8 +138,18 @@ class Sessions {
 
 class Tasks {
   current = taskSnapshot('blocked');
+  activityBaseline: {
+    tasks: Array<{
+      id: string;
+      workflow: 'quick' | 'design-first' | 'research-first' | 'investigate';
+      activity: TaskActivity[];
+      activityParseErrors: number;
+    }>;
+    parseErrors: number;
+  } = { tasks: [], parseErrors: 0 };
   listeners = new Set<(event: KTeamEvent) => void>();
   sessionTaskList = async () => this.current;
+  sessionTaskActivityBaselines = async () => this.activityBaseline;
   subscribe = (listener: (event: KTeamEvent) => void) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -152,6 +167,18 @@ class Tasks {
       type: 'tasks.updated',
       source,
       data: this.current,
+    };
+    for (const listener of this.listeners) listener(event);
+  }
+  emitEvent(type: string, data: Record<string, unknown>, source: KTeamEvent['source'] = 'client'): void {
+    const event: KTeamEvent = {
+      sequence: 0,
+      time: '2026-07-28T00:04:30.000Z',
+      sessionId: SID,
+      turn: 0,
+      type,
+      source,
+      data,
     };
     for (const listener of this.listeners) listener(event);
   }
@@ -443,6 +470,178 @@ describe('AttentionSources', () => {
     snapshot = await boardWhen(h.service, value => value.resolved.some(item => item.source === 'task'));
     expect(snapshot.items.some(item => item.source === 'task')).toBe(false);
     h.sources.close();
+  });
+
+  test('a live/done rewind raises one durable Attention item while a pre-ship rewind stays quiet', async () => {
+    const h = await harness(taskSnapshot('in_progress'));
+    h.tasks.emitEvent(
+      'task.reopened',
+      {
+        id: 'F31',
+        title: 'Ship release',
+        from: 'live',
+        to: 'build',
+        reason: 'The deployed release still returns 404.',
+        actor: SID,
+        actorName: 'zoe',
+      },
+      `peer:${SID}`,
+    );
+    let snapshot = await boardWhen(h.service, value =>
+      value.items.some(item => item.sourceRef === 'task-reopened:F31'),
+    );
+    expect(snapshot.items.find(item => item.sourceRef === 'task-reopened:F31')).toMatchObject({
+      source: 'agent-raised',
+      subject: '#F31: shipped work reopened from live',
+      why: 'The deployed release still returns 404.',
+      waitingSince: '2026-07-28T00:04:30.000Z',
+      raisedBy: 'daemon',
+    });
+
+    // The same unresolved shipped task refreshes one signal rather than
+    // filling Attention; the task activity log owns the full round-trip audit.
+    h.tasks.emitEvent('task.reopened', {
+      id: 'F31',
+      from: 'done',
+      to: 'build',
+      reason: 'The human found a second regression after verification.',
+    });
+    snapshot = await boardWhen(
+      h.service,
+      value =>
+        value.items.find(item => item.sourceRef === 'task-reopened:F31')?.why ===
+        'The human found a second regression after verification.',
+    );
+    expect(snapshot.items.filter(item => item.sourceRef === 'task-reopened:F31')).toHaveLength(1);
+
+    h.tasks.emitEvent('task.reopened', {
+      id: 'F32',
+      from: 'build',
+      to: 'todo',
+      reason: 'Deferred until later.',
+    });
+    await Bun.sleep(20);
+    expect((await h.service.list(SID)).items.some(item => item.sourceRef === 'task-reopened:F32')).toBe(false);
+    h.sources.close();
+  });
+
+  test('startup recovers a committed shipped rewind without resurrecting an explicitly resolved one', async () => {
+    const sessions = new Sessions();
+    sessions.current = view(false);
+    const tasks = new Tasks();
+    tasks.current = taskSnapshot('in_progress');
+    const reopen = (seq: number, time: string, from: 'live' | 'done', reason: string): TaskActivity => ({
+      v: 1,
+      seq,
+      time,
+      actor: SID,
+      actorName: 'zoe',
+      type: 'status',
+      data: { phaseFrom: from, phaseTo: 'build', reason, backward: true, reopened: true },
+    });
+    tasks.activityBaseline = {
+      tasks: [
+        {
+          id: 'F31',
+          workflow: 'quick',
+          activity: [
+            reopen(7, '2026-07-28T00:04:00.000Z', 'live', 'The deployed release still returns 404.'),
+            {
+              ...reopen(8, '2026-07-28T00:04:30.000Z', 'live', 'Malformed newer row.'),
+              data: { phaseFrom: 'live', phaseTo: 'build', reopened: true },
+            },
+          ],
+          activityParseErrors: 0,
+        },
+        {
+          id: 'F32',
+          workflow: 'quick',
+          activity: [
+            {
+              ...reopen(2, '2026-07-28T00:04:30.000Z', 'live', 'This is a corrupt forward marker.'),
+              data: {
+                phaseFrom: 'live',
+                phaseTo: 'done',
+                reason: 'This is a corrupt forward marker.',
+                backward: true,
+                reopened: true,
+              },
+            },
+          ],
+          activityParseErrors: 0,
+        },
+        {
+          id: 'F33',
+          workflow: 'quick',
+          activity: [
+            {
+              ...reopen(2, '2026-07-28T00:04:30.000Z', 'live', 'This row lacks the daemon backward marker.'),
+              data: {
+                phaseFrom: 'live',
+                phaseTo: 'build',
+                reason: 'This row lacks the daemon backward marker.',
+                reopened: true,
+              },
+            },
+          ],
+          activityParseErrors: 0,
+        },
+      ],
+      parseErrors: 0,
+    };
+    const service = new AttentionService(
+      paths,
+      { resolve: async ref => (ref === SID ? { id: SID, name: 'zoe' } : null) },
+      { role: 'daemon' },
+    );
+
+    // Simulate restart after the task transaction committed but before its
+    // transient task.reopened listener persisted the Attention item.
+    const first = new AttentionSources(service, sessions, tasks);
+    await first.start();
+    let snapshot = await service.list(SID);
+    expect(snapshot.items).toContainEqual(
+      expect.objectContaining({
+        sourceRef: 'task-reopened:F31',
+        why: 'The deployed release still returns 404.',
+        waitingSince: '2026-07-28T00:04:00.000Z',
+      }),
+    );
+    expect(snapshot.items.some(item => item.sourceRef === 'task-reopened:F32')).toBe(false);
+    expect(snapshot.items.some(item => item.sourceRef === 'task-reopened:F33')).toBe(false);
+    await service.resolveFromSource(SID, 'agent-raised', 'task-reopened:F31', 'The human reviewed the reopen.', {
+      actor: 'user',
+    });
+    snapshot = await service.list(SID);
+    const resolvedAt = snapshot.resolved.find(item => item.sourceRef === 'task-reopened:F31')!.resolvedAt;
+    expect(snapshot.reopenResolvedAt?.['F31']).toBe(resolvedAt);
+    first.close();
+
+    // The display audit is intentionally bounded. Prune this entry exactly as
+    // the cap eventually will; the compact per-task watermark must survive.
+    const stored = JSON.parse(await readFile(service.attention.file(SID), 'utf8')) as Record<string, unknown>;
+    stored['resolved'] = [];
+    await writeFile(service.attention.file(SID), JSON.stringify(stored));
+
+    const afterResolution = new AttentionSources(service, sessions, tasks);
+    await afterResolution.start();
+    snapshot = await service.list(SID);
+    expect(snapshot.items.some(item => item.sourceRef === 'task-reopened:F31')).toBe(false);
+    afterResolution.close();
+
+    // A later shipped rewind is a genuinely new need even though the stable
+    // source ref has an older resolution in bounded audit history.
+    const secondReopenAt = new Date(Date.parse(resolvedAt) + 1_000).toISOString();
+    tasks.activityBaseline.tasks[0]!.activity.push(
+      reopen(9, secondReopenAt, 'done', 'Verification exposed a second regression.'),
+    );
+    const afterSecondReopen = new AttentionSources(service, sessions, tasks);
+    await afterSecondReopen.start();
+    snapshot = await service.list(SID);
+    expect(snapshot.items.filter(item => item.sourceRef === 'task-reopened:F31')).toEqual([
+      expect.objectContaining({ why: 'Verification exposed a second regression.' }),
+    ]);
+    afterSecondReopen.close();
   });
 
   test('an explicit task status change resolves with the action actor', async () => {

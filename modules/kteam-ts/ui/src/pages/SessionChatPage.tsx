@@ -17,7 +17,7 @@
 // neighbours — all three ran per open session, forever.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ImageOff, Loader2, MessageSquare, RotateCcw, Terminal, X } from 'lucide-react';
+import { FileText, ImageOff, Loader2, MessageSquare, RotateCcw, Terminal, X } from 'lucide-react';
 import { api, ApiError, HAS_TOKEN } from '../lib/api';
 import { useFleet, useSession, useSessionEvents, useStore, useUiControls } from '../lib/store';
 import type { ChatRecord, KTeamEvent, SendRecord, SessionView } from '../types';
@@ -69,7 +69,9 @@ import {
   attachmentErrorCopy,
   attachmentErrorMessage,
   attachmentFromView,
+  attachmentTypeLabel,
   formatAttachmentSize,
+  isImageMime,
   sameAttachmentIds,
   validateAttachmentFile,
   type AttachmentView,
@@ -731,7 +733,7 @@ export function SessionChatPage({
         const localId = `attachment-${crypto.randomUUID()}`;
         const validation = validateAttachmentFile(file);
         let objectUrl: string | undefined;
-        if (file.type.startsWith('image/')) {
+        if (isImageMime(file.type)) {
           objectUrl = URL.createObjectURL(file);
           attachmentObjectUrls.current.add(objectUrl);
         }
@@ -1457,7 +1459,7 @@ export function PendingAttachmentStrip({
   return (
     <div
       className="flex min-w-0 gap-1.5 overflow-x-auto border-b border-border-soft pb-1 scroll-thin"
-      aria-label="Attached images"
+      aria-label="Attached files"
     >
       {entries.map(entry => (
         <div
@@ -1470,7 +1472,7 @@ export function PendingAttachmentStrip({
             // of the same 230px would have forced the error to truncate, and that
             // is the one string here the reader cannot do without.
             entry.status === 'failed'
-              ? 'min-w-[320px] max-w-[344px] border-err-border'
+              ? 'min-w-[252px] max-w-[320px] border-err-border'
               : 'min-w-[230px] max-w-[320px] border-border-soft',
           )}
           role={entry.status === 'failed' ? 'alert' : 'status'}
@@ -1483,7 +1485,11 @@ export function PendingAttachmentStrip({
             />
           ) : (
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border border-border-soft bg-surface">
-              <ImageOff size={16} className="text-muted" aria-hidden="true" />
+              {isImageMime(entry.view?.mime ?? entry.file.type) ? (
+                <ImageOff size={16} className="text-muted" aria-hidden="true" />
+              ) : (
+                <FileText size={16} className="text-muted" aria-hidden="true" />
+              )}
             </span>
           )}
           {/* TWO ROWS, TIGHT LEADING. This was three rows at body leading — name,
@@ -1521,6 +1527,16 @@ export function PendingAttachmentStrip({
                 )}
               </span>
             )}
+            {!isImageMime(entry.view?.mime ?? entry.file.type) && (
+              <span className="block truncate text-faint">
+                {attachmentTypeLabel(entry.view?.mime ?? entry.file.type)}
+              </span>
+            )}
+            {entry.view?.textExtraction && (
+              <span className="block text-faint">
+                text extracted for agent{entry.view.textExtraction.truncated ? ' · truncated' : ''}
+              </span>
+            )}
           </span>
           {entry.status === 'failed' && (
             <button
@@ -1538,7 +1554,7 @@ export function PendingAttachmentStrip({
             className="inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center rounded-control text-muted hover:bg-surface hover:text-fg"
             onClick={() => onRemove(entry)}
             aria-label={`Remove ${entry.file.name}`}
-            title="Remove image"
+            title="Remove file"
           >
             <X size={16} aria-hidden="true" />
           </button>

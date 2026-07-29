@@ -17,6 +17,7 @@ export const BROWSER_DEFAULT_VIEWPORT = { width: 1_280, height: 800 } as const;
 
 export type BrowserLifecycle = 'stopped' | 'starting' | 'running' | 'stopping' | 'error';
 export type BrowserActorKind = 'agent' | 'human';
+export type BrowserProfileKind = 'shared' | 'session';
 export type BrowserPageState = 'loading' | 'ready' | 'error';
 export type BrowserActivity =
   | 'start'
@@ -131,6 +132,11 @@ export interface BrowserStatusView {
   viewport: BrowserViewport;
   viewers: number;
   persistentProfile: true;
+  /** Shared human-primed profile when its exclusive lease is available;
+   *  otherwise this session's durable, deliberately unsigned fallback. */
+  profileKind?: BrowserProfileKind;
+  /** Set only from the explicit priming marker. Cookies are never inspected. */
+  profileSignedIn?: boolean;
   idleTimeoutSeconds: number;
   idleDeadline?: string;
   startedAt?: string;
@@ -197,6 +203,8 @@ export type BrowserErrorCode =
   | 'forbidden'
   | 'capacity'
   | 'not_running'
+  | 'profile_busy'
+  | 'login_window_open'
   | 'launch_failed'
   | 'upstream_failed';
 

@@ -163,6 +163,14 @@ export interface AttachmentView {
   sha256: string;
   path: string;
   createdAt: string;
+  /** Present when kteam retained bounded plain text for harness-independent use. */
+  textExtraction?: {
+    method: 'pdfjs' | 'docx-xml';
+    characters: number;
+    truncated: boolean;
+    totalPages?: number;
+    pagesRead?: number;
+  };
 }
 
 export interface KTeamService {

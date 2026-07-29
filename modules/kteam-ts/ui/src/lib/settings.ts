@@ -2,7 +2,14 @@
 // command palette. Labels, descriptions, anchors and search terms live here so
 // adding a setting cannot silently make its palette entry drift from the UI.
 
-export type SettingId = 'text-size' | 'density' | 'theme' | 'chat-width' | 'dictation' | 'notifications';
+export type SettingId =
+  | 'text-size'
+  | 'density'
+  | 'theme'
+  | 'chat-width'
+  | 'composer-markdown'
+  | 'dictation'
+  | 'notifications';
 
 export interface SettingDefinition {
   id: SettingId;
@@ -46,6 +53,13 @@ export const SETTINGS_DEFINITIONS: readonly SettingDefinition[] = [
       'column',
       'layout',
     ],
+  },
+  {
+    id: 'composer-markdown',
+    label: 'Composer Markdown',
+    description:
+      'Colour Markdown markers in the native message textarea and show a separate live rendered preview with proven, clickable references. Off by default pending a mobile Safari pass.',
+    keywords: ['composer', 'markdown', 'preview', 'syntax', 'highlight', 'references', 'links', 'message', 'editor'],
   },
   {
     id: 'theme',

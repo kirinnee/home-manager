@@ -45,9 +45,11 @@ import { Button } from './Primitives';
 import { cn, type Tone } from '../lib/utils';
 import { useKeyboardOpen } from '../hooks/useAppViewport';
 import { useAttentionItems, useAttentionSession } from '../hooks/useAttention';
+import { usePinsSession, useSessionPins } from '../hooks/usePins';
 import { useDebouncedEffect } from '../hooks/useDebounce';
 import { api } from '../lib/api';
 import { attentionStore } from '../lib/attention';
+import { pinsStore } from '../lib/pins';
 import { clearDraft, loadDraft, saveDraft } from '../lib/drafts';
 import { readInputModality, useInputModality } from '../hooks/useInputModality';
 import { useSession, useSessionEvents, useStore } from '../lib/store';
@@ -59,6 +61,9 @@ import { useComposerAutocomplete, type ComposerAutocompleteController } from './
 import { createComposerAutocompleteProviders } from './composer-autocomplete-providers';
 import { COMPOSER_TEXT_METRICS, ComposerHighlight, syncComposerHighlightViewport } from './ComposerHighlight';
 import { useMdComposePref } from '../lib/md-compose';
+import { validateAttachmentFile } from '../lib/attachments';
+import { Markdown, type MarkdownProps } from './Markdown';
+import { useSidePane } from './SidePane';
 
 /** Quiet window before a non-empty draft is written to storage. Debounced so a
  *  fast typist does not hit localStorage on every keystroke; short enough that a
@@ -392,13 +397,19 @@ export function selectComposerKeyboardSubmit(actions: {
   return actions.onSubmit;
 }
 
-export function clipboardImageFiles(
+export function clipboardAttachmentFiles(
   items: ArrayLike<{ kind: string; type: string; getAsFile(): File | null }>,
 ): File[] {
   return Array.from(items)
-    .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+    .filter(item => item.kind === 'file')
     .map(item => item.getAsFile())
-    .filter((file): file is File => file !== null);
+    .filter((file): file is File => file !== null)
+    .filter(file => {
+      // Browser clipboard MIME declarations are advisory. Keep empty/generic
+      // declarations for daemon sniffing, but never turn ordinary text items
+      // into files (those have already produced null above).
+      return validateAttachmentFile(file) !== 'unsupported_mime';
+    });
 }
 
 /**
@@ -492,6 +503,26 @@ export function ComposerTextarea({
   );
 }
 
+/** Separate from the caret-aligned paint layer on purpose: rendered Markdown
+ * consumes marker bytes and changes wrapping, so it can never safely replace
+ * or sit underneath the native textarea. This bounded reader uses the shared
+ * Markdown/reference pipeline while the textarea remains the sole editor. */
+export function ComposerMarkdownPreview({ text, className, ...markdown }: MarkdownProps) {
+  if (text.trim().length === 0) return null;
+  return (
+    <section
+      data-composer-markdown-preview=""
+      aria-label="Rendered Markdown preview"
+      className={cn('min-w-0 max-w-full border-b border-border-soft bg-surface-2 px-panel py-row-y', className)}
+    >
+      <span className="kt-label mb-1 block">Preview</span>
+      <div className="max-h-28 min-w-0 max-w-full overflow-auto overscroll-contain scroll-thin sm:max-h-36">
+        <Markdown text={text} {...markdown} className="text-row leading-base text-fg" />
+      </div>
+    </section>
+  );
+}
+
 export function Composer({
   draft,
   onDraftChange,
@@ -516,6 +547,7 @@ export function Composer({
   const disabledReasonId = useId();
   const keyboardOpen = useKeyboardOpen();
   const { touchAffected, enterSends } = useInputModality();
+  const sidePane = useSidePane();
   const markdownHighlight = useMdComposePref() === 'on';
   const syncHighlight = useCallback((input: HTMLTextAreaElement) => {
     syncComposerHighlightViewport(input, highlightRef.current);
@@ -556,6 +588,14 @@ export function Composer({
   useAttentionItems(sessionId);
   const attentionStatusRef = useRef(attentionStatus);
   attentionStatusRef.current = attentionStatus;
+  // Pins use the same store-backed shape: the foreground header normally
+  // hydrates them, while this idempotent call keeps standalone composers honest.
+  const pinsStatus = usePinsSession(sessionId);
+  const pins = useSessionPins(sessionId);
+  const pinsStatusRef = useRef(pinsStatus);
+  const pinsRef = useRef(pins);
+  pinsStatusRef.current = pinsStatus;
+  pinsRef.current = pins;
 
   // HARD REQUIREMENT: memoised on session identity + its stable harness fact,
   // never built inline.
@@ -582,9 +622,11 @@ export function Composer({
                 : EMPTY_COMPOSER_TASKS,
             getAttentionItems: () =>
               attentionStore.getSnapshot().sessions[sessionId]?.items ?? EMPTY_AUTOCOMPLETE_ATTENTION,
+            getPins: () => pinsRef.current,
             waitForTasks: () => taskResource.pending.current?.then(() => undefined),
             waitForAttentionItems: () =>
               attentionStatusRef.current === 'ready' ? undefined : attentionStore.hydrate(sessionId),
+            waitForPins: () => (pinsStatusRef.current === 'ready' ? undefined : pinsStore.hydrate(sessionId)),
           })
         : [],
     [autocompleteSession?.config.harness, fleetStore, sessionId],
@@ -716,7 +758,7 @@ export function Composer({
     : sending
       ? 'Sending…'
       : attachmentsPending
-        ? 'Wait for images to finish uploading.'
+        ? 'Wait for files to finish uploading.'
         : draft.trim().length === 0 && !hasAttachments
           ? 'Message is empty.'
           : undefined;
@@ -733,7 +775,7 @@ export function Composer({
         ref={fileInputRef}
         className="sr-only"
         type="file"
-        accept="image/png,image/jpeg,image/gif,image/webp"
+        accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/markdown,text/csv,application/json,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.txt,.md,.markdown,.csv,.json,.pdf,.docx"
         multiple
         disabled={disabled || sending}
         tabIndex={-1}
@@ -749,12 +791,12 @@ export function Composer({
         variant="ghost"
         size="sm"
         disabled={disabled || sending}
-        aria-label="Attach images"
-        title="Attach PNG, JPEG, GIF or WebP images"
+        aria-label="Attach files"
+        title="Attach images, PDFs, text files, JSON, CSV or DOCX"
         onClick={() => fileInputRef.current?.click()}
       >
         <Paperclip size={15} aria-hidden="true" />
-        <span className="sr-only">Attach images</span>
+        <span className="sr-only">Attach files</span>
       </Button>
     </>
   ) : null;
@@ -881,7 +923,7 @@ export function Composer({
       )}
       onPaste={event => {
         if (!onFiles || disabled || sending) return;
-        const files = clipboardImageFiles(event.clipboardData.items);
+        const files = clipboardAttachmentFiles(event.clipboardData.items);
         if (!files.length) return;
         event.preventDefault();
         onFiles(files);
@@ -907,6 +949,17 @@ export function Composer({
       {/* The dictation strip anchors to this composer root, so it renders once
           directly above either layout and paints nothing while hidden. */}
       {dictation.sheet}
+      {markdownHighlight && (
+        <ComposerMarkdownPreview
+          text={draft}
+          sessionId={sessionId}
+          cwd={sidePane?.cwd}
+          onTaskOpen={sidePane?.openTask}
+          onCodeReferenceOpen={sidePane?.openCodeReference}
+          onAttentionOpen={sidePane?.openAttention}
+          onPinOpen={sidePane?.openPin}
+        />
+      )}
       {compact ? (
         // PHONE DOCK (Telegram). Attach TOP-left, send/queue BOTTOM-right, and
         // the text TOP-ALIGNED between them — the controls flank the input

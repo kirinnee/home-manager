@@ -3,6 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   AttentionTrigger,
   actorLabel,
+  attentionReferenceDomId,
+  attentionRequestOutcome,
   attentionTriggerLabel,
   attentionUnreachableCopy,
   waitingAgeCopy,
@@ -30,6 +32,29 @@ describe('attention copy and age', () => {
 
   test('unreachable state refuses to pretend the list is empty', () => {
     expect(attentionUnreachableCopy()).toMatch(/out of date/i);
+  });
+
+  test('exact-reference delivery distinguishes active, resolved, missing, and unavailable', () => {
+    expect(attentionReferenceDomId('A3')).toBe('attention-reference-A3');
+    expect(attentionRequestOutcome('A3', 'loading', [], [])).toBe('pending');
+    expect(attentionRequestOutcome('A3', 'ready', [{ id: 'A3' }], [])).toBe('active');
+    expect(attentionRequestOutcome('A3', 'ready', [], [{ id: 'A3' }])).toBe('resolved');
+    expect(attentionRequestOutcome('A3', 'ready', [], [])).toBe('missing');
+    expect(attentionRequestOutcome('A3', 'error', [], [])).toBe('unavailable');
+  });
+
+  test('lands only inside the attention-owned scroller and opens resolved audit before clearing', async () => {
+    const source = await Bun.file(new URL('./AttentionPanel.tsx', import.meta.url)).text();
+    expect(source).toContain('data-attention-scroller');
+    expect(source).toContain("target.closest<HTMLElement>('[data-attention-scroller]')");
+    expect(source).toContain('audit.open = true');
+    expect(source).toContain('onPinOpen={onPinOpen}');
+    expect(source.indexOf('scroller.scrollTo({')).toBeLessThan(
+      source.indexOf(
+        'onRequestedAttentionHandled?.(requestedAttention.sequence);',
+        source.indexOf('requestAnimationFrame'),
+      ),
+    );
   });
 });
 

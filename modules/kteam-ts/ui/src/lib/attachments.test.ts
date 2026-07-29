@@ -10,8 +10,28 @@ import {
 } from './attachments';
 
 describe('attachment validation mirrors the daemon', () => {
-  test('accepts the four image declarations, aliases, and an omitted declaration', () => {
-    for (const type of ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/jpg', 'image/pjpeg', '']) {
+  test('accepts images, approved documents, aliases, and sniffable declarations', () => {
+    for (const type of [
+      'image/png',
+      'image/jpeg',
+      'image/gif',
+      'image/webp',
+      'image/jpg',
+      'image/pjpeg',
+      'application/pdf',
+      'application/x-pdf',
+      'text/plain',
+      'text/markdown',
+      'text/x-markdown',
+      'text/csv',
+      'text/x-csv',
+      'application/json',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      '',
+      'application/octet-stream',
+      'application/octet-stream; charset=binary',
+      'binary/octet-stream',
+    ]) {
       expect(validateAttachmentFile({ size: 10, type })).toBeNull();
     }
   });
@@ -20,25 +40,31 @@ describe('attachment validation mirrors the daemon', () => {
     expect(validateAttachmentFile({ size: 0, type: 'image/png' })).toBe('empty_attachment');
     expect(validateAttachmentFile({ size: MAX_ATTACHMENT_BYTES + 1, type: 'image/png' })).toBe('attachment_too_large');
     expect(validateAttachmentFile({ size: 10, type: 'video/mp4' })).toBe('unsupported_mime');
-    expect(validateAttachmentFile({ size: 10, type: 'text/plain' })).toBe('unsupported_mime');
+    expect(validateAttachmentFile({ size: 10, type: 'application/msword' })).toBe('unsupported_mime');
   });
 });
 
 describe('attachment error copy', () => {
   test('maps every daemon message family to actionable copy', () => {
     expect(attachmentErrorMessage(new Error('attachment is larger than the 20971520-byte limit'))).toBe(
-      'Images must be under 20 MB',
+      'Files must be 20 MiB or smaller',
     );
-    expect(attachmentErrorMessage(new Error('unsupported image type'))).toBe('Only PNG, JPEG, GIF or WebP images work');
+    expect(attachmentErrorMessage(new Error('unsupported image type'))).toBe("That file type isn't supported");
     expect(
       attachmentErrorMessage(new Error('declared MIME type image/png does not match detected type image/jpeg')),
-    ).toBe('Only PNG, JPEG, GIF or WebP images work');
+    ).toBe('The file type does not match its contents');
     expect(attachmentErrorMessage(new Error('attachment is empty'))).toBe('That file is empty');
     expect(attachmentErrorMessage(new Error('attachment filename is not safe'))).toBe("That file can't be attached");
     expect(attachmentErrorMessage(new Error('attachment att_dead was not found'))).toBe(
       'Attachment is no longer available — re-add it',
     );
     expect(attachmentErrorMessage(new Error('attachment manifest is invalid'))).toBe(
+      'Attachment is no longer available — re-add it',
+    );
+    expect(attachmentErrorMessage({ status: 422, message: 'PDF text extraction failed' })).toBe(
+      'PDF text extraction failed',
+    );
+    expect(attachmentErrorMessage({ status: 422, message: 'corrupt /home/kirin/.kteam attachment' })).toBe(
       'Attachment is no longer available — re-add it',
     );
   });
