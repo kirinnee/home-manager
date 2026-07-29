@@ -75,6 +75,13 @@ describe('warden anomaly detection', () => {
       expect(isWardenScannableStatus(status)).toBe(true);
   });
 
+  test('documents that historical terminal wreckage remains detector-only and preserves known-peer lookup', async () => {
+    const source = await Bun.file(new URL('./warden-detect.ts', import.meta.url)).text();
+    expect(source).toContain('Historical callers of detectAnomalies() may deliberately include terminal');
+    expect(source).toContain('knownSessions: readonly WardenSessionView[] = sessions');
+    expect(source).toContain('const knownById = new Map(knownSessions.map(item => [item.config.id, item]));');
+  });
+
   test('flags an active session with no live monitor handle', () => {
     const result = detectAnomalies([view('running', { hasLiveMonitor: false })], NOW, OPTIONS);
     expect(result.anomalies).toHaveLength(1);

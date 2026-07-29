@@ -9,14 +9,26 @@
 // rejected token, a warden that never swept and a warden that could not reach a
 // judgement are four different facts, and each one is printed as itself.
 //
-// It also does not resolve anything. The per-session Attention panel owns
-// `howToResolve` and the Mark-done action; duplicating them here would give the
-// same item two resolution workflows that can disagree. The whole row is one
-// tap through to the session instead.
+// Every row now leads with the warden's concrete next step and puts its safe
+// session control beside the explanation. A human should not have to open a
+// session just to discover whether the answer is nudge, resume, stop, or leave.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, CircleAlert, Clock3, Gavel, HelpCircle, LoaderCircle, ShieldQuestion, UserRound } from 'lucide-react';
-import { ApiError, api } from '../lib/api';
+import {
+  Bell,
+  Check,
+  CircleAlert,
+  Clock3,
+  Gavel,
+  HelpCircle,
+  LoaderCircle,
+  Play,
+  RotateCcw,
+  ShieldQuestion,
+  SquareX,
+  UserRound,
+} from 'lucide-react';
+import { ApiError, api, HAS_TOKEN } from '../lib/api';
 import { sessionReferenceHost } from '../lib/reference-host';
 import { Link } from '../lib/router';
 import { Markdown } from './Markdown';
@@ -27,6 +39,7 @@ import type {
   WardenAttentionView,
   WardenJudgement,
   WardenJudgementState,
+  WardenRecommendation,
   WardenVerdictKind,
 } from '../types';
 import { displayCallsign } from '../lib/callsign';
@@ -267,9 +280,13 @@ export function judgedByCopy(judgement: WardenJudgement): string {
 export function WardenAttentionSection({
   state,
   onOpenReport,
+  onRunAction,
+  actionPending,
 }: {
   state: WardenAttentionState;
   onOpenReport?: (path: string, sessionId: string, attentionId?: FleetAttentionItem['id']) => void;
+  onRunAction?: (item: FleetAttentionItem, recommendation: WardenRecommendation) => void;
+  actionPending?: string;
 }) {
   return (
     <section
@@ -300,10 +317,23 @@ export function WardenAttentionSection({
         </div>
       )}
 
-      {state.status === 'ready' && <ReadyBody view={state.view} onOpenReport={onOpenReport} />}
+      {state.status === 'ready' && (
+        <ReadyBody
+          view={state.view}
+          onOpenReport={onOpenReport}
+          onRunAction={onRunAction}
+          actionPending={actionPending}
+        />
+      )}
 
       {state.status === 'stale' && (
-        <ReadyBody view={state.view} onOpenReport={onOpenReport} stale={{ reason: state.reason }} />
+        <ReadyBody
+          view={state.view}
+          onOpenReport={onOpenReport}
+          onRunAction={onRunAction}
+          actionPending={actionPending}
+          stale={{ reason: state.reason }}
+        />
       )}
     </section>
   );
@@ -312,10 +342,14 @@ export function WardenAttentionSection({
 function ReadyBody({
   view,
   onOpenReport,
+  onRunAction,
+  actionPending,
   stale,
 }: {
   view: WardenAttentionView;
   onOpenReport?: (path: string, sessionId: string, attentionId?: FleetAttentionItem['id']) => void;
+  onRunAction?: (item: FleetAttentionItem, recommendation: WardenRecommendation) => void;
+  actionPending?: string;
   stale?: { reason: string };
 }) {
   const items = orderedAttentionItems(view.items);
@@ -387,6 +421,8 @@ function ReadyBody({
               item={item}
               oldest={index === 0}
               onOpenReport={onOpenReport}
+              onRunAction={onRunAction}
+              actionPending={actionPending}
             />
           ))}
         </ol>
@@ -444,10 +480,14 @@ function AttentionRow({
   item,
   oldest,
   onOpenReport,
+  onRunAction,
+  actionPending,
 }: {
   item: FleetAttentionItem;
   oldest: boolean;
   onOpenReport?: (path: string, sessionId: string, attentionId?: FleetAttentionItem['id']) => void;
+  onRunAction?: (item: FleetAttentionItem, recommendation: WardenRecommendation) => void;
+  actionPending?: string;
 }) {
   const judgement = item.judgement ?? { state: 'none' as const };
   const chip = judgementChip(judgement.state);
@@ -483,6 +523,9 @@ function AttentionRow({
             <chip.Icon size={11} aria-hidden="true" />
             {chip.label}
           </span>
+          {item.sessionStatus && (
+            <span className="kt-label shrink-0 text-faint">{item.sessionStatus.replaceAll('_', ' ')}</span>
+          )}
           {judgement.stale && (
             <span className="kt-label shrink-0 text-warn" title="Judged before this request appeared">
               stale
@@ -525,6 +568,12 @@ function AttentionRow({
             />
           </div>
         )}
+        <RecommendedAction
+          item={item}
+          recommendation={item.recommendation ?? fallbackRecommendation()}
+          pending={actionPending === `${item.sessionId}:${item.id}`}
+          onRunAction={onRunAction}
+        />
         <span className="text-meta leading-base text-muted">{judgementSummary(judgement)}</span>
 
         <span className="flex min-w-0 flex-wrap items-center gap-x-sm gap-y-xs text-meta text-faint">
@@ -556,6 +605,65 @@ function AttentionRow({
   );
 }
 
+function fallbackRecommendation(): WardenRecommendation {
+  return {
+    action: 'nudge',
+    reason: 'This daemon has not supplied a recommendation yet; ask the session to restate its blocker or continue.',
+  };
+}
+
+const ACTION_CONTROL: Record<Exclude<WardenRecommendation['action'], 'leave'>, { label: string; Icon: typeof Bell }> = {
+  nudge: { label: 'Nudge session', Icon: Bell },
+  resume: { label: 'Resume session', Icon: Play },
+  restart: { label: 'Restart session', Icon: RotateCcw },
+  stop: { label: 'Stop session', Icon: SquareX },
+  migrate: { label: 'Migrate session', Icon: RotateCcw },
+};
+
+function RecommendedAction({
+  item,
+  recommendation,
+  pending,
+  onRunAction,
+}: {
+  item: FleetAttentionItem;
+  recommendation: WardenRecommendation;
+  pending: boolean;
+  onRunAction?: (item: FleetAttentionItem, recommendation: WardenRecommendation) => void;
+}) {
+  if (recommendation.action === 'leave') {
+    return (
+      <div className="rounded-control border border-border-soft bg-surface-2 px-cell-x py-1.5 text-meta leading-base text-muted">
+        <span className="kt-label block text-faint">Suggested next step</span>
+        <span>No action needed — {recommendation.reason}</span>
+      </div>
+    );
+  }
+  const control = ACTION_CONTROL[recommendation.action];
+  const disabled =
+    pending || !HAS_TOKEN || !onRunAction || (recommendation.action === 'migrate' && !recommendation.wrapper);
+  return (
+    <div className="flex min-w-0 flex-col gap-xs rounded-control border border-accent-border bg-accent-soft px-cell-x py-1.5">
+      <span className="kt-label text-faint">Suggested next step</span>
+      <span className="text-meta leading-base text-fg-soft">{recommendation.reason}</span>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => onRunAction?.(item, recommendation)}
+        className="inline-flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-control border border-accent px-cell-x text-meta font-semibold text-accent hover:bg-surface disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {pending ? (
+          <LoaderCircle size={14} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+        ) : (
+          <control.Icon size={14} aria-hidden="true" />
+        )}
+        {pending ? 'Working…' : control.label}
+      </button>
+      {!HAS_TOKEN && <span className="text-meta text-faint">Read-only on this connection.</span>}
+    </div>
+  );
+}
+
 /** Live section: polls the admin-only fleet view and owns the report modal. */
 export function WardenAttention() {
   const [state, setState] = useState<WardenAttentionState>({ status: 'loading' });
@@ -566,6 +674,7 @@ export function WardenAttention() {
     attentionId?: FleetAttentionItem['id'];
   } | null>(null);
   const timer = useRef<number | null>(null);
+  const [actionPending, setActionPending] = useState<string | undefined>();
   const closeReport = useCallback(() => setReport(null), []);
 
   useEffect(() => {
@@ -602,9 +711,48 @@ export function WardenAttention() {
     }
   }, []);
 
+  const runAction = useCallback(async (item: FleetAttentionItem, recommendation: WardenRecommendation) => {
+    const key = `${item.sessionId}:${item.id}`;
+    setActionPending(key);
+    try {
+      switch (recommendation.action) {
+        case 'nudge':
+          await api.send(
+            item.sessionId,
+            'The warden flagged this session. Please continue or state the exact blocker.',
+            false,
+            crypto.randomUUID(),
+          );
+          break;
+        case 'resume':
+        case 'restart':
+          await api.resume(item.sessionId, 'Continue from the warden attention action.');
+          break;
+        case 'stop':
+          await api.stop(item.sessionId, 'Stopped from Warden attention.');
+          break;
+        case 'migrate':
+          if (!recommendation.wrapper) return;
+          await api.migrate(item.sessionId, { agent: recommendation.wrapper }, crypto.randomUUID());
+          break;
+        case 'leave':
+          return;
+      }
+      const view = await api.wardenAttention();
+      setState({ status: 'ready', view });
+    } finally {
+      setActionPending(undefined);
+    }
+  }, []);
+
   return (
     <>
-      <WardenAttentionSection state={state} onOpenReport={(path, sessionId) => void openReport(path, sessionId)} />
+      <WardenAttentionSection
+        state={state}
+        onOpenReport={(path, sessionId) => void openReport(path, sessionId)}
+        onRunAction={(item, action) => void runAction(item, action)}
+        actionPending={actionPending}
+      />
       <ReportModal
         open={report !== null}
         title={report?.title ?? ''}

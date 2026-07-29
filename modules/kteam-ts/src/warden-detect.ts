@@ -136,6 +136,9 @@ export function detectAnomalies(
   sessions: readonly WardenSessionView[],
   nowMs: number,
   options: WardenDetectOptions,
+  /** Full fleet lookup when `sessions` is deliberately live-only. Optional so
+   * historical/direct callers keep their existing exact behavior. */
+  knownSessions: readonly WardenSessionView[] = sessions,
 ): WardenDetectResult {
   const anomalies: WardenAnomaly[] = [];
   // Ancestry index: a warden must be excluded along with everything it spawned,
@@ -143,6 +146,7 @@ export function detectAnomalies(
   // force-labelled at start() too, but excluding by lineage here is the
   // authoritative guard even if a child slipped through with a different label.
   const byId = new Map(sessions.map(item => [item.config.id, item]));
+  const knownById = new Map(knownSessions.map(item => [item.config.id, item]));
   const inWardenLineage = (view: WardenSessionView): boolean => {
     const seen = new Set<string>();
     let current: WardenSessionView | undefined = view;
@@ -220,7 +224,7 @@ export function detectAnomalies(
     // Flagged immediately (no idle grace): the evidence is categorical — the
     // peer is in a terminal state — not a guess from elapsed time.
     if (declaredWait?.peer !== undefined && !TERMINAL.includes(state.status)) {
-      const peer = byId.get(declaredWait.peer);
+      const peer = knownById.get(declaredWait.peer);
       const peerName = declaredWait.peerName ?? declaredWait.peer;
       if (peer === undefined || TERMINAL.includes(peer.state.status)) {
         anomalies.push({
@@ -264,6 +268,8 @@ export function detectAnomalies(
       }
     }
 
+    // Historical callers of detectAnomalies() may deliberately include terminal
+    // snapshots, even though the live SessionManager sweep pre-filters them.
     // A done marker for the current turn means the work FINISHED — the failed
     // status is a bookkeeping gap (pane died before the completed transition),
     // not wreckage. Resuming it would make the teammate redo a finished turn.

@@ -200,11 +200,11 @@ interface MonitorHandle {
   transcript?: ClaudeTranscriptWatcher | CodexTranscriptWatcher;
   /** In-flight transcript arming. Both startMonitor and the tick loop ask for
    *  the codex watcher, and `transcript` is only set at the END of that
-   *  async work â without this they each start one, doubling every event and
+   *  async work — without this they each start one, doubling every event and
    *  leaking the loser (which nothing ever stops). */
   transcriptStarting?: Promise<void>;
   /** In-flight background attach of the transcript watcher (startMonitor does
-   *  not await it â see the comment there). stopMonitor drains it so a watcher
+   *  not await it — see the comment there). stopMonitor drains it so a watcher
    *  that finishes arming after the monitor died is still stopped. */
   attaching?: Promise<void>;
   loop?: Promise<void>;
@@ -356,7 +356,7 @@ interface SessionManagerOptions {
   cgroups?: CgroupConfig;
   contextWindows?: Record<string, number>;
   /** Invoked when the daemon decides its own index is unhealable and a clean
-   *  restart is the only repair. The entrypoint owns HOW (and WHETHER â only a
+   *  restart is the only repair. The entrypoint owns HOW (and WHETHER — only a
    *  process a service manager will re-spawn may exit); the manager only
    *  decides WHEN. Returns false when it declined, so the manager can say so. */
   onSelfRestart?: () => boolean | Promise<boolean>;
@@ -386,7 +386,7 @@ interface WardenRuntimeState {
    *  generation means an anomaly set that RECURS after a clean recovery escalates
    *  again instead of being suppressed as "unchanged". */
   lastSpawnFingerprint?: string;
-  /** Fingerprint of the most recent sweep â used to detect the non-emptyâempty
+  /** Fingerprint of the most recent sweep — used to detect the non-empty→empty
    *  transition that marks a recovery. */
   lastFingerprint?: string;
   /** Bumped every time the fleet goes from having anomalies to having none. */
@@ -394,7 +394,7 @@ interface WardenRuntimeState {
   /** Live assigned-warden records, keyed by TARGET session id. The api-server
    *  consults these (via wardenMayStop) to let the warden token stop ONLY
    *  sessions under an active assignment. `capability` is the unguessable
-   *  secret minted at spawn and exported only into that warden's pane â
+   *  secret minted at spawn and exported only into that warden's pane —
    *  authorization compares capabilities, never client-chosen identities. */
   assignments?: Record<
     string,
@@ -442,11 +442,12 @@ interface PickedWardenAccount extends WardenSelectionProvenance {
 const wardenReportInstructions = (reportPath: string): string[] => [
   '',
   '## Report writing',
-  '- Lead with the outcome.',
-  '- Use point form only.',
-  '- Keep one idea per bullet.',
-  '- Keep every line short and plain.',
-  '- Bold one key value per bullet.',
+  '- Lead with the verdict, then the recommended action and its one-line reason.',
+  '- Use point form only: one idea per bullet, short plain lines.',
+  '- Keep evidence to at most three bullets. Do not narrate the investigation or dump logs, commands, IDs, or repeated readings.',
+  '- Write exactly one **Recommended action** line: NUDGE, STOP, RESUME, RESTART, MIGRATE (wrapper), or LEAVE. MIGRATE MUST name a wrapper from the supplied candidate list.',
+  '- LEAVE means “no action needed”; say why in one line. If two actions are genuinely safe, name both in the reason and put the safer one first.',
+  '- Bold at most one key value per bullet.',
   '- Do not write CLI, model, harness, or failover facts: the daemon injects those from session metadata when rendering.',
   `- The daemon-owned provenance sidecar is: ${provenancePath(reportPath)}`,
   '',
@@ -560,7 +561,7 @@ async function readJsonIfPresent<T>(file: string): Promise<T | undefined> {
 /** How far back a FLEET-WIDE replay cursor may reach. The cross-session feed
  *  is a live stream, not an archive: a client asking for the whole fleet from
  *  sequence 0 would page through every event ever recorded. Per-session
- *  replay stays complete â only the fleet feed is windowed. */
+ *  replay stays complete — only the fleet feed is windowed. */
 const GLOBAL_BACKLOG_MAX = 5_000;
 /** Expected cadence of the daemon self-check. Lag is the measured timer gap
  * above this interval, not the whole interval itself. */
@@ -656,8 +657,8 @@ const GIT_FINGERPRINT_COALESCE_MS = 2_000;
 const WAITING_HEARTBEAT_MS = 300_000;
 
 /** True when the reflex layer and the turn ceiling must stand down: a declared
- *  wait, a waiting status, or an interrupted turn. `state.waiting` â not the
- *  status â is the authority for a park, because transcript records recompute
+ *  wait, a waiting status, or an interrupted turn. `state.waiting` — not the
+ *  status — is the authority for a park, because transcript records recompute
  *  the status every few seconds. */
 export function lifecycleSuspended(state: SessionState): boolean {
   return state.waiting !== undefined || waitingStatuses.includes(state.status) || state.status === 'interrupted';
@@ -813,7 +814,7 @@ export function parseDeadline(value: string, fromMs = Date.now()): string {
     if (ms <= 0) throw new Error('--until must be a positive duration');
     return new Date(fromMs + Math.min(ms, WAITING_BACKSTOP_MS)).toISOString();
   }
-  // Only a real ISO-8601 DATE is accepted here. Date.parse is far looser â
+  // Only a real ISO-8601 DATE is accepted here. Date.parse is far looser —
   // it reads a bare "45" as the YEAR 2045, so the very plausible typo
   // `--until 45` (for 45m) would have parked a session, unsupervised, for two
   // decades: no nudge, no stall kill, no ceiling, and no warden verdict.
@@ -916,7 +917,7 @@ export class SessionManager implements KTeamService {
   private readonly doneDeferred = new Set<string>();
   /** Sessions whose launch/relaunch is still queued behind the bootstrap chain.
    *  Their tmux session does not exist yet, so a monitor started for them
-   *  would read a dead pane and mark a launching session `failed` â and a
+   *  would read a dead pane and mark a launching session `failed` — and a
    *  terminal status suppresses every later patch, including the launch's own
    *  `session.running`. Bounded `start`/`--detach` make this window routine.
    *
@@ -924,7 +925,7 @@ export class SessionManager implements KTeamService {
    *  awaits emit(), which rides the global event queue, and under a launch
    *  storm that queue ran 10+ seconds behind. Registering after it left a
    *  window where the session was persisted as `starting` but unknown to this
-   *  map â the self-check then "repaired" it with a monitor that read a pane
+   *  map — the self-check then "repaired" it with a monitor that read a pane
    *  which did not exist yet and recorded `session.crashed` on a healthy
    *  teammate (2026-07-24, mrzi4r0p / claude-auto-glm52a). */
   private readonly launching = new Map<string, LaunchProgress>();
@@ -953,17 +954,17 @@ export class SessionManager implements KTeamService {
 
   /** Zombie sessions already re-adopted this daemon lifetime (once each). */
   private readonly readoptedZombies = new Set<string>();
-  /** id â when this declared wait last published a heartbeat. */
+  /** id → when this declared wait last published a heartbeat. */
   private readonly waitingHeartbeats = new Map<string, number>();
   /** TUI bootstrap (launch + first inject) serialized ACROSS sessions: rapid
-   *  concurrent starts race the injector â only the first survives, the rest
+   *  concurrent starts race the injector — only the first survives, the rest
    *  land typed-but-never-started. */
   private bootstrapChain: Promise<void> = Promise.resolve();
   /** One daemon-wide cache over kfleet's 300-second usage feed. */
   private readonly usageFeed: UsageFeed;
   private readonly quotaWaiters = new Map<string, QuotaWaiter>();
   private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  /** Counter for TRANSIENT (never-journalled) events only â WS-only frames
+  /** Counter for TRANSIENT (never-journalled) events only — WS-only frames
    *  like fleet.bootstrap_errors that have no session journal to number them.
    *  Not persisted and not comparable to a session's own sequence. */
   private transientSequence = 0;
@@ -1000,7 +1001,7 @@ export class SessionManager implements KTeamService {
   private wardenStateReadTimeoutMs = WARDEN_STATE_READ_TIMEOUT_MS;
   private readWardenState = async (): Promise<WardenRuntimeState | undefined> =>
     await readJsonIfPresent<WardenRuntimeState>(this.paths.wardenState);
-  /** Armed in create(), independent of bootstrap â the watchdog for the
+  /** Armed in create(), independent of bootstrap — the watchdog for the
    *  silent-partial-boot class. */
   private selfCheckTimer?: ReturnType<typeof setInterval>;
   /** True once the boot import finished: the consistency check is meaningless
@@ -1068,7 +1069,7 @@ export class SessionManager implements KTeamService {
     // never hold the API bind hostage. bootstrap() runs it after listen.
     const store = await EventStore.open({ home: paths.home, databasePath: paths.database, importExisting: false });
     const manager = new SessionManager(paths, store, options);
-    // Self-check timer armed HERE â independent of bootstrap, so it survives
+    // Self-check timer armed HERE — independent of bootstrap, so it survives
     // any bootstrap failure and flags the residue (the class the user had to
     // spot by eyeballing a timestamp on 2026-07-23).
     manager.selfCheckTimer = setInterval(() => void manager.selfCheck().catch(() => undefined), SELF_CHECK_INTERVAL_MS);
@@ -1081,13 +1082,13 @@ export class SessionManager implements KTeamService {
 
   /** Detect the silent-partial-boot class: active sessions without a monitor,
    *  and a warden sweep that stopped happening (timer dead or wedged). Emits
-   *  a fleet.self_check_failed transient and â where safe â repairs by
+   *  a fleet.self_check_failed transient and — where safe — repairs by
    *  starting the missing monitors and re-arming the warden. */
   private async selfCheck(): Promise<void> {
     if (this.closed) return;
     // The timer's OWN lateness is the wedge detector: this interval fires
     // every 60 s, so a multi-minute gap means the event loop was starved (the
-    // 2026-07-23 incident: 23:26:46Z â 23:37:55Z, no timers, no accepts).
+    // 2026-07-23 incident: 23:26:46Z → 23:37:55Z, no timers, no accepts).
     // Nothing the daemon believes about the fleet survives that gap
     // unverified, so a wedge always forces a full consistency pass.
     const tickAt = Date.now();
@@ -1099,7 +1100,7 @@ export class SessionManager implements KTeamService {
       this.wedgeCount = (this.wedgeCount ?? 0) + 1;
       const gapSeconds = Math.round(gapMs / 1000);
       console.error(
-        `kteamd self-check: event loop was starved for ${gapSeconds}s (timer gap) â verifying index against session directories`,
+        `kteamd self-check: event loop was starved for ${gapSeconds}s (timer gap) — verifying index against session directories`,
       );
       this.emitTransient('fleet.daemon_wedge', {
         gapSeconds,
@@ -1115,7 +1116,7 @@ export class SessionManager implements KTeamService {
       view =>
         !terminalStatuses.includes(view.state.status) &&
         !this.monitors.has(view.config.id) &&
-        // â¦but only while the launch is plausibly still queued. A bootstrap
+        // …but only while the launch is plausibly still queued. A bootstrap
         // that never finishes (one hung tmux command holds the whole chain)
         // must not hide its session from repair forever.
         !this.launchingRecently(view.config.id),
@@ -1133,7 +1134,7 @@ export class SessionManager implements KTeamService {
     });
     console.error(
       `kteamd self-check: ${unmonitored.length} running session(s) without a monitor` +
-        `${sweepStale ? '; warden sweep stale/dead' : ''} â repairing`,
+        `${sweepStale ? '; warden sweep stale/dead' : ''} — repairing`,
     );
     for (const view of unmonitored) {
       await this.startMonitor(view.config.id).catch(error =>
@@ -1150,15 +1151,15 @@ export class SessionManager implements KTeamService {
   }
 
   /** `kteam ps` reads the disposable SQLite index; the session DIRECTORIES are
-   *  the authority. After the 2026-07-23 wedge the two disagreed â sessions
-   *  were missing from `ps` while their journals kept growing â and only a
+   *  the authority. After the 2026-07-23 wedge the two disagreed — sessions
+   *  were missing from `ps` while their journals kept growing — and only a
    *  full daemon restart restored coherence.
    *
    *  This is that reconciliation, made routine: membership is compared every
    *  tick (cheap), and a deep pass (per-session state + zombie detection)
    *  runs after a wedge or whenever membership drifted. Everything found is
-   *  repaired in place â reindex the row, re-adopt the session with a live
-   *  monitor â and only a discrepancy that SURVIVES repair escalates to a
+   *  repaired in place — reindex the row, re-adopt the session with a live
+   *  monitor — and only a discrepancy that SURVIVES repair escalates to a
    *  clean self-restart, so restarts stay a last resort (they cost every live
    *  pane in the fleet). */
   private async sweepYield(): Promise<void> {
@@ -1178,15 +1179,15 @@ export class SessionManager implements KTeamService {
       chatIndexBroken: [],
     };
     // Never race the boot import. Until it finishes, EVERY session directory
-    // legitimately looks "missing from the index" â repairing against that
+    // legitimately looks "missing from the index" — repairing against that
     // would duplicate the import's work and, three passes in, restart a daemon
     // that was merely still booting (a permanent boot loop).
     if (!this.indexImported) return report;
     const onDisk = await this.store.sessionIdsOnDisk();
     const indexed = this.store.listSessions();
     // Verify chat pointers actually RESOLVE (not just that rows exist). This is
-    // independent of index membership â a chat index can rot while `ps` is
-    // perfectly healthy â and must NOT feed the membership-restart counter, so
+    // independent of index membership — a chat index can rot while `ps` is
+    // perfectly healthy — and must NOT feed the membership-restart counter, so
     // it runs here on its own cadence and reports separately.
     await this.verifyChatIndexes(indexed, report).catch(error =>
       console.error(`kteamd consistency: chat-index verification failed: ${String(error)}`),
@@ -1224,7 +1225,7 @@ export class SessionManager implements KTeamService {
     }
     console.error(
       `kteamd consistency: ${report.missingFromIndex.length} unindexed, ${report.staleRows.length} stale row(s), ` +
-        `${report.zombies.length} terminal-but-active â repairing`,
+        `${report.zombies.length} terminal-but-active — repairing`,
     );
     const resyncIds = [...report.missingFromIndex, ...report.staleRows];
     for (let index = 0; index < resyncIds.length; index++) {
@@ -1248,9 +1249,9 @@ export class SessionManager implements KTeamService {
       await this.yieldSweepChunk(index);
       const id = report.zombies[index]!;
       // ONCE per session per daemon lifetime. The re-adopt itself would
-      // otherwise re-trigger its own detector â the readopt event lands in the
+      // otherwise re-trigger its own detector — the readopt event lands in the
       // journal whose mtime IS the zombie test, and a monitor over a dead pane
-      // exits immediately â so an unguarded repair loops forever.
+      // exits immediately — so an unguarded repair loops forever.
       if (this.monitors.has(id) || this.readoptedZombies.has(id)) continue;
       this.readoptedZombies.add(id);
       await this.startMonitor(id).then(
@@ -1281,7 +1282,7 @@ export class SessionManager implements KTeamService {
   }
 
   /** True when a terminal session's journal kept growing well after it was
-   *  declared finished â the "done-marked but still writing events" shape. */
+   *  declared finished — the "done-marked but still writing events" shape. */
   private async journalOutlivedTerminal(id: string, state: SessionState): Promise<boolean> {
     const finishedMs = state.finishedAt ? Date.parse(state.finishedAt) : 0;
     if (!Number.isFinite(finishedMs) || finishedMs === 0) return false;
@@ -1293,7 +1294,7 @@ export class SessionManager implements KTeamService {
   /** Last resort: an index that cannot be healed in place is fixed by a clean
    *  restart (the service manager restarts us; the journals are authoritative,
    *  so boot rebuilds from disk). Announced, evidenced, and only ever from a
-   *  quiescent close â never a hard exit that abandons in-flight writes. */
+   *  quiescent close — never a hard exit that abandons in-flight writes. */
   private async requestSelfRestart(unhealable: string[]): Promise<void> {
     if (this.selfRestartRequested) return;
     // ACROSS restarts too: a condition the boot cannot fix (an unreadable
@@ -1308,7 +1309,7 @@ export class SessionManager implements KTeamService {
     const previewSuffix = unhealable.length > preview.length ? `, +${unhealable.length - preview.length} more` : '';
     const headline =
       `kteamd: session index is unhealable after ${this.consecutiveIncoherentChecks} passes ` +
-      `(${unhealable.length} session(s) invisible to ps; ids: ${preview.join(', ')}${previewSuffix}) â `;
+      `(${unhealable.length} session(s) invisible to ps; ids: ${preview.join(', ')}${previewSuffix}) — `;
     // The report is announced ONCE per outcome, but the decision is re-made
     // every pass: whether a restart is possible is the ENTRYPOINT's answer
     // (it asks the service manager whether it owns this pid) and can change,
@@ -1327,14 +1328,14 @@ export class SessionManager implements KTeamService {
     };
     if (cooling) {
       announceOnce(
-        `NOT restarting: a self-restart already happened within ${Math.round(SELF_RESTART_COOLDOWN_MS / 60_000)}m â this needs a human`,
+        `NOT restarting: a self-restart already happened within ${Math.round(SELF_RESTART_COOLDOWN_MS / 60_000)}m — this needs a human`,
         { supervised: true, cooling: true },
       );
       return;
     }
     this.selfRestartRequested = true;
     // Stamp BEFORE handing over: the handler drains and exits, so a stamp
-    // written after it may never land â and an unstamped restart loses the
+    // written after it may never land — and an unstamped restart loses the
     // cooldown that stops a restart loop. A declined restart takes it back.
     await atomicJson(stampFile, { at: now(), sessions: unhealable.slice(0, 20) }).catch(() => undefined);
     // A handler that THROWS is a decline, not a restart: treating it as one
@@ -1359,9 +1360,9 @@ export class SessionManager implements KTeamService {
   }
 
   /** Index journals, reconcile survivors, and arm the warden. Runs AFTER the
-   *  API socket is listening â early requests see a possibly-partial index
+   *  API socket is listening — early requests see a possibly-partial index
    *  (which only grows) rather than a connection refused. */
-  /** Errors collected during bootstrap â surfaced via /v1/health so a partial
+  /** Errors collected during bootstrap — surfaced via /v1/health so a partial
    *  boot can never be silent again (2026-07-23 06:23 incident: bootstrap
    *  died quietly mid-recover, 4 running sessions unmonitored, warden timer
    *  never armed, nothing logged). */
@@ -1489,7 +1490,7 @@ export class SessionManager implements KTeamService {
     const sessions = await this.list();
     const active = sessions.filter(item => !terminalStatuses.includes(item.state.status));
     // Self-check surface (2026-07-23 silent-bootstrap incident): the operator
-    // must be able to see â and the sweep must be able to flag â a partial
+    // must be able to see — and the sweep must be able to flag — a partial
     // boot without eyeballing timestamps.
     const unmonitoredRunning = active.filter(item => !this.monitors.has(item.config.id)).length;
     const lastSweepMs = this.wardenState.lastSweepAt ? Date.parse(this.wardenState.lastSweepAt) : 0;
@@ -2012,7 +2013,7 @@ export class SessionManager implements KTeamService {
 
   /** Canonicalize a session reference: an exact id passes through; otherwise try
    *  it as a teammate name (case-insensitive) among sessions created within the
-   *  name window â most recent wins. Unknown refs pass through so the caller's
+   *  name window — most recent wins. Unknown refs pass through so the caller's
    *  own "unknown session" error fires. */
   private resolveRef(ref: string): string {
     const sessions = this.store.listSessions();
@@ -2182,7 +2183,7 @@ export class SessionManager implements KTeamService {
     // FORCE-labelled kteam-warden regardless of the requested/inherited label, so
     // the detector's lineage exclusion covers it and a warden can never spawn an
     // escalatable (non-warden) session. (The warden-scoped token also 403s the
-    // start route outright â this is the server-side backstop.)
+    // start route outright — this is the server-side backstop.)
     const forcedWarden = await this.hasWardenAncestor(parentView?.config.id);
     const label = forcedWarden ? WARDEN_LABEL : request.label?.trim() || parentView?.config.label || undefined;
     // Model resolution: explicit request wins, else the wrapper's kfleet default
@@ -2190,7 +2191,7 @@ export class SessionManager implements KTeamService {
     // per-account default model can't silently drift; undefined => no --model.
     const model = request.model?.trim() || (await wrapperModel(wrapper));
 
-    // Preflight 1 â duplicate guard: a client retrying start after a transient
+    // Preflight 1 — duplicate guard: a client retrying start after a transient
     // error must not spawn a second live session for the same work. An
     // identical (binary, cwd, prompt) session started in the last 10 minutes
     // that is still live IS that earlier request succeeding server-side.
@@ -2207,11 +2208,11 @@ export class SessionManager implements KTeamService {
       ) {
         throw new Error(
           `an identical session is already live: ${existing.config.id} (${existing.state.status}); ` +
-            'the earlier start succeeded â use it, or stop it first',
+            'the earlier start succeeded — use it, or stop it first',
         );
       }
     }
-    // Preflight 2 â quota/auth: launching on an exhausted or logged-out
+    // Preflight 2 — quota/auth: launching on an exhausted or logged-out
     // account burns a session that can only no-op. Fail fast, wrapper named.
     const preflightQuota = await this.fetchQuota({ binary } as SessionConfig);
     if (preflightQuota?.authOk === false) {
@@ -2334,7 +2335,7 @@ export class SessionManager implements KTeamService {
     // Claim the launch window BEFORE anything that awaits the event queue.
     // `emit`/`transition` can sit behind a 10-second global queue during a
     // launch storm, and everything that protects a launching session keys off
-    // this map â registering it later left the session visible as `starting`
+    // this map — registering it later left the session visible as `starting`
     // to the self-check while still unregistered here. The real bootstrap
     // promise replaces this placeholder a few lines down.
     let releaseLaunch = () => {};
@@ -2362,7 +2363,7 @@ export class SessionManager implements KTeamService {
     // The TUI bootstrap is serialized ACROSS sessions, so a launch storm makes
     // each caller wait for every queued predecessor. Callers have their own
     // deadlines: the exec responders SIGTERMed `kteam start` (exit 143) while
-    // the daemon went on to create the session anyway â a launch reported as
+    // the daemon went on to create the session anyway — a launch reported as
     // failed that a retry then duplicated. So the REQUEST is bounded here: the
     // session is already persisted and its bootstrap keeps running in the
     // background, and the caller gets a real view of a 'starting' session
@@ -2405,7 +2406,7 @@ export class SessionManager implements KTeamService {
   }
 
   /** Wait for a launch, but only for `waitMs`, and only up to the RUNNING
-   *  milestone (pane up, prompt delivered, monitor attached) â not for the
+   *  milestone (pane up, prompt delivered, monitor attached) — not for the
    *  whole bootstrap to unwind. A bootstrap that fails inside the window
    *  throws (callers keep today's fast-failure semantics); one that is merely
    *  SLOW is announced and left running in the background. */
@@ -2431,11 +2432,11 @@ export class SessionManager implements KTeamService {
     }
     // The session is up and monitored; the rest of the bootstrap is bookkeeping
     // the caller has no reason to wait for. This is a SUCCESS, not a
-    // backgrounded launch â no launch_backgrounded event.
+    // backgrounded launch — no launch_backgrounded event.
     if (outcome === 'running') return;
     // A backgrounded launch is PENDING, never failed: the session keeps its
     // `starting` status and the bootstrap resolves it (session.launch_settled
-    // â running, or the normal failure path with the real reason).
+    // → running, or the normal failure path with the real reason).
     const claim = this.launching.get(id);
     if (claim) this.launching.set(id, { ...claim, backgrounded: true });
     await this.emit(
@@ -2464,7 +2465,7 @@ export class SessionManager implements KTeamService {
     hooks: SessionStartHooks = {},
   ): Promise<void> {
     try {
-      // send() re-verifies prompt readiness right before typing â launch()'s
+      // send() re-verifies prompt readiness right before typing — launch()'s
       // readiness can go stale if a late startup splash repaints the pane,
       // and a prompt injected into a booting TUI lands as a no-op turn.
       const queuedAt = Date.now();
@@ -2472,7 +2473,7 @@ export class SessionManager implements KTeamService {
         await this.launchWithRetry(config);
         // The pane demonstrably EXISTS from here on. Durable, because it is
         // what tells a monitor apart from "the tmux session does not exist
-        // yet" â the state a pre-launch monitor used to misread as a crash.
+        // yet" — the state a pre-launch monitor used to misread as a crash.
         await this.store.updateState<SessionState>(id, current => ({ ...current, launchedAt: now() }));
         // Mandatory daemon evidence must exist before the model can consume its
         // task. Warden hooks write the provenance sidecar here; any failure
@@ -2499,7 +2500,7 @@ export class SessionManager implements KTeamService {
         {},
         // A launch that outlived its request window must be able to write its
         // own outcome even if something recorded a (wrong) terminal status
-        // while it was still queued â otherwise the healthy teammate stays
+        // while it was still queued — otherwise the healthy teammate stays
         // `failed` forever and every control action refuses it.
         { force: true },
       );
@@ -2557,7 +2558,7 @@ export class SessionManager implements KTeamService {
         if (paneState.alive && !paneState.dead) await this.startMonitor(id).catch(() => undefined);
         throw new AggregateError([error, killError], reason);
       }
-      // A GENUINE launch failure still fails, with the real reason â this is
+      // A GENUINE launch failure still fails, with the real reason — this is
       // the other half of the pending contract: backgrounding never fails a
       // session, but a launch that actually died must say so.
       await this.transition(
@@ -2626,7 +2627,7 @@ export class SessionManager implements KTeamService {
       if (this.launchingRecently(id) && !(await this.awaitLaunchSettled(id, CONTROL_LAUNCH_WAIT_MS))) {
         throw new Error(
           `session ${id} is still launching (queued behind the bootstrap chain for ` +
-            `${Math.round(CONTROL_LAUNCH_WAIT_MS / 1000)}s); it is pending, not failed â retry once \`kteam ps\` shows it running`,
+            `${Math.round(CONTROL_LAUNCH_WAIT_MS / 1000)}s); it is pending, not failed — retry once \`kteam ps\` shows it running`,
         );
       }
       const probe = await this.get(id);
@@ -2641,7 +2642,7 @@ export class SessionManager implements KTeamService {
       const view = await this.get(id);
       // Authoritative re-check under the lock: a session that reached a
       // terminal status while we waited must take the resume path (its live
-      // pane, if any, is an unmonitored leftover â never type into it).
+      // pane, if any, is an unmonitored leftover — never type into it).
       // resume() takes the lock itself, so signal the caller instead.
       if (view.state.status === 'kill_failed') rejectKillFailedPaneInput();
       if (view.state.needsHumanKind === CODEX_PICKER_QUARANTINE_KIND) rejectUnconfirmedCodexPickerInput();
@@ -2669,10 +2670,10 @@ export class SessionManager implements KTeamService {
           if (after.promptReady) busy = false;
         } else {
           // The busy verdict is otherwise re-validated right before typing:
-          // if the pane turned prompt-ready in the probeâlock window, fall
+          // if the pane turned prompt-ready in the probe→lock window, fall
           // through to the tracked delivered path instead of typing into an
           // idle composer and mis-reporting 'queued' (an Enter at an idle
-          // prompt SUBMITS â that would be an untracked ghost turn).
+          // prompt SUBMITS — that would be an untracked ghost turn).
           const recheck = await this.tmux.state(view.config.tmuxSession);
           if (!recheck.alive || recheck.dead) return { kind: 'revive' as const };
           if (recheck.promptReady) busy = false;
@@ -2681,7 +2682,7 @@ export class SessionManager implements KTeamService {
       if (busy) {
         // Busy session: type the message into the TUI's NATIVE queue (both
         // harnesses hold text typed mid-turn and auto-submit it at the next
-        // boundary â verified 2026-07-23, fixtures *-native-queue.txt). The
+        // boundary — verified 2026-07-23, fixtures *-native-queue.txt). The
         // send is recorded DURABLY in the ledger before pendingNativeSends
         // mechanics or keystrokes. Dedicated harness proof later updates fate
         // and clears mechanics only; a mid-turn/batched drain never advances
@@ -3246,7 +3247,7 @@ export class SessionManager implements KTeamService {
       // the write-file-then-"read your turn file" indirection stays for
       // long/multi-line/attachment payloads and the original turn-1 prompt.
       // The turn file is still written on both paths (bookkeeping: logs,
-      // resume context) â direct only changes what gets TYPED.
+      // resume context) — direct only changes what gets TYPED.
       //
       // INTERACTIVE sessions always go direct: the composer is a chat box a human
       // is typing into, and answering a human's paragraph with "read
@@ -3309,12 +3310,12 @@ export class SessionManager implements KTeamService {
       );
       // Markers written between the send request and the prompt landing
       // (tmux.send can still block briefly on late startup dialogs) belong to
-      // the PREVIOUS turn â e.g. the agent's `signal done` racing this send.
+      // the PREVIOUS turn — e.g. the agent's `signal done` racing this send.
       // Clear them now that the new turn's prompt has actually landed, else
       // the monitor reports a false `completed` for a turn that is just
       // starting (observed live: geoffrey, 2026-07-21). The old busy-QUEUE
       // gate is gone (native TUI queueing), which shrank this race window
-      // from minutes to seconds â but not to zero.
+      // from minutes to seconds — but not to zero.
       await Promise.all(['done', 'needs-help'].map(name => rm(markerFile(this.paths, id, name), { force: true })));
       this.autoContinued.delete(id);
       this.doneDeferred.delete(id);
@@ -3346,7 +3347,7 @@ export class SessionManager implements KTeamService {
   /** F4 auto-revive guard: if a control action left the pane DEAD (e.g. a
    *  keystroke the TUI interpreted as quit), recover it once through the
    *  normal resume path and record that it happened. Runs OUTSIDE the session
-   *  lock â resume() takes it itself. */
+   *  lock — resume() takes it itself. */
   private async withAutoRevive(
     id: string,
     action: string,
@@ -3738,7 +3739,7 @@ export class SessionManager implements KTeamService {
     if (this.launchingRecently(id) && !(await this.awaitLaunchSettled(id, CONTROL_LAUNCH_WAIT_MS))) {
       throw new Error(
         `session ${id} is still launching (queued behind the bootstrap chain for ` +
-          `${Math.round(CONTROL_LAUNCH_WAIT_MS / 1000)}s); it is pending, not failed â retry once \`kteam ps\` shows it running`,
+          `${Math.round(CONTROL_LAUNCH_WAIT_MS / 1000)}s); it is pending, not failed — retry once \`kteam ps\` shows it running`,
       );
     }
     // Claim the relaunch BEFORE clearNeedsHuman/transition can await an event
@@ -3780,7 +3781,7 @@ export class SessionManager implements KTeamService {
           throw new Error('answer or abandon the structured question before resuming this live session');
         if (paneState.alive && !paneState.dead) {
           // A TERMINAL session's leftover live pane (daemon-restart re-adoption,
-          // reconciled completion) is unmonitored â injecting into it loses the
+          // reconciled completion) is unmonitored — injecting into it loses the
           // message. Kill it and fall through to a tracked relaunch; only a
           // genuinely NON-terminal session takes the plain-send shortcut.
           if (!terminalStatuses.includes(view.state.status) && !pickerQuarantined) {
@@ -4005,8 +4006,8 @@ export class SessionManager implements KTeamService {
   /** Continue an existing session on a DIFFERENT same-kind account. kfleet pools
    *  harness session state across accounts of one kind (~/.kfleet/shared/<kind>),
    *  so any claude wrapper can `--resume` a conversation another claude wrapper
-   *  started (same for codexâcodex). We validate the target, stop the old pane,
-   *  rewrite the config to the new wrapper (binary/home/model â keeping the
+   *  started (same for codex↔codex). We validate the target, stop the old pane,
+   *  rewrite the config to the new wrapper (binary/home/model — keeping the
    *  harnessSessionId, teammate, label, parent), then relaunch through the normal
    *  resume path under the new wrapper. Cross-KIND migration is unsupported. */
   async migrate(id: string, agent: string, model?: string, allowContextDowngrade = false): Promise<SessionView> {
@@ -4031,8 +4032,8 @@ export class SessionManager implements KTeamService {
     if (agent.includes(path.sep))
       throw new Error('migrate target must be a bare fleet wrapper name (no path), e.g. claude-auto-glm52b');
     if (!agent.startsWith(`${harness}-auto-`)) throw new Error('kteam only migrates to auto-mode fleet wrappers');
-    // Resolve ONLY within the kfleet bin (the discoverAutoAgents source) â never
-    // the daemon's $PATH â so a caller (incl. a warden) cannot migrate a session
+    // Resolve ONLY within the kfleet bin (the discoverAutoAgents source) — never
+    // the daemon's $PATH — so a caller (incl. a warden) cannot migrate a session
     // onto an arbitrary wrapper that merely happens to be on PATH.
     const wrapper = resolveBinary(agent, this.paths.kfleetBin);
     if (!wrapper) throw new Error(`wrapper not found: ${agent}; run kfleet apply`);
@@ -4080,7 +4081,7 @@ export class SessionManager implements KTeamService {
       );
     }
     const at = now();
-    // Snapshot the ORIGINAL account so a failed relaunch can be rolled back â
+    // Snapshot the ORIGINAL account so a failed relaunch can be rolled back —
     // the config must never be left pointing at a wrapper that never launched.
     const original = {
       binary: view.config.binary,
@@ -4417,7 +4418,7 @@ export class SessionManager implements KTeamService {
           );
         // The marker carries the turn it certifies: a marker from an OLDER turn
         // must never complete a NEWER turn (send bumps the persisted turn at
-        // queue time, so a daemon death in the queueâdelivery window would
+        // queue time, so a daemon death in the queue→delivery window would
         // otherwise let stale evidence complete work that never ran).
         await atomicJson(markerFile(this.paths, id, 'done'), {
           at: now(),
@@ -4471,7 +4472,7 @@ export class SessionManager implements KTeamService {
    *  reflex layer nudged at 180 s and killed at 300 s, and the turn ceiling
    *  reaped long-running babysitters at 4 h (2026-07-23: four cap-kills and
    *  four park-loops in one night). Declaring the wait suspends both while
-   *  keeping the session visibly alive â heartbeats keep flowing, the
+   *  keeping the session visibly alive — heartbeats keep flowing, the
    *  deadline is published, and expiry WAKES the teammate rather than killing
    *  it. Legal in automode: unlike `help`, it never asks a human for
    *  anything. */
@@ -4511,7 +4512,7 @@ export class SessionManager implements KTeamService {
     const peerLabel = peer ? `reply from ${peer.config.teammate ?? peer.config.id}` : undefined;
     const detail = [peerLabel ?? options.condition ?? message, until ? `until ${until}` : 'open-ended']
       .filter(Boolean)
-      .join(' â ');
+      .join(' — ');
     await this.transition(
       id,
       { status: 'waiting', health: 'waiting', reason: `waiting: ${detail}`, waiting },
@@ -4563,7 +4564,7 @@ export class SessionManager implements KTeamService {
         waitingCreditSeconds,
         // Re-anchor the reflex: a park produces no life-signs by design, so
         // waking into a ledger that is hours stale would have the very next
-        // tick nudge â or kill â the teammate the daemon just woke.
+        // tick nudge — or kill — the teammate the daemon just woke.
         nudgedAt: undefined,
         lastActivityAt: now(),
         lastTranscriptAt: now(),
@@ -4576,7 +4577,7 @@ export class SessionManager implements KTeamService {
 
   /** One monitor tick of a DECLARED wait: publish a heartbeat so the park is
    *  visibly alive, and at the deadline clear the wait and WAKE the teammate
-   *  (the wait is a pause, not an ending â nothing here ever kills). */
+   *  (the wait is a pause, not an ending — nothing here ever kills). */
   private async serviceWaiting(view: SessionView): Promise<void> {
     const id = view.config.id;
     const waiting = view.state.waiting;
@@ -4585,7 +4586,7 @@ export class SessionManager implements KTeamService {
     const elapsedSeconds = Number.isFinite(sinceMs) ? Math.round((Date.now() - sinceMs) / 1000) : 0;
     // An open-ended wait still ENDS. Without a backstop a park would suspend
     // the idle kill and the ceiling forever, so a teammate that declared a
-    // wait and then died quietly would become immortal â the park-loop this
+    // wait and then died quietly would become immortal — the park-loop this
     // feature exists to end, inverted.
     const declaredUntilMs = waiting.until ? Date.parse(waiting.until) : Number.NaN;
     const untilMs = Number.isFinite(declaredUntilMs)
@@ -4645,7 +4646,7 @@ export class SessionManager implements KTeamService {
       const view = await this.get(id);
       const state = await this.tmux.state(view.config.tmuxSession);
       // A dead pane used to yield an EMPTY capture with rc=0, indistinguishable
-      // from a blank-but-healthy screen â callers scripting around `kteam
+      // from a blank-but-healthy screen — callers scripting around `kteam
       // snapshot` read that as "fine". Fail loudly and point at the stored
       // final frame instead.
       if (!state.alive || state.dead) {
@@ -4661,7 +4662,7 @@ export class SessionManager implements KTeamService {
   async lastSnapshot(id: string): Promise<string> {
     id = this.resolveRef(id);
     // Read the monitor's last written frame straight from disk. snapshot()
-    // captures live tmux UNDER THE SESSION LOCK â on a busy session that
+    // captures live tmux UNDER THE SESSION LOCK — on a busy session that
     // queues behind monitor/injection work for tens of seconds, which is what
     // made the web UI (polling it every few seconds) feel broken.
     return await readFile(path.join(sessionDir(this.paths, id), 'last-snapshot.txt'), 'utf8').catch(() => '');
@@ -4691,7 +4692,7 @@ export class SessionManager implements KTeamService {
     // every offset so no pointer's bytes match its fingerprint any more. Do NOT
     // serve a valid-looking empty page (it reads as "nothing happened" rather
     // than "your index is broken"). Rebuild THIS ONE session's pointers from the
-    // current transcript â no global reindex â and retry once.
+    // current transcript — no global reindex — and retry once.
     if (page.rows > 0 && page.records.length === 0 && view?.config.transcriptFile) {
       await this.rebuildChatIndex(id, view);
       const rebuiltTotal = this.store.chatPointerCount(id);
@@ -4699,7 +4700,7 @@ export class SessionManager implements KTeamService {
       if (retry.rows > 0 && retry.records.length === 0) {
         throw new Error(
           `chat index for ${id} is unreadable: ${rebuiltTotal} pointer row(s) resolve to no records even ` +
-            `after rebuilding from ${view.config.transcriptFile} â the harness likely rotated, compacted, or ` +
+            `after rebuilding from ${view.config.transcriptFile} — the harness likely rotated, compacted, or ` +
             `truncated that transcript. Refusing to serve a silent empty transcript.`,
         );
       }
@@ -4755,7 +4756,7 @@ export class SessionManager implements KTeamService {
   }
 
   /** Rebuild ONE session's chat pointers from its current transcript. Used when
-   *  a served window has pointer rows but none resolve â the stored offsets are
+   *  a served window has pointer rows but none resolve — the stored offsets are
    *  stale. Forgets just this session's chat pointers + source bookkeeping and
    *  re-scans the file once; far cheaper and safer than a global reindex. */
   private async rebuildChatIndex(id: string, view: SessionView): Promise<void> {
@@ -4769,7 +4770,7 @@ export class SessionManager implements KTeamService {
   }
 
   /** Verify that live sessions' chat pointer rows actually RESOLVE to readable
-   *  transcript bytes â not merely that rows exist. A session whose newest
+   *  transcript bytes — not merely that rows exist. A session whose newest
    *  pointers no longer resolve (a rewritten/compacted transcript shifted every
    *  byte offset) is rebuilt in place from its current transcript; if it still
    *  cannot resolve afterwards it is reported LOUDLY rather than left to serve
@@ -4790,7 +4791,7 @@ export class SessionManager implements KTeamService {
       if (!view) continue;
       const normalize = this.chatNormalizer(view);
       if (this.chatTailResolves(id, normalize)) continue;
-      // Newest pointers do not resolve â rebuild this ONE session and re-probe.
+      // Newest pointers do not resolve — rebuild this ONE session and re-probe.
       try {
         await this.rebuildChatIndex(id, view);
       } catch (error) {
@@ -4950,16 +4951,16 @@ export class SessionManager implements KTeamService {
       throw new Error('limit must be between 1 and 10000');
     // Both branches are INDEX-BOUNDED: the old implementation loaded every
     // event of every session into memory, mapped it, and sorted it before
-    // slicing â one fleet-wide connect wedged the daemon for minutes and grew
+    // slicing — one fleet-wide connect wedged the daemon for minutes and grew
     // its heap into the gigabytes (2026-07-23 wedge/listener-flap incident).
     if (id !== undefined) {
-      // Per-session replay: `after` is that session's own sequence â exact,
+      // Per-session replay: `after` is that session's own sequence — exact,
       // gapless, and the cursor every per-session consumer already sends back.
       if (after < 0) return this.store.tailSession(id, -after).map(event => this.fromStored(event));
       return this.store.replay(id, { afterSequence: after, limit }).map(event => this.fromStored(event));
     }
     // Fleet-wide: no total order to page through any more, so the id-less feed
-    // is "the recent tail, then live" â which is all `kteam stream` and the
+    // is "the recent tail, then live" — which is all `kteam stream` and the
     // socket's initial backfill ever wanted from it.
     return this.store.tailFleet(Math.min(after < 0 ? -after : GLOBAL_BACKLOG_MAX, limit)).map(e => this.fromStored(e));
   }
@@ -5071,7 +5072,7 @@ export class SessionManager implements KTeamService {
       const aborted = (): boolean => this.closed || signal?.aborted === true;
       // Race guard: the API listens BEFORE bootstrap finishes, so a client
       // can start()/resume() a session while recover() walks the list. Such
-      // a session already has a live monitor â adoption bookkeeping here
+      // a session already has a live monitor — adoption bookkeeping here
       // would fight the fresh launch (double monitors, spurious snapshots).
       if (aborted() || this.monitors.has(session.config.id)) return;
       const paneState = await this.tmux.state(session.config.tmuxSession);
@@ -5132,7 +5133,7 @@ export class SessionManager implements KTeamService {
       }
       if (paneState.alive && !paneState.dead) {
         // A1: with KillMode=process the tmux server (and this pane) survives a
-        // daemon restart â RE-ADOPT it: keep the session's status, restart its
+        // daemon restart — RE-ADOPT it: keep the session's status, restart its
         // monitor, and record the adoption. Never snapshot-and-kill a live,
         // healthy pane here.
         await this.transition(
@@ -5161,7 +5162,7 @@ export class SessionManager implements KTeamService {
       } else if (this.doneMarkerForTurn(session.config.id, session.state.turn ?? session.config.turn)) {
         // The teammate signalled done for THIS turn but the pane died before
         // the status flipped (or the daemon restart interleaved). The work
-        // FINISHED â marking it failed here would invite the warden to resume
+        // FINISHED — marking it failed here would invite the warden to resume
         // a completed session and make it redo the turn. A marker from an
         // older turn deliberately falls through to `failed`.
         await this.transition(
@@ -5200,8 +5201,8 @@ export class SessionManager implements KTeamService {
     // filesystem work over the SHARED harness home, and its first reconcile
     // could fail to settle at all while the fleet churned that tree (see the
     // watch-scope fix in claude-transcript.ts): every session started during
-    // that stretch ran with NO monitor tick â no pane snapshots, no
-    // heartbeat.json, no liveness.yaml, no stall reflex, no turn ceiling â
+    // that stretch ran with NO monitor tick — no pane snapshots, no
+    // heartbeat.json, no liveness.yaml, no stall reflex, no turn ceiling —
     // while `monitors.has(id)` made the self-check call it healthy
     // (2026-07-24: confirmed on every session created after the 23:49 restart).
     // The loop's own first act is reading state, so it needs nothing from the
@@ -5210,7 +5211,7 @@ export class SessionManager implements KTeamService {
     void handle.loop.catch(() => undefined);
     // The transcript watcher attaches in the BACKGROUND. Its first reconcile
     // walks the shared harness home AND delivers every record already in the
-    // transcript â on a session that starts fast that is hundreds of events,
+    // transcript — on a session that starts fast that is hundreds of events,
     // and awaiting it here held the launch open long after the teammate was
     // working. The tick loop above is what "monitored" means; the watcher
     // catches up on its own and reports its own failures.
@@ -5220,7 +5221,7 @@ export class SessionManager implements KTeamService {
   }
 
   /** Attach the harness transcript tail to a monitor handle. Separate from
-   *  startMonitor so the tick loop can be armed first â see the comment there. */
+   *  startMonitor so the tick loop can be armed first — see the comment there. */
   private async startTranscriptWatcher(id: string, view: SessionView, handle: MonitorHandle): Promise<void> {
     if (view.config.harness === 'claude' && view.config.harnessHome) {
       const watcher = await startClaudeTranscriptWatcher({
@@ -5250,7 +5251,7 @@ export class SessionManager implements KTeamService {
         },
       });
       // The tick loop is armed first and may already have exited (dead pane,
-      // done marker) by the time this resolves â its cleanup stops
+      // done marker) by the time this resolves — its cleanup stops
       // handle.transcript, which was still undefined then. Without this the
       // watcher tails on forever, writing state for a session nobody watches.
       if (handle.abort.signal.aborted || this.monitors.get(id) !== handle) await watcher.stop();
@@ -5338,7 +5339,7 @@ export class SessionManager implements KTeamService {
     // Await the in-flight attach first: a watcher still arming has not set
     // `monitor.transcript` yet, so stopping only what is visible here would
     // leak it. (startTranscriptWatcher also re-checks the abort signal and
-    // stops a watcher whose monitor died â this is the other half.)
+    // stops a watcher whose monitor died — this is the other half.)
     const stopAll = (monitor.attaching ?? Promise.resolve())
       .catch(() => undefined)
       .then(async () => {
@@ -5548,7 +5549,7 @@ export class SessionManager implements KTeamService {
     let reinjectedTurn = -1;
     // F6: the last turn whose pane visibly showed active work. A turn that
     // demonstrably RAN but produced no correlated transcript (e.g. GLM canary,
-    // 2026-07-19) is a transcript-correlation gap, not a lost prompt â it must
+    // 2026-07-19) is a transcript-correlation gap, not a lost prompt — it must
     // not be reinjected or failed as turn-never-started.
     let activeWorkTurn = -1;
     const questionMonitor: PendingQuestionMonitorState = {
@@ -5560,7 +5561,7 @@ export class SessionManager implements KTeamService {
     // once per monitor rather than flooding the event log every tick.
     let staleDoneMarkerFingerprint: string | undefined;
     // A6: recognized work vocabulary with advancing counters across polls is
-    // full liveness â a long silent thinking block writes no transcript bytes
+    // full liveness — a long silent thinking block writes no transcript bytes
     // for many minutes while the spinner clock keeps climbing, and the stall
     // reflex must not flag it (2026-07-22: two healthy Fable sessions were
     // stall-killed mid-thinking this way).
@@ -5601,7 +5602,7 @@ export class SessionManager implements KTeamService {
           if (currentDoneMarker) {
             // A done marker written while the pane still shows an ACTIVE turn
             // (spinner/token counter) means the teammate declared victory
-            // early â deliverables may not exist yet. Defer completion until
+            // early — deliverables may not exist yet. Defer completion until
             // the pane actually idles; killing mid-turn produced sessions
             // marked completed whose files were never written.
             const donePane = await this.tmux.state(view.config.tmuxSession);
@@ -5669,7 +5670,7 @@ export class SessionManager implements KTeamService {
             });
             // A pane that has NEVER been launched is not a crashed pane. Until
             // the bootstrap runs `tmux new-session`, `tmux.state` reports the
-            // same "not alive" as a dead harness â and a monitor started into
+            // same "not alive" as a dead harness — and a monitor started into
             // that window (self-check repair, launch-grace expiry) used to
             // record `session.crashed` on a teammate that then came up and did
             // the whole task, leaving it `failed` forever because a terminal
@@ -5683,7 +5684,7 @@ export class SessionManager implements KTeamService {
               }
               // No launch is in flight any more and the pane was never
               // created (daemon restart mid-queue, or a bootstrap that died
-              // without reaching tmux). That IS a real failure â say what it
+              // without reaching tmux). That IS a real failure — say what it
               // actually was rather than blaming a harness that never ran.
               await this.transition(
                 id,
@@ -5803,14 +5804,14 @@ export class SessionManager implements KTeamService {
             await writeFile(turnLog(this.paths, id, view.config.turn), pane.pane, { mode: 0o600 });
             // Pane parse is only the FALLBACK: once a transcript usage record
             // has set contextPercent, the harness's own accounting wins (the
-            // statusline can change shape any time â the 1M-suffix breakage).
+            // statusline can change shape any time — the 1M-suffix breakage).
             const paneContext = contextPercentUsed(pane.visiblePane);
             const contextPercent = view.state.contextPercent === undefined ? paneContext : undefined;
             const effectiveContext = view.state.contextPercent ?? paneContext;
             const contextTurnedHigh =
               effectiveContext !== undefined && effectiveContext >= 85 && (view.state.contextPercent ?? 0) < 85;
-            // The harness's own spinner line ("â» Lollygaggingâ¦ (34s Â· 2.1k
-            // tokens)") â the chat UI's received-and-thinking indicator.
+            // The harness's own spinner line ("✻ Lollygagging… (34s Â· 2.1k
+            // tokens)") — the chat UI's received-and-thinking indicator.
             const activity = paneActivityLine(pane.visiblePane);
             await this.transition(
               id,
@@ -5984,7 +5985,7 @@ export class SessionManager implements KTeamService {
             await this.serviceWaiting(view);
             view = await this.get(id);
           }
-          // `state.waiting` â not the status â is the authority for a declared
+          // `state.waiting` — not the status — is the authority for a declared
           // wait: transcript records recompute status every few seconds
           // (running/thinking/tool_running), so gating only on the status let
           // the very tool_result of `kteam signal waiting` erase the park and
@@ -6026,7 +6027,7 @@ export class SessionManager implements KTeamService {
           }
           // A healthy turn writes its first transcript record within seconds of
           // the prompt landing. Zero transcript bytes minutes into a turn means
-          // the prompt was lost or the TUI booted logged-out â both previously
+          // the prompt was lost or the TUI booted logged-out — both previously
           // burned the full stall timer while `status` said "running". Nudge
           // once, then fail fast with a distinct reason.
           const turnStartedAt = view.state.startedAt
@@ -6080,10 +6081,10 @@ export class SessionManager implements KTeamService {
             }
           }
           // A6 reflex rule (locked): life-signs at this layer are transcript
-          // growth, ANY pane change, and subprocess activity â it only catches
-          // totally-frozen agents. Zero life-signs for nudgeAfterSeconds â one
+          // growth, ANY pane change, and subprocess activity — it only catches
+          // totally-frozen agents. Zero life-signs for nudgeAfterSeconds → one
           // nudge per episode (interrupt + continue message); still zero at
-          // killAfterSeconds â kill. Alive-but-weird cases (long silent think,
+          // killAfterSeconds → kill. Alive-but-weird cases (long silent think,
           // long background task) are the warden sweep's sus list, not ours.
           const ledger: LivenessLedger = {
             lastTranscriptAt: view.state.lastTranscriptAt,
@@ -6576,7 +6577,7 @@ export class SessionManager implements KTeamService {
             ? { contextTokens: usageEvent.data.contextTokens, contextWindow: contextWindowFromUsage }
             : {}),
           // Ground truth for the MODEL column: the wrapper alias (`opus` on a
-          // GLM account) is only what was requested â this is what answered.
+          // GLM account) is only what was requested — this is what answered.
           ...(usageEvent?.data.model ? { observedModel: usageEvent.data.model } : {}),
           ...(observedModelAt ? { observedModelAt } : {}),
           retryAttempt: madeProgress ? 0 : current.retryAttempt,
@@ -6803,7 +6804,7 @@ export class SessionManager implements KTeamService {
             ? { contextTokens: usageEvent.data.contextTokens, contextWindow: contextWindowFromUsage }
             : {}),
           // Ground truth for the MODEL column: the wrapper alias (`opus` on a
-          // GLM account) is only what was requested â this is what answered.
+          // GLM account) is only what was requested — this is what answered.
           ...(usageEvent?.data.model ? { observedModel: usageEvent.data.model } : {}),
           ...(runtimeSettings?.data.model ? { observedModel: runtimeSettings.data.model } : {}),
           ...(observedModelAt ? { observedModelAt } : {}),
@@ -6862,7 +6863,7 @@ export class SessionManager implements KTeamService {
       const next = { ...current, ...patch };
       // A session that ENDS is not waiting for anything any more. Nothing else
       // clears a declared wait on the terminal paths (stop, timeout, stall
-      // kill, pane death), and once terminal every later patch is suppressed â
+      // kill, pane death), and once terminal every later patch is suppressed —
       // so a park left set here would be permanent: `kteam wait` would never
       // return and the warden would report an overdue wait on a dead session
       // forever.
@@ -7011,7 +7012,7 @@ export class SessionManager implements KTeamService {
     if (this.closed && !allowClosed) throw new Error('kteam daemon is shutting down');
     if (this.deleting.has(id) && !allowDeleting) throw new Error('session deletion is in progress');
     // Attribute to the request actor (e.g. a warden HTTP action) when one is in
-    // scope. Captured synchronously â the append runs on a deferred queue where
+    // scope. Captured synchronously — the append runs on a deferred queue where
     // the AsyncLocalStorage context would no longer be current.
     const effectiveSource = currentActor() ?? source;
     // LIVE-ONLY classes never reach the journal. `terminal.frame` was the
@@ -7043,7 +7044,7 @@ export class SessionManager implements KTeamService {
     // serializes per session (its own append queue), which is all the ordering
     // a journal needs. The old fleet-wide chain existed only to hand out a
     // global sequence number, and it made every event in the fleet wait behind
-    // every other event â 2.8 events/sec across the whole daemon, with a
+    // every other event — 2.8 events/sec across the whole daemon, with a
     // launch's `session.running` stuck behind another session's transcript
     // backlog.
     //
@@ -7071,7 +7072,7 @@ export class SessionManager implements KTeamService {
     const envelope = event.data as unknown as StoredEnvelope;
     return {
       // The session's OWN sequence. Journals written while the fleet counter
-      // existed carry a `globalSequence` in their envelope; it is ignored â
+      // existed carry a `globalSequence` in their envelope; it is ignored —
       // per-session order is the contract every consumer actually uses.
       sequence: event.sequence,
       time: event.time,
@@ -7214,7 +7215,7 @@ export class SessionManager implements KTeamService {
     // loop, so it must NOT fire on a mere rate_limited status. Require the usage
     // feed to confirm the CURRENT account is genuinely at its limit, and only
     // migrate to a candidate with confirmed headroom. Absent/unknown usage data
-    // (empty feed, account not scored) is treated as "not confirmed" â no
+    // (empty feed, account not scored) is treated as "not confirmed" → no
     // failover, and the session keeps waiting for its own quota to reset.
     const currentUsage = usage.find(item => item.binary === view.config.binary);
     if (currentUsage?.atLimit !== true && currentUsage?.unavailable !== true) return false;
@@ -7374,7 +7375,7 @@ export class SessionManager implements KTeamService {
         promptReady: false,
         // This write bypasses transition(), so it clears the declared wait
         // itself: kill_failed is protected, and every later patch is
-        // suppressed â a park left set here could never be cleared again.
+        // suppressed — a park left set here could never be cleared again.
         waiting: undefined,
       }));
       await this.emit(
@@ -7436,19 +7437,19 @@ export class SessionManager implements KTeamService {
         ? '7. If blocked without a structured question tool, run: kteam signal help "your precise question"'
         : '7. Never signal help or wait for a HUMAN reply in automode. Waiting on an EXTERNAL condition is different and supported: see rule 9.';
     // Rule 9 (2026-07-24): before declared waits, a teammate parked on a long
-    // suite or a deploy was indistinguishable from a dead one â nudged at
+    // suite or a deploy was indistinguishable from a dead one — nudged at
     // 180 s, stall-killed at 300 s, and reaped by the 4 h turn ceiling.
     const waitRule =
       '9. If you must wait on an EXTERNAL condition (a long suite, a deploy, a scheduled window), declare it: ' +
       'kteam signal waiting --until <45m|2h|ISO> --on "<what you are waiting for>". That suspends the idle nudge, ' +
       'the stall kill, and the turn ceiling while heartbeats keep you visible; the daemon wakes you at the deadline. ' +
       '--until is optional (an open-ended park is fine), but EVERY wait is force-woken after 4 hours. ' +
-      'Run kteam signal working when the condition resolves. This is legal in automode â it asks nobody for anything. ' +
+      'Run kteam signal working when the condition resolves. This is legal in automode — it asks nobody for anything. ' +
       'Never park instead of finishing: it is for waiting, not for idling.';
     // Rule 8 exists because a teammate once ran `bun add` at a repo root: bun
     // created a root package.json/node_modules that shadowed a nested package's
     // deps and broke tooling fleet-wide until a human cleaned it up.
-    return `# kteam teammate contract\n\n${interaction}\n\nYour durable coordination directory is ${directory}.\n\nRules:\n1. Work only on the assigned task and respect repository instructions.\n2. Do not manage tmux or the daemon.\n3. Keep useful session-only artifacts under the coordination directory.\n4. When the assigned task is genuinely complete, write ${directory}/summary.md and run: kteam signal done\n5. Never claim completion without the done marker.\n6. Preserve unrelated user changes.\n${helpRule}\n8. Run \`bun add\`/\`bun install\` (and other package-manager installs) ONLY from inside the target package directory â cd there in the same command or use absolute paths. NEVER run them at the repository root: that creates a root package.json/node_modules that shadows nested packages and breaks their tooling.\n${waitRule}\n`;
+    return `# kteam teammate contract\n\n${interaction}\n\nYour durable coordination directory is ${directory}.\n\nRules:\n1. Work only on the assigned task and respect repository instructions.\n2. Do not manage tmux or the daemon.\n3. Keep useful session-only artifacts under the coordination directory.\n4. When the assigned task is genuinely complete, write ${directory}/summary.md and run: kteam signal done\n5. Never claim completion without the done marker.\n6. Preserve unrelated user changes.\n${helpRule}\n8. Run \`bun add\`/\`bun install\` (and other package-manager installs) ONLY from inside the target package directory — cd there in the same command or use absolute paths. NEVER run them at the repository root: that creates a root package.json/node_modules that shadows nested packages and breaks their tooling.\n${waitRule}\n`;
   }
 
   private promptInstruction(id: string, turn: number): string {
@@ -7549,7 +7550,7 @@ export class SessionManager implements KTeamService {
   /** Launch the TUI, relaunching ONCE when it never reaches a ready prompt.
    *  Codex TUIs occasionally wedge at the startup banner (observed during the
    *  2026-07-22 daemon flap: promptReady=false for the full 90 s window) and a
-   *  single fresh pane reliably recovers â without this, the whole session
+   *  single fresh pane reliably recovers — without this, the whole session
    *  fails on a boot hiccup. Only the startup-timeout shape retries; a dead
    *  pane or tmux error stays fatal on the first attempt. */
   private async launchWithRetry(config: SessionConfig): Promise<void> {
@@ -7568,7 +7569,7 @@ export class SessionManager implements KTeamService {
     }
   }
 
-  /** Run a TUI bootstrap (launch + first inject) exclusively â see bootstrapChain. */
+  /** Run a TUI bootstrap (launch + first inject) exclusively — see bootstrapChain. */
   private async serializedBootstrap<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.bootstrapChain.then(operation, operation);
     this.bootstrapChain = result.then(
@@ -7610,7 +7611,7 @@ export class SessionManager implements KTeamService {
     }
   }
 
-  // ââ Scratch garbage collection ââââââââââââââââââââââââââââââââââââââââââââ
+  // ── Scratch garbage collection ────────────────────────────────────────────
 
   /** Running total of scratch reclaimed this daemon lifetime. */
   private scratchReclaimed = { sessions: 0, bytes: 0 };
@@ -7620,7 +7621,7 @@ export class SessionManager implements KTeamService {
   }
 
   /** Is this session holding a live warden? (An assigned warden's target must
-   *  keep its scratch â the warden is about to read it.) */
+   *  keep its scratch — the warden is about to read it.) */
   private hasLiveWarden(id: string): boolean {
     for (const session of this.store.listSessions()) {
       const config = session.config as SessionConfig | undefined;
@@ -7685,7 +7686,7 @@ export class SessionManager implements KTeamService {
   }
 
   /** Reclaim expired scratch. Rate-limited by `scratch.perSweep` and folded
-   *  into the warden sweep â no new timer, and it yields between sessions so a
+   *  into the warden sweep — no new timer, and it yields between sessions so a
    *  multi-gigabyte delete never blocks event delivery. */
   async scratchPlan(limit?: number): Promise<ScratchPlan[]> {
     return await this.planScratchSweep(limit ?? this.scratchConfig.perSweep);
@@ -7739,7 +7740,7 @@ export class SessionManager implements KTeamService {
     return summary;
   }
 
-  // ââ Fleet warden (layer 3) ââââââââââââââââââââââââââââââââââââââââââââââââ
+  // ── Fleet warden (layer 3) ────────────────────────────────────────────────
 
   /** Load durable warden state and arm the periodic deterministic sweep. The
    *  detection sweep is always-on and free; LLM escalation inside it is gated on
@@ -7814,17 +7815,30 @@ export class SessionManager implements KTeamService {
       hasLiveMonitor: this.monitors.has(view.config.id),
       hasDoneMarker: this.doneMarkerForTurn(view.config.id, view.state.turn ?? view.config.turn),
     }));
+    // Detection acts only on `views`, but peer waits must distinguish a typo
+    // from a peer that exists in terminal history and can never answer.
+    const knownViews: WardenSessionView[] = sessions.map(view => ({
+      config: view.config,
+      state: view.state,
+      hasLiveMonitor: this.monitors.has(view.config.id),
+      hasDoneMarker: this.doneMarkerForTurn(view.config.id, view.state.turn ?? view.config.turn),
+    }));
     // One knob (`unattendedMinutes`) drives both the idle-question threshold and
-    // the recent-terminal-wreckage window â an old failure that nobody handled
+    // the recent-terminal-wreckage window — an old failure that nobody handled
     // within the window ages out rather than nagging forever.
     const unattendedMs = Math.max(60_000, this.wardenConfig.unattendedMinutes * 60_000);
     const sweepNowMs = Date.now();
-    const sessionDetected = detectAnomalies(views, sweepNowMs, {
-      unattendedMs,
-      terminalWindowMs: unattendedMs,
-      susThinkingSeconds: Math.max(60, this.wardenConfig.susThinkingSeconds),
-      susSubprocessSeconds: Math.max(60, this.wardenConfig.susSubprocessSeconds),
-    });
+    const sessionDetected = detectAnomalies(
+      views,
+      sweepNowMs,
+      {
+        unattendedMs,
+        terminalWindowMs: unattendedMs,
+        susThinkingSeconds: Math.max(60, this.wardenConfig.susThinkingSeconds),
+        susSubprocessSeconds: Math.max(60, this.wardenConfig.susSubprocessSeconds),
+      },
+      knownViews,
+    );
     // Provider failure detection reads daemon-owned snapshots directly. Bound
     // concurrent reads so a large historical fleet cannot create an fd storm;
     // only current auto sessions are candidates, and no live tmux/LLM work is
@@ -7858,10 +7872,13 @@ export class SessionManager implements KTeamService {
     const detected = { anomalies: [...sessionDetected.anomalies, ...providerDetected.anomalies] };
     // Reconcile fresh needs_human verdicts from warden reports into session
     // state, then SUPPRESS re-triage of a flagged session's same anomaly
-    // class: a needs_human session already reached the human â an identical
+    // class: a needs_human session already reached the human — an identical
     // report every sweep is noise (lacey, 2026-07-23). The flag clears when a
     // human acts (answer/resume/stop).
-    await this.reconcileNeedsHuman(sessions);
+    // A stalled session has already had its pane killed. Never write a fresh
+    // durable human interruption onto terminal history; the attention view also
+    // hides any older persisted rows for these sessions.
+    await this.reconcileNeedsHuman(scanSessions);
     const flagged = new Map(sessions.map(view => [view.config.id, view.state]));
     const anomalies = detected.anomalies.filter(
       item => !needsHumanStateCoversAnomaly(flagged.get(item.sessionId) ?? {}, item.kind),
@@ -8261,7 +8278,7 @@ export class SessionManager implements KTeamService {
   }
 
   /** True when `capability` matches the secret minted for `targetId`'s
-   *  active assignment â the ONLY case the warden-scoped token may stop a
+   *  active assignment — the ONLY case the warden-scoped token may stop a
    *  session. Capabilities are unguessable and exported only into the
    *  assigned warden's pane, so possession IS the authorization; a
    *  client-chosen identity header is never trusted. */
@@ -8282,7 +8299,7 @@ export class SessionManager implements KTeamService {
         : anomaly.kind === 'sus_subprocess'
           ? [
               'The session has had a background subprocess running continuously for a long time.',
-              'Judge whether that is expected for the task (build, test suite, long migrationâ¦) and whether the process is',
+              'Judge whether that is expected for the task (build, test suite, long migration…) and whether the process is',
               'actually PROGRESSING: is its output growing (turn logs, files in the cwd), is it consuming CPU (`ps`), are',
               'artifacts appearing? A legitimate long task should show movement between two looks a minute apart.',
             ]
@@ -8301,20 +8318,20 @@ export class SessionManager implements KTeamService {
       '```',
       '',
       '## What to understand first',
-      `- The live liveness ledger: ${target.directory}/liveness.yaml (rewritten every monitor tick â seconds since conversation/tokens/thinking/subprocess/pane life-signs plus the current nudge/kill/sus triggers). Read it twice a minute apart.`,
+      `- The live liveness ledger: ${target.directory}/liveness.yaml (rewritten every monitor tick - seconds since conversation/tokens/thinking/subprocess/pane life-signs plus the current nudge/kill/sus triggers). Read it twice a minute apart.`,
       `- The task and conversation so far: read ${target.directory}/prompt.md, chat.jsonl, and turns/ + logs/.`,
-      `- Live pane: \`kteam snapshot ${target.config.id}\` (twice, a minute apart â compare).`,
+      `- Live pane: \`kteam snapshot ${target.config.id}\` (twice, a minute apart - compare).`,
       `- Recent events: \`kteam events ${target.config.id} --after -50\`.`,
       `- The workspace: read-only \`git -C ${target.config.cwd} diff --stat\` and file timestamps.`,
       ...kindHelp.map(line => `- ${line}`),
       '',
       '## Verdict (exactly one; state it and the evidence in the report)',
-      '- LEAVE â the long operation is expected and progressing; no action.',
-      `- NUDGE â \`kteam send ${target.config.id} <message>\` if it looks wedged but recoverable.`,
-      `- RESUME â \`kteam resume ${target.config.id}\` if the turn is dead but the session should continue.`,
-      `- KILL â \`kteam stop ${target.config.id}\` ONLY if the session is demonstrably burning time/tokens with no progress.`,
+      '- LEAVE - the long operation is expected and progressing; no action.',
+      `- NUDGE - \`kteam send ${target.config.id} <message>\` if it looks wedged but recoverable.`,
+      `- RESUME - \`kteam resume ${target.config.id}\` if the turn is dead but the session should continue.`,
+      `- KILL - \`kteam stop ${target.config.id}\` ONLY if the session is demonstrably burning time/tokens with no progress.`,
       '  (Your token can stop only this assigned session.)',
-      '- NEEDS_HUMAN â the rare exception: use only when you are genuinely uncertain whether KILL would destroy needed work or cause irreversible harm. State that exact uncertainty; never use it merely because acting feels risky.',
+      '- NEEDS_HUMAN - the rare exception: use only when you are genuinely uncertain whether KILL would destroy needed work or cause irreversible harm. State that exact uncertainty; never use it merely because acting feels risky.',
       '',
       '## Rules',
       '- Do NOT touch any other session. No git writes, no repository edits, no new non-warden sessions.',
@@ -8324,14 +8341,16 @@ export class SessionManager implements KTeamService {
       '```',
       'Verdict: LEAVE|NUDGE|RESUME|KILL|NEEDS_HUMAN',
       '',
-      `# Warden report â ${target.config.id} (teammate ${target.config.teammate ? `:${target.config.teammate}` : 'unknown'}, ${target.config.label ?? '-'})`,
+      `# Warden report - ${target.config.id} (teammate ${target.config.teammate ? `:${target.config.teammate}` : 'unknown'}, ${target.config.label ?? '-'})`,
       '',
       `- **Anomaly kind:** ${anomaly.kind}`,
       '',
       '## Summary',
+      '- **Recommended action:** NUDGE|STOP|RESUME|RESTART|MIGRATE (wrapper)|LEAVE — <one-line why>',
       '- **Outcome:** <short reason for the verdict>',
       '',
-      '<point-form evidence sections>',
+      '## Evidence',
+      '- <up to three short bullets that support the verdict>',
       '```',
       '- Then run: kteam signal done',
     ].join('\n');
@@ -8347,7 +8366,7 @@ export class SessionManager implements KTeamService {
     if (!force && !warden.enabled) return { message: 'escalation disabled (warden.enabled=false)' };
     if (anomalies.length === 0) return { message: 'no anomalies to escalate' };
     // "Live" excludes protected statuses (terminal + kill_failed): a warden whose
-    // pane could not be killed must NOT block escalation forever â the spawn gap
+    // pane could not be killed must NOT block escalation forever — the spawn gap
     // below still rate-limits fresh wardens, so a wedged warden ages out.
     const liveWardens = sessions.filter(
       view => view.config.label === WARDEN_LABEL && !protectedStatuses.includes(view.state.status),
@@ -8424,7 +8443,7 @@ export class SessionManager implements KTeamService {
       // flows to the next configured account.
       this.recordWardenSpawnFailure(account.wrapper, error);
       // A FAILED launch still consumes the spawn gap (record lastSpawnAt) so a
-      // persistently-broken wrapper can't be retried every sweep â but do NOT
+      // persistently-broken wrapper can't be retried every sweep — but do NOT
       // record the suppression key, so a changed anomaly set (or the same set in
       // a later generation) can still escalate once the gap elapses.
       this.wardenState.lastSpawnAt = at;
@@ -8500,16 +8519,16 @@ export class SessionManager implements KTeamService {
       }));
     }
     return [
-      'You are the kteam FLEET WARDEN â layer-3 oversight for a team of autonomous coding agents.',
+      'You are the kteam FLEET WARDEN - layer-3 oversight for a team of autonomous coding agents.',
       `A deterministic sweep at ${at} found the anomalies below. Triage them and take only the SAFE, obvious recovery actions.`,
       '',
       '## ALLOWED actions',
       '- `kteam resume <id> [message]` a live session whose interruption is clearly transient (network, connection, timeout, overloaded, a dropped harness process). Read the session chat/turn files first.',
       '- `kteam send <id> <nudge>` a session that looks wedged but recoverable.',
-      '- `kteam migrate <id> -a <wrapper>` a QUOTA/rate-limited session onto a usable same-kind account. Only pick a wrapper from that session\'s "Migrate candidates" list below (never guess) â the session keeps its conversation and continues on the new account.',
+      '- `kteam migrate <id> -a <wrapper>` a QUOTA/rate-limited session onto a usable same-kind account. Only pick a wrapper from that session\'s "Migrate candidates" list below (never guess) - the session keeps its conversation and continues on the new account.',
       "- Answer a question ONLY when its answer is unambiguous from that session's OWN chat.jsonl / turns/ files. If you must guess, do not answer.",
       '',
-      '## FORBIDDEN â never do these',
+      '## FORBIDDEN - never do these',
       '- Do NOT remove (`kteam delete`) any session.',
       '- Stop only a session for which your warden capability authorizes `kteam stop`, and only with clear evidence that it is burning time/tokens with no progress.',
       '- Do NOT run any git operations, and do NOT edit any repository files.',
@@ -8517,11 +8536,13 @@ export class SessionManager implements KTeamService {
       '',
       '## Required output',
       `- Write a report to EXACTLY this path: ${reportPath}`,
-      '- State the outcome and action per session; keep the report short.',
-      '- Write one `## Anomaly: <session-id> â :<teammate> / <label>` section per anomaly record; repeat a session in separate sections when it has multiple anomaly kinds.',
+      '- State the outcome and one recommended action per session; keep the report short.',
+      '- Write one `## Anomaly: <session-id> - :<teammate> / <label>` section per anomaly record; repeat a session in separate sections when it has multiple anomaly kinds.',
       '- Put `- **Anomaly kind:** <kind>` inside EVERY anomaly section.',
       '- Put `Verdict: LEAVE|NUDGE|RESUME|KILL|NEEDS_HUMAN` inside EVERY anomaly section.',
-      '- Put `- **Outcome:** <short reason>` directly under each verdict.',
+      '- Put `- **Recommended action:** NUDGE|STOP|RESUME|RESTART|MIGRATE (wrapper)|LEAVE — <one-line why>` directly under each verdict.',
+      '- Put `- **Outcome:** <short reason>` directly under the recommendation.',
+      '- Keep evidence to at most three short bullets. Do not copy logs, commands, raw JSON, or repeated observations into the report.',
       '- Never use one fleet-wide verdict as the verdict for multiple sessions.',
       '- Use NEEDS_HUMAN only for a genuine, explicit uncertainty about whether stopping would destroy needed work or cause irreversible harm. Otherwise act (or LEAVE) and log the outcome.',
       ...wardenReportInstructions(reportPath),
@@ -8541,14 +8562,14 @@ export class SessionManager implements KTeamService {
         ? [
             '',
             '## Migrate candidates (usable same-kind accounts for quota/rate-limited sessions)',
-            'If a candidate list is empty, do NOT migrate that session â leave it to wait for its quota reset.',
+            'If a candidate list is empty, do NOT migrate that session — leave it to wait for its quota reset.',
             '```json',
             JSON.stringify(migrateCandidates, null, 2),
             '```',
           ]
         : []),
       '',
-      `The full anomaly file is at ${this.paths.wardenAnomalies}. Each session's durable directory (chat.jsonl, turns/, logs/) is listed above â read it before acting.`,
+      `The full anomaly file is at ${this.paths.wardenAnomalies}. Each session's durable directory (chat.jsonl, turns/, logs/) is listed above — read it before acting.`,
     ].join('\n');
   }
 
@@ -8688,7 +8709,7 @@ export class SessionManager implements KTeamService {
     }
   }
 
-  /** A human acted on the session â clear the needs_human flag so the sweep
+  /** A human acted on the session — clear the needs_human flag so the sweep
    *  resumes watching it. A Codex picker cleanup quarantine is different: a
    *  generic acknowledgement must not remove it until a caller has positively
    *  killed or replaced that pane. */

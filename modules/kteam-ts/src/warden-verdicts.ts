@@ -19,6 +19,16 @@ import type { WardenSpawnProvenance } from './warden-provenance';
 import type { WardenAnomalyKind } from './warden-detect';
 
 export type WardenVerdictKind = 'killed' | 'revived' | 'nudged' | 'cleared' | 'needs_human' | 'unknown';
+/** A concrete next step from the warden report.  `migrate` carries the
+ * daemon-checked wrapper it named, so the UI never has to guess a target. */
+export type WardenRecommendedAction = 'nudge' | 'stop' | 'resume' | 'restart' | 'migrate' | 'leave';
+
+export interface WardenRecommendation {
+  action: WardenRecommendedAction;
+  reason: string;
+  /** Required only for MIGRATE, e.g. `claude-auto-loge`. */
+  wrapper?: string;
+}
 
 /** API projection is additive and tolerant of older/partial producers. New
  *  daemon sidecars attach the complete WardenSpawnProvenance shape, including
@@ -39,6 +49,8 @@ export interface WardenVerdict {
    *  Attention requests require this explicit marker; heuristic legacy prose
    *  remains report history and never interrupts a human by itself. */
   explicitNeedsHuman?: boolean;
+  /** The report's explicit, human-actionable next step. */
+  recommendation?: WardenRecommendation;
   reason?: string;
   reportPath: string;
   /** Daemon-owned spawn facts from the report's optional JSON sidecar. */
@@ -58,6 +70,15 @@ const MARKER_MAP: Record<string, WardenVerdictKind> = {
   LEAVE: 'cleared',
   NEEDS_HUMAN: 'needs_human',
 };
+
+const RECOMMENDED_ACTIONS = new Set<WardenRecommendedAction>([
+  'nudge',
+  'stop',
+  'resume',
+  'restart',
+  'migrate',
+  'leave',
+]);
 
 const WARDEN_ANOMALY_KINDS = new Set<WardenAnomalyKind>([
   'dead_monitor',
@@ -180,6 +201,23 @@ function reportedReason(block: string): string | undefined {
   return undefined;
 }
 
+/** The compact report contract keeps the instruction actionable and parseable:
+ * `- **Recommended action:** NUDGE — Ask the session to restate its blocker.`
+ * MIGRATE must name a wrapper in parens, e.g. `MIGRATE (claude-auto-loge)`.
+ * Old reports simply have no recommendation and receive a safe UI fallback. */
+function reportedRecommendation(content: string): WardenRecommendation | undefined {
+  const match = content.match(
+    /^\s*[-*]\s+\*\*Recommended action:\*\*\s*(NUDGE|STOP|RESUME|RESTART|MIGRATE|LEAVE)(?:\s*\(([^)\n]+)\))?\s*(?:—|–|-)\s*([^\n]+)\s*$/im,
+  );
+  if (!match) return undefined;
+  const action = match[1]!.toLowerCase() as WardenRecommendedAction;
+  const reason = match[3]!.trim();
+  if (!RECOMMENDED_ACTIONS.has(action) || !reason) return undefined;
+  const wrapper = match[2]?.trim();
+  if (action === 'migrate' && !wrapper) return undefined;
+  return { action, reason, ...(wrapper ? { wrapper } : {}) };
+}
+
 function verdictSummary(content: string): string | undefined {
   // Bolded verdict line (both formats), else the assigned format's
   // `## Summary` section first sentence(s).
@@ -192,7 +230,15 @@ function verdictSummary(content: string): string | undefined {
   const outcome = content.match(/^\s*[-*]\s+\*\*Outcome:\*\*\s*([^\n]+(?:\n(?!\n)[^\n]+)*)/im);
   if (outcome && outcome[1]!.trim()) return outcome[1]!.replace(/\s+/g, ' ').trim();
   const summary = content.match(/^##\s+Summary\s*\n+([\s\S]*?)(?:\n\n|\n##|\n?$)/m);
-  if (summary && summary[1]!.trim()) return summary[1]!.replace(/\s+/g, ' ').trim();
+  // Old reports sometimes put several bullets under Summary. Only the first
+  // line is the row's reason; flattening the rest turns a compact verdict into
+  // a wall of evidence in the fleet list.
+  const firstSummaryLine = summary?.[1]?.split('\n').find(line => line.trim());
+  if (firstSummaryLine)
+    return firstSummaryLine
+      .replace(/^\s*[-*]\s+/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
   return undefined;
 }
 
@@ -227,6 +273,7 @@ export function parseWardenReports(files: WardenReportFile[], limit = 20): Warde
       for (const b of blocks) {
         const blockVerdict = structuredVerdict(b.block);
         const anomalyKind = reportedAnomalyKind(b.block);
+        const recommendation = reportedRecommendation(b.block);
         // A single-anomaly legacy report may keep its verdict above the block.
         // For a multi-session report, never copy one global action onto every
         // target OR infer from incidental action words: an unmarked block
@@ -240,6 +287,7 @@ export function parseWardenReports(files: WardenReportFile[], limit = 20): Warde
           ...(anomalyKind ? { anomalyKind } : {}),
           verdict,
           ...(blockVerdict === 'needs_human' ? { explicitNeedsHuman: true } : {}),
+          ...(recommendation ? { recommendation } : {}),
           reason:
             verdictSummary(b.block) ?? reportedReason(b.block) ?? (blocks.length === 1 ? reportSummary : undefined),
           reportPath: file.path,
@@ -251,6 +299,7 @@ export function parseWardenReports(files: WardenReportFile[], limit = 20): Warde
       // the filename session id as backstop.
       const header = assignedHeader(file.content);
       const anomalyKind = reportedAnomalyKind(file.content);
+      const recommendation = reportedRecommendation(file.content);
       entries.push({
         at,
         targetSession: header?.session ?? filenameSession(file.path),
@@ -259,6 +308,7 @@ export function parseWardenReports(files: WardenReportFile[], limit = 20): Warde
         ...(anomalyKind ? { anomalyKind } : {}),
         verdict: reportVerdict,
         ...(structuredVerdict(file.content) === 'needs_human' ? { explicitNeedsHuman: true } : {}),
+        ...(recommendation ? { recommendation } : {}),
         reason: reportSummary,
         reportPath: file.path,
       });

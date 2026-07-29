@@ -226,6 +226,14 @@ describe('the warden treats a peer wait as legitimate', () => {
     expect(anomaly?.assignedWarden).toBe(true);
   });
 
+  test('a terminal peer stays honestly terminal when the detector receives only live sweep rows', () => {
+    const found = detectAnomalies([waiter('s2')], nowMs, options, [waiter('s2'), peerIn('completed')]);
+    const anomaly = found.anomalies.find(a => a.sessionId === 's1');
+    expect(anomaly?.kind).toBe('peer_wait_unanswerable');
+    expect(anomaly?.detail).toContain('completed');
+    expect(anomaly?.detail).not.toContain('not a known session');
+  });
+
   test('a peer that no longer exists is flagged as unanswerable too', () => {
     const found = detectAnomalies([waiter('ghost')], nowMs, options);
     const anomaly = found.anomalies.find(a => a.sessionId === 's1');

@@ -554,19 +554,31 @@ test('old verdict without provenance still judges — judgedBy simply absent', (
 
 // ── anomalies without a board ────────────────────────────────────────────────
 
-test('anomaly-without-board: a flagged, unjudged session is surfaced, not silent', () => {
+test('terminal stalled sessions never surface from a stale anomaly', () => {
   const view = run({
     sessions: [session('sess-2', { teammate: 'bob' }, 'stalled')],
     anomalies: [anomaly({ kind: 'sus_subprocess', sessionId: 'sess-2', detail: 'stuck in a subprocess for 20m' })],
   });
-  expect(view.items).toHaveLength(1);
-  const row = view.items[0]!;
-  expect(row.fromAnomaly).toBe(true);
-  expect(row.source).toBe('warden-anomaly');
-  expect(row.sessionId).toBe('sess-2');
-  expect(row.subject).toBe('Session stuck in a subprocess');
-  expect(row.why).toBe('stuck in a subprocess for 20m');
-  expect(row.judgement.state).toBe('none');
+  expect(view.items).toEqual([]);
+});
+
+test('terminal stalled sessions never surface from a persisted attention board', () => {
+  const view = run({
+    sessions: [session('sess-2', { teammate: 'bob' }, 'stalled')],
+    boards: [board('sess-2', [item({ id: 'A1' })])],
+  });
+  expect(view.items).toEqual([]);
+});
+
+test('a live anomaly has one named, actionable recommendation', () => {
+  const view = run({
+    sessions: [session('sess-2', { teammate: 'bob' }, 'interrupted')],
+    anomalies: [anomaly({ kind: 'dead_monitor', sessionId: 'sess-2' })],
+  });
+  expect(view.items[0]?.recommendation).toEqual({
+    action: 'restart',
+    reason: 'The session is not actively running; restart it to continue from its saved context.',
+  });
 });
 
 test('anomaly with a confident verdict stays quiet (not silent, warden decided)', () => {

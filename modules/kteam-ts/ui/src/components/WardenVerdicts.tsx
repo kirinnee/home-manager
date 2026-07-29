@@ -101,6 +101,7 @@ function WardenVerdictsPanel() {
     sessionId?: string;
   } | null>(null);
   const timer = useRef<number | null>(null);
+  const hasLoaded = useRef(false);
   // Stable, so the modal's Escape listener is not torn down and re-added on
   // every poll tick of this component.
   const closeReport = useCallback(() => setReport(null), []);
@@ -114,9 +115,12 @@ function WardenVerdictsPanel() {
         if (!cancelled) {
           setVerdicts(v);
           setFailed(false);
+          hasLoaded.current = true;
         }
       } catch {
-        if (!cancelled && !verdicts) setFailed(true);
+        // Keep a previously good verdict list visible through a transient poll
+        // failure. The empty initial state is still honestly unavailable.
+        if (!cancelled && !hasLoaded.current) setFailed(true);
       }
     };
     void poll();
@@ -184,7 +188,7 @@ export function VerdictRows({ verdicts, onOpen }: { verdicts: WardenVerdict[]; o
         const meta = VERDICT[v.verdict] ?? VERDICT.unknown;
         const switched = switchedAccountCopy(v.spawn);
         return (
-          <li key={`${v.reportPath}-${v.targetSession ?? i}`}>
+          <li key={`${v.reportPath}-${v.targetSession ?? 'unknown'}-${i}`}>
             <button
               type="button"
               onClick={() => onOpen(v)}
@@ -281,7 +285,7 @@ export function ReportModal({
         className="flex max-h-[86vh] w-full max-w-[820px] flex-col overflow-hidden rounded-lg border border-border bg-surface shadow-md"
         onClick={e => e.stopPropagation()}
       >
-        <div className="flex items-center gap-2 border-b border-border-soft px-4 py-2.5">
+        <div className="flex min-w-0 items-center gap-2 border-b border-border-soft px-3 py-2.5 sm:px-4">
           <Gavel size={14} className="text-faint" aria-hidden="true" />
           <span id={titleId} className="mono truncate text-[12.5px] text-fg-soft">
             {title}
@@ -296,7 +300,7 @@ export function ReportModal({
             <X size={16} aria-hidden="true" />
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto px-5 py-4 scroll-thin">
+        <div className="min-h-0 min-w-0 flex-1 overflow-auto overflow-x-hidden px-3 py-4 scroll-thin sm:px-5">
           {body == null ? (
             <div className="text-[13px] text-muted">loading report…</div>
           ) : (

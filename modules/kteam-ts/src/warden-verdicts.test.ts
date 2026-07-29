@@ -14,6 +14,24 @@ test('classifyVerdict prefers the structured marker', () => {
   expect(classifyVerdict('Verdict: NEEDS_HUMAN')).toBe('needs_human');
 });
 
+test('parseWardenReports carries the compact recommended action and migrate wrapper', () => {
+  const [entry] = parseWardenReports([
+    {
+      path: '/r/assigned.md',
+      mtimeMs: 1,
+      content:
+        'Verdict: NEEDS_HUMAN\n\n# Warden report — target-12345678\n\n' +
+        '- **Anomaly kind:** provider_unavailable\n\n' +
+        '- **Recommended action:** MIGRATE (claude-auto-loge) — The current account is exhausted.\n',
+    },
+  ]);
+  expect(entry?.recommendation).toEqual({
+    action: 'migrate',
+    wrapper: 'claude-auto-loge',
+    reason: 'The current account is exhausted.',
+  });
+});
+
 test('only an explicit NEEDS_HUMAN marker is eligible to interrupt a human', () => {
   const [explicit, heuristic] = parseWardenReports([
     {
@@ -231,6 +249,19 @@ test('assigned header without teammate parenthetical still yields the session id
     verdict: 'nudged',
     reason: 'Wedged but recoverable.',
   });
+});
+
+test('summary fallback keeps only its first line, never flattens evidence bullets into a row', () => {
+  const [entry] = parseWardenReports([
+    {
+      path: '/reports/2026-07-23T00-00-00-000Z-mrxaaaa-11112222.md',
+      content:
+        'Verdict: LEAVE\n\n# Warden report - mrxaaaa-11112222\n\n' +
+        '- **Anomaly kind:** sus_thinking\n\n## Summary\n- The build is still progressing.\n- PID and log details belong in the report.\n',
+      mtimeMs: 1,
+    },
+  ]);
+  expect(entry?.reason).toBe('The build is still progressing.');
 });
 
 test('extracts the reason when the verdict word sits INSIDE the bold marker', async () => {

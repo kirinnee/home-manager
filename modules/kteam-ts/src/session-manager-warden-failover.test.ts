@@ -626,6 +626,11 @@ describe('warden report serving and prompts', () => {
     ]);
   });
 
+  test('the live sweep never reconciles needs-human requests onto terminal sessions', async () => {
+    const source = await Bun.file(new URL('./session-manager.ts', import.meta.url)).text();
+    expect(source).toContain('await this.reconcileNeedsHuman(scanSessions);');
+  });
+
   test('two needs-human blocks in one report stay durable and kind-distinct', async () => {
     const manager = bareManager();
     const events: Array<{ data: { anomalyKind?: string } }> = [];
@@ -777,7 +782,7 @@ describe('warden report serving and prompts', () => {
     expect((manager as unknown as { latestReport: () => Promise<unknown> }).latestReport()).rejects.toThrow();
   });
 
-  test('both report prompts require point form and complete provenance', async () => {
+  test('both report prompts require compact, actionable reports and complete provenance', async () => {
     const manager = bareManager();
     manager.paths = { wardenAnomalies: '/tmp/warden-anomalies.json', kfleetBin: '/nonexistent-kfleet-bin' };
     manager.fetchUsageAccounts = async () => [];
@@ -803,9 +808,10 @@ describe('warden report serving and prompts', () => {
       [assigned, assignedReport],
       [sweep, sweepReport],
     ]) {
-      expect(prompt).toContain('- Lead with the outcome.');
-      expect(prompt).toContain('- Use point form only.');
-      expect(prompt).toContain('- Bold one key value per bullet.');
+      expect(prompt).toContain('- Lead with the verdict, then the recommended action and its one-line reason.');
+      expect(prompt).toContain('Keep evidence to at most three bullets.');
+      expect(prompt).toContain('**Recommended action**');
+      expect(prompt).toContain('Do not narrate the investigation or dump logs, commands, IDs, or repeated readings.');
       expect(prompt).toContain(
         '- Do not write CLI, model, harness, or failover facts: the daemon injects those from session metadata when rendering.',
       );

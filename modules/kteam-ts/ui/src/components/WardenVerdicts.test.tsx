@@ -148,4 +148,11 @@ describe('WardenVerdicts', () => {
     expect(source).not.toContain('onPinOpen={onPinOpen}');
     expect(source).toContain('{...sessionReferenceHost(report?.sessionId)}');
   });
+
+  test('keeps loaded verdict history through a transient poll failure and keys repeated report blocks uniquely', async () => {
+    const source = await Bun.file(new URL('./WardenVerdicts.tsx', import.meta.url)).text();
+    expect(source).toContain('const hasLoaded = useRef(false);');
+    expect(source).toContain('if (!cancelled && !hasLoaded.current) setFailed(true);');
+    expect(source).toContain("key={`${v.reportPath}-${v.targetSession ?? 'unknown'}-${i}`}");
+  });
 });

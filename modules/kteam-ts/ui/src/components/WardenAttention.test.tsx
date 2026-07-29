@@ -369,6 +369,39 @@ describe('WardenAttentionSection', () => {
     expect(html).not.toContain('Mark done');
   });
 
+  test('leads every item with a named recommendation and a direct 44px control', () => {
+    const html = render({
+      status: 'ready',
+      view: view({
+        items: [
+          item({
+            recommendation: {
+              action: 'restart',
+              reason: 'The session is interrupted and can continue from saved context.',
+            },
+          }),
+        ],
+      }),
+    });
+    expect(html).toContain('Suggested next step');
+    expect(html).toContain('Restart session');
+    expect(html).toContain('The session is interrupted and can continue from saved context.');
+    expect(html).toContain('min-h-[44px] w-full');
+  });
+
+  test('prints the live session status beside the judgement', () => {
+    const html = render({ status: 'ready', view: view({ items: [item({ sessionStatus: 'awaiting_user' })] }) });
+    expect(html).toContain('awaiting user');
+  });
+
+  test('renders LEAVE as an explicit no-action answer', () => {
+    const html = render({
+      status: 'ready',
+      view: view({ items: [item({ recommendation: { action: 'leave', reason: 'The warden already handled it.' } })] }),
+    });
+    expect(html).toContain('No action needed — The warden already handled it.');
+  });
+
   test('renders each judgement chip, and none reads as "No matching judgement"', () => {
     const states: WardenJudgementState[] = ['judged', 'pending', 'queued', 'failed', 'none'];
     for (const state of states) {

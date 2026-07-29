@@ -27,6 +27,7 @@ import {
   parseWardenVerdictSourceRef,
   type WardenVerdict,
   type WardenVerdictKind,
+  type WardenRecommendation,
   type WardenVerdictSourceIdentity,
 } from './warden-verdicts';
 
@@ -57,6 +58,8 @@ export interface WardenJudgement {
   at?: string;
   /** Only present when a report file actually exists. */
   reportPath?: string;
+  /** Explicit next step from the report, when it follows the current contract. */
+  recommendation?: WardenRecommendation;
   /** The verdict predates this waiting item — it judged an earlier situation. */
   stale?: boolean;
 }
@@ -80,6 +83,9 @@ export interface FleetAttentionItem {
   /** ISO — oldest waiting first across the whole fleet. */
   waitingSince: string;
   howToResolve: string;
+  /** One named, executable next step. New projections always supply it; the
+   * field stays optional for older daemon/API fixtures. */
+  recommendation?: WardenRecommendation;
   raisedBy?: AttentionBy;
   raisedByName?: string;
   judgement: WardenJudgement;
@@ -168,6 +174,11 @@ export interface WardenAttentionInput {
 
 const DEFAULT_SWEEP_INTERVAL_MINUTES = 5;
 export const WARDEN_ATTENTION_VERDICT_LIMIT = 100;
+const TERMINAL_ATTENTION_STATUSES = new Set(['completed', 'failed', 'stalled', 'stopped', 'kill_failed']);
+
+function isTerminalAttentionStatus(status: string | undefined): boolean {
+  return status !== undefined && TERMINAL_ATTENTION_STATUSES.has(status);
+}
 
 type WardenVerdictMatch = WardenVerdictSourceIdentity;
 
@@ -223,6 +234,36 @@ function provenanceOf(verdict: WardenVerdict): WardenJudgeProvenance | undefined
   if (spawn.model) out.model = spawn.model;
   if (spawn.harness) out.harness = spawn.harness;
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function fallbackRecommendation(
+  judgement: WardenJudgement,
+  status: string | undefined,
+  kind: WardenAnomalyKind | undefined,
+): WardenRecommendation {
+  if (judgement.recommendation) return judgement.recommendation;
+  if (judgement.state === 'judged') {
+    if (judgement.verdict === 'cleared')
+      return { action: 'leave', reason: 'The warden found the work healthy; no action is needed.' };
+    if (judgement.verdict === 'nudged')
+      return { action: 'leave', reason: 'The warden already nudged this session; let it respond.' };
+    if (judgement.verdict === 'revived')
+      return { action: 'leave', reason: 'The warden already resumed this session; let it continue.' };
+    if (judgement.verdict === 'killed')
+      return { action: 'leave', reason: 'The warden already stopped this session; no further action is needed.' };
+  }
+  if (status === 'interrupted' || kind === 'dead_monitor' || kind === 'bootstrap_degraded')
+    return {
+      action: 'restart',
+      reason: 'The session is not actively running; restart it to continue from its saved context.',
+    };
+  return {
+    action: 'nudge',
+    reason:
+      judgement.state === 'pending'
+        ? 'A warden is checking it; nudge only if it needs an immediate response.'
+        : 'Ask the session to restate its blocker or continue.',
+  };
 }
 
 /** Fleet-wide Warden Attention projection. Pure: everything comes in through
@@ -309,6 +350,7 @@ export function buildWardenAttentionView(input: WardenAttentionInput): WardenAtt
           ...(judgedBy ? { judgedBy } : {}),
           at: verdict.at,
           ...(verdict.reportPath ? { reportPath: verdict.reportPath } : {}),
+          ...(verdict.recommendation ? { recommendation: verdict.recommendation } : {}),
         };
       }
       // A warden:<reportPath> row was created by that exact report. Its board
@@ -327,6 +369,7 @@ export function buildWardenAttentionView(input: WardenAttentionInput): WardenAtt
         ...(judgedBy ? { judgedBy } : {}),
         at: verdict.at,
         ...(verdict.reportPath ? { reportPath: verdict.reportPath } : {}),
+        ...(verdict.recommendation ? { recommendation: verdict.recommendation } : {}),
         ...(stale ? { stale: true } : {}),
       };
     }
@@ -366,13 +409,17 @@ export function buildWardenAttentionView(input: WardenAttentionInput): WardenAtt
 
   // 1) Every open Attention board item — the fleet-wide "who needs the human".
   for (const board of boards) {
+    const s = sessionsById.get(board.sessionId);
+    // Stalled is already terminal (the daemon killed its pane). A durable board
+    // must never resurrect that dead session into the human's live action list.
+    if (isTerminalAttentionStatus(s?.state.status)) continue;
     for (const item of board.items) {
       const match = verdictMatchForItem(item);
       const exactVerdict = matchingVerdict(board.sessionId, match);
       if (match?.anomalyKind) coveredAnomalies.add(anomalyKey(board.sessionId, match.anomalyKind));
       if (match?.reportPath && !match.anomalyKind && exactVerdict?.anomalyKind)
         coveredAnomalies.add(anomalyKey(board.sessionId, exactVerdict.anomalyKind));
-      const s = sessionsById.get(board.sessionId);
+      const judgement = computeJudgement(board.sessionId, match, item.waitingSince);
       const row: FleetAttentionItem = {
         sessionId: board.sessionId,
         ...((s?.config.teammate ?? s?.config.name) ? { teammate: s?.config.teammate ?? s?.config.name } : {}),
@@ -387,7 +434,8 @@ export function buildWardenAttentionView(input: WardenAttentionInput): WardenAtt
         howToResolve: item.howToResolve,
         raisedBy: item.raisedBy,
         ...(item.raisedByName ? { raisedByName: item.raisedByName } : {}),
-        judgement: computeJudgement(board.sessionId, match, item.waitingSince),
+        recommendation: fallbackRecommendation(judgement, s?.state.status, match?.anomalyKind),
+        judgement,
       };
       if (item.sourceRef?.startsWith('provider-unavailable:')) row.provider = item.sourceRef.split(':')[1];
       items.push(row);
@@ -408,6 +456,8 @@ export function buildWardenAttentionView(input: WardenAttentionInput): WardenAtt
         : [anomaly.sessionId];
     for (const target of targets) {
       if (!target || coveredAnomalies.has(anomalyKey(target, anomaly.kind))) continue;
+      const targetStatus = sessionsById.get(target)?.state.status ?? anomaly.status;
+      if (isTerminalAttentionStatus(targetStatus)) continue;
       const rowId = `anomaly:${anomaly.kind}:${target}`;
       if (seenAnomalyRows.has(rowId)) continue;
       const judgement = computeJudgement(target, { anomalyKind: anomaly.kind }, anomaly.since);
@@ -434,6 +484,7 @@ export function buildWardenAttentionView(input: WardenAttentionInput): WardenAtt
         why: anomaly.detail,
         waitingSince: anomaly.since ?? wardenState.lastSweepAt ?? new Date(now).toISOString(),
         howToResolve: 'Open the session and decide what to do.',
+        recommendation: fallbackRecommendation(judgement, targetStatus, anomaly.kind),
         judgement,
         fromAnomaly: true,
         ...(anomaly.provider ? { provider: anomaly.provider } : {}),

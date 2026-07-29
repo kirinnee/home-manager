@@ -499,6 +499,15 @@ export interface SearchResponse {
 }
 
 export type WardenVerdictKind = 'killed' | 'revived' | 'nudged' | 'cleared' | 'needs_human' | 'unknown';
+export type WardenRecommendedAction = 'nudge' | 'stop' | 'resume' | 'restart' | 'migrate' | 'leave';
+
+export interface WardenRecommendation {
+  action: WardenRecommendedAction;
+  reason: string;
+  /** Required for a migrate control; it is daemon-checked before execution. */
+  wrapper?: string;
+  [k: string]: unknown;
+}
 
 /** Who actually ran a warden check — resolved at spawn, not read from config.
  *  Every field is optional: reports written before the daemon started emitting
@@ -565,6 +574,7 @@ export interface WardenJudgement {
   judgedBy?: WardenJudgedBy;
   at?: string;
   reportPath?: string;
+  recommendation?: WardenRecommendation;
   /** The judgement predates this attention item — it did not look at it. */
   stale?: boolean;
   [k: string]: unknown;
@@ -588,9 +598,11 @@ export interface FleetAttentionItem {
   /** Stranger-readable background carried by the board item, when present. */
   context?: string;
   waitingSince?: string;
-  /** Deliberately NOT rendered by this surface: the per-session Attention
-   *  panel owns resolution. Mirrored so the type matches the wire. */
+  /** The fuller human explanation from the durable Attention record. */
   howToResolve?: string;
+  /** Every live row has one named recommendation; older daemons may omit it,
+   *  so the UI supplies a conservative Nudge fallback instead of silence. */
+  recommendation?: WardenRecommendation;
   raisedBy?: string;
   raisedByName?: string;
   judgement: WardenJudgement;
