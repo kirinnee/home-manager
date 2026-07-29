@@ -39,6 +39,8 @@ import { TaskName, parseTaskName } from './TaskName';
 import { useLayoutMode } from '../hooks/useLayoutMode';
 import { settingsHref, settingsPaletteEntries, type SettingsPaletteEntry } from '../lib/settings';
 import { useInputModality } from '../hooks/useInputModality';
+import { useSttSettings } from '../lib/stt/stt-settings';
+import { dictationShortcutLabel } from '../lib/stt/dictation-shortcut';
 import { actOnBrowserLogin } from '../lib/browser-login';
 
 /** Stable element ids. The palette is a SINGLETON (App mounts exactly one), so
@@ -156,6 +158,7 @@ export function CommandPalette({
   const store = useStore();
   const layout = useLayoutMode();
   const { touchAffected } = useInputModality();
+  const { settings: sttSettings } = useSttSettings();
 
   // Modality is latched for one opening so a convertible changing pointer mode
   // cannot re-run the dialog focus effect or summon a keyboard mid-use.
@@ -205,7 +208,11 @@ export function CommandPalette({
     () => (query.trim() ? rankSessions(entries, query, { limit: MAX_SESSION_RESULTS }) : recentSessions(entries)),
     [entries, query],
   );
-  const settingsResults = useMemo(() => settingsPaletteEntries(query), [query]);
+  const shortcutLabel = dictationShortcutLabel(sttSettings.shortcut);
+  const settingsResults = useMemo(
+    () => settingsPaletteEntries(query, { dictationShortcutLabel: shortcutLabel }),
+    [query, shortcutLabel],
+  );
   const browserLoginCommand = matchesBrowserLoginCommand(query) ? BROWSER_LOGIN_COMMAND : null;
   const results = useMemo<PaletteResult[]>(
     () => [

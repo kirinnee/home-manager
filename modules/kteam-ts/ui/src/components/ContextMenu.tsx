@@ -28,6 +28,9 @@ import { isTopEscapeLayer, pushEscapeLayer } from '../hooks/useDialogFocus';
 export interface ContextMenuItem {
   key: string;
   label: string;
+  /** Compact secondary fact (such as a selected-target count). It stays beside
+   * the label so a menu choice communicates its scope before activation. */
+  detail?: ReactNode;
   icon?: ReactNode;
   onSelect: () => void;
   /** Destructive tone (Stop, Migrate). Colour is reinforcement — the word says it. */
@@ -277,6 +280,7 @@ export function ContextMenu({ open, anchor, items, onClose, ariaLabel, triggerRe
           >
             {item.icon && <span className="shrink-0">{item.icon}</span>}
             <span className="min-w-0 flex-1 truncate">{item.label}</span>
+            {item.detail && <span className="mono shrink-0 text-meta text-muted">{item.detail}</span>}
           </button>
         ))}
       </div>

@@ -29,7 +29,7 @@
 .kt-webterm__tab,
 .kt-webterm__new {
   position: relative;
-  min-height: 38px;
+  min-height: 44px;
   flex: 0 0 auto;
   border: 0;
   border-right: var(--border-width) solid var(--border-soft);
@@ -82,7 +82,7 @@
 
 .kt-webterm__new {
   display: inline-flex;
-  width: 42px;
+  width: 44px;
   align-items: center;
   justify-content: center;
   color: var(--accent);

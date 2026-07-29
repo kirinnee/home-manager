@@ -14,7 +14,7 @@
 // same item two resolution workflows that can disagree. The whole row is one
 // tap through to the session instead.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { Check, CircleAlert, Clock3, Gavel, HelpCircle, LoaderCircle, ShieldQuestion, UserRound } from 'lucide-react';
 import { ApiError, api } from '../lib/api';
 import { Link } from '../lib/router';
@@ -31,6 +31,11 @@ import { displayCallsign } from '../lib/callsign';
 import { cn, fmtAge, fmtRelative } from '../lib/utils';
 
 const POLL_MS = 30_000;
+
+// Attention prose is authored as markdown (point form, bold, glossed jargon)
+// and must render as markdown here too, not as literal asterisks. Lazy, like
+// WardenVerdicts, so the warden page does not pay for the renderer up front.
+const Markdown = lazy(() => import('./Markdown').then(m => ({ default: m.Markdown })));
 
 /** What the section is rendering right now. A union, not a pile of booleans:
  *  "loading", "the daemon refused" and "the warden has no judgement" are
@@ -456,12 +461,14 @@ function AttentionRow({
         oldest ? 'border-warn/50 shadow-[inset_3px_0_0_var(--warn)]' : 'border-border-soft',
       )}
     >
-      {/* One tap to the session. The report button below is a sibling, never a
-          nested control: a button inside a link is unreachable by keyboard and
-          ambiguous by touch. */}
+      {/* One tap to the session — but only the header lives inside the link.
+          The report button AND the prose body are siblings, never nested
+          controls: the body renders markdown that may itself carry links, and
+          an anchor inside an anchor is unreachable by keyboard and ambiguous
+          by touch. */}
       <Link
         to={`/session/${encodeURIComponent(item.sessionId)}`}
-        className="flex min-h-[44px] flex-col gap-xs px-cell-x py-row-y no-underline hover:bg-surface-2"
+        className="flex min-h-[44px] flex-col gap-xs px-cell-x pb-xs pt-row-y no-underline hover:bg-surface-2"
       >
         <span className="flex min-w-0 flex-wrap items-center gap-x-sm gap-y-xs">
           {/* The one bold value in the row: WHICH agent needs you. */}
@@ -484,7 +491,28 @@ function AttentionRow({
         </span>
 
         {item.subject && <span className="text-cell font-medium leading-snug text-fg-soft">{item.subject}</span>}
-        <span className="text-cell leading-base text-muted">{item.why ?? 'No reason recorded.'}</span>
+      </Link>
+
+      <div className="flex flex-col gap-xs px-cell-x pb-row-y">
+        {item.why ? (
+          <Suspense fallback={<span className="text-cell leading-base text-muted">{item.why}</span>}>
+            <Markdown text={item.why} sessionId={item.sessionId} className="text-cell leading-base text-muted" />
+          </Suspense>
+        ) : (
+          <span className="text-cell leading-base text-muted">No reason recorded.</span>
+        )}
+        {item.context && (
+          <div className="rounded-control border border-border-soft bg-surface-2 px-cell-x py-1.5">
+            <span className="kt-label block text-faint">Context</span>
+            <Suspense fallback={<span className="text-meta leading-base text-muted">{item.context}</span>}>
+              <Markdown
+                text={item.context}
+                sessionId={item.sessionId}
+                className="mt-0.5 text-meta leading-base text-muted"
+              />
+            </Suspense>
+          </div>
+        )}
         <span className="text-meta leading-base text-muted">{judgementSummary(judgement)}</span>
 
         <span className="flex min-w-0 flex-wrap items-center gap-x-sm gap-y-xs text-meta text-faint">
@@ -498,7 +526,7 @@ function AttentionRow({
           </span>
           {item.source && <span className="kt-label text-faint">{SOURCE_WORD[item.source] ?? item.source}</span>}
         </span>
-      </Link>
+      </div>
 
       {reportPath && onOpenReport && (
         <div className="border-t border-border-soft">

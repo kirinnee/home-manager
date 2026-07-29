@@ -19,9 +19,15 @@ export interface AttentionItem {
   id: AttentionId;
   source: AttentionSource;
   sourceRef: string | null;
+  /** The ask — one line: what the human must decide or do. */
   subject: string;
+  /** Why this needs the human now. Markdown. */
   why: string;
+  /** Background for a reader who has not followed this session. Markdown.
+   * Optional: records predate the field. */
+  context?: string;
   waitingSince: string;
+  /** The concrete action that resolves it. Markdown. */
   howToResolve: string;
   raisedBy: AttentionBy;
   raisedBySession: string | null;
@@ -66,6 +72,7 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
   const sourceRef = nullableText(raw['sourceRef']);
+  const context = raw['context'] === undefined ? null : nullableText(raw['context']);
   const raisedBySession = nullableText(raw['raisedBySession']);
   const raisedByName = nullableText(raw['raisedByName']);
   if (
@@ -79,6 +86,7 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
     !raw['subject'].trim() ||
     typeof raw['why'] !== 'string' ||
     !raw['why'].trim() ||
+    context === undefined ||
     typeof raw['waitingSince'] !== 'string' ||
     !Number.isFinite(Date.parse(raw['waitingSince'])) ||
     typeof raw['howToResolve'] !== 'string' ||
@@ -97,6 +105,7 @@ export function parseAttentionItem(value: unknown): AttentionItem | null {
     sourceRef,
     subject: raw['subject'],
     why: raw['why'],
+    ...(context === null ? {} : { context }),
     waitingSince: raw['waitingSince'],
     howToResolve: raw['howToResolve'],
     raisedBy: raw['raisedBy'] as AttentionBy,

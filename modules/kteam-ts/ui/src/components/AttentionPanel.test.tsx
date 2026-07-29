@@ -7,6 +7,7 @@ import {
   attentionRequestOutcome,
   attentionTriggerLabel,
   attentionUnreachableCopy,
+  resolutionBadge,
   waitingAgeCopy,
 } from './AttentionPanel';
 
@@ -21,6 +22,26 @@ describe('attention copy and age', () => {
     expect(actorLabel('agent', null)).toBe('an agent');
     expect(actorLabel('human', null)).toBe('you');
     expect(actorLabel('daemon', null)).toBe('the daemon');
+  });
+
+  test('a human dismissal and an agent self-retraction are visibly different badges', () => {
+    const human = resolutionBadge('human', null);
+    const agent = resolutionBadge('agent', 'zoe');
+    const daemon = resolutionBadge('daemon', null);
+    expect(human.label).toBe('dismissed by you');
+    expect(agent.label).toBe('retracted by agent zoe');
+    expect(resolutionBadge('agent', null).label).toBe('retracted by agent (unnamed)');
+    expect(daemon.label).toBe('cleared by the daemon');
+    // The classes must differ so the audit can be scanned for clears that
+    // happened WITHOUT the human — never the same chrome for all three.
+    expect(new Set([human.cls, agent.cls, daemon.cls]).size).toBe(3);
+    expect(agent.cls).toContain('warn');
+  });
+
+  test('the context block renders when an item carries context', async () => {
+    const source = await Bun.file(new URL('./AttentionPanel.tsx', import.meta.url)).text();
+    expect(source).toContain('{item.context && (');
+    expect(source).toContain('text={item.context}');
   });
 
   test('age is compact and oldest-first friendly', () => {

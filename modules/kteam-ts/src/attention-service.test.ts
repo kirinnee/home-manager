@@ -108,6 +108,45 @@ describe('provenance and scope', () => {
     ).rejects.toMatchObject({ code: 'invalid' });
   });
 
+  test('subject is the ask: a multi-line subject is refused with guidance', async () => {
+    const s = service();
+    await expect(
+      s.add(SID, { ...explicit('the ask'), subject: 'the ask\nplus a paragraph of backstory' }, AGENT),
+    ).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  test('context is stored, deduped and refreshed like the other detail fields', async () => {
+    const s = service();
+    const withContext = {
+      ...explicit('needs background'),
+      context: 'A **warden** is the fleet supervisor; it flagged this session.',
+    };
+    const first = await s.add(SID, withContext, AGENT);
+    expect(first.items[0]!.context).toBe(withContext.context);
+    const deduped = await s.add(SID, withContext, AGENT);
+    expect(deduped.updatedAt).toBe(first.updatedAt);
+    // Same text with different context is a different request, not a dupe.
+    const different = await s.add(SID, { ...withContext, context: 'Different background.' }, AGENT);
+    expect(different.items).toHaveLength(2);
+    // A stable source refreshes context in place, and can drop it again.
+    const stable = await s.addFromSource(SID, { ...explicit('stable'), source: 'task', sourceRef: 'F31' });
+    const refreshed = await s.addFromSource(SID, {
+      ...explicit('stable'),
+      source: 'task',
+      sourceRef: 'F31',
+      context: 'Now with background.',
+    });
+    const item = refreshed.items.find(entry => entry.sourceRef === 'F31');
+    expect(item).toMatchObject({ id: stable.items.find(entry => entry.sourceRef === 'F31')!.id });
+    expect(item?.context).toBe('Now with background.');
+    const dropped = await s.addFromSource(SID, { ...explicit('stable'), source: 'task', sourceRef: 'F31' });
+    expect(dropped.items.find(entry => entry.sourceRef === 'F31')?.context).toBeUndefined();
+    // Round-trips through the durable file.
+    expect((await s.list(SID)).items.find(entry => entry.subject === 'needs background')?.context).toBe(
+      withContext.context,
+    );
+  });
+
   test('aliases always persist under the canonical session directory', async () => {
     const s = service();
     const snapshot = await s.add('zoe', explicit('via alias'), HUMAN);
@@ -257,23 +296,41 @@ describe('ordering, dedupe and capacity', () => {
 });
 
 describe('explicit resolution audit', () => {
-  test('agent may resolve any item in its own session and the clear is visible', async () => {
+  test('agent may retract only an item it raised itself and the clear is visible', async () => {
     const s = service();
-    const added = await s.addFromSource(SID, {
+    const own = await s.add(SID, explicit('own request'), AGENT);
+    const resolved = await s.resolve(SID, own.items[0]!.id, 'No longer needed', AGENT);
+    expect(resolved.count).toBe(0);
+    expect(resolved.resolved[0]).toMatchObject({
+      resolvedBy: 'agent',
+      resolvedBySession: SID,
+      resolvedByName: 'zoe',
+      resolutionNote: 'No longer needed',
+    });
+  });
+
+  test('agent may not dismiss an item raised by the daemon, the human, or another agent', async () => {
+    const s = service();
+    const daemonRaised = await s.addFromSource(SID, {
       source: 'question',
       sourceRef: 'tool-1',
       subject: 'Choose',
       why: 'Waiting',
       howToResolve: 'Answer',
     });
-    const resolved = await s.resolve(SID, added.items[0]!.id, 'Answered yes', AGENT);
-    expect(resolved.count).toBe(0);
-    expect(resolved.resolved[0]).toMatchObject({
-      resolvedBy: 'agent',
-      resolvedBySession: SID,
-      resolvedByName: 'zoe',
-      resolutionNote: 'Answered yes',
+    await expect(s.resolve(SID, daemonRaised.items[0]!.id, 'agent clears it', AGENT)).rejects.toMatchObject({
+      code: 'forbidden',
     });
+    const humanRaised = await s.add(SID, explicit('human ask'), HUMAN);
+    const humanItem = humanRaised.items.find(item => item.raisedBy === 'human')!;
+    await expect(s.resolve(SID, humanItem.id, 'agent clears it', AGENT)).rejects.toMatchObject({
+      code: 'forbidden',
+    });
+    // The human can always dismiss anything, including daemon-raised items.
+    const cleared = await s.resolve(SID, daemonRaised.items[0]!.id, 'Human reviewed it.', HUMAN);
+    expect(cleared.resolved[0]).toMatchObject({ resolvedBy: 'human' });
+    // Everything an agent could not dismiss is still on the board.
+    expect((await s.list(SID)).items.some(item => item.id === humanItem.id)).toBe(true);
   });
 
   test('retried resolve preserves the original resolver', async () => {

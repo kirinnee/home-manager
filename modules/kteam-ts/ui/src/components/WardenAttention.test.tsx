@@ -341,6 +341,27 @@ describe('WardenAttentionSection', () => {
     expect(html).toContain('href="/session/ms4z-abc"');
   });
 
+  test('prose renders outside the session link so item markdown can carry links', () => {
+    const html = render({
+      status: 'ready',
+      view: view({ items: [item({ context: 'A **warden** is the fleet supervisor; it flagged this session.' })] }),
+    });
+    // Context is shown, labelled, for the reader who has not followed the
+    // session. Depending on test order the lazy markdown renderer may already
+    // be loaded (bold renders as <strong>) or still pending (raw fallback
+    // text) — the words must be there either way.
+    expect(html).toMatch(/A (\*\*|<strong>)warden/);
+    expect(html).toContain('it flagged this session.');
+    expect(html).toContain('Context');
+    // The header anchor must close before the why/context body starts: markdown
+    // prose may contain links, and an anchor inside an anchor is unreachable.
+    const anchorEnd = html.indexOf('</a>');
+    expect(anchorEnd).toBeGreaterThan(-1);
+    expect(html.indexOf('Asked which database to target and stopped.')).toBeGreaterThan(anchorEnd);
+    // The subject (the ask) stays inside the tap target.
+    expect(html.indexOf('Needs a decision on the migration')).toBeLessThan(anchorEnd);
+  });
+
   test('never renders howToResolve — the per-session panel owns resolution', () => {
     const html = render({ status: 'ready', view: view() });
     expect(html).not.toContain('REPLY-WITH-THE-DATABASE-NAME');

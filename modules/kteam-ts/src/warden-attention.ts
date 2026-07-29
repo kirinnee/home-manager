@@ -75,6 +75,8 @@ export interface FleetAttentionItem {
   source: FleetAttentionSource;
   subject: string;
   why: string;
+  /** Stranger-readable background from the board item, when it carries one. */
+  context?: string;
   /** ISO — oldest waiting first across the whole fleet. */
   waitingSince: string;
   howToResolve: string;
@@ -380,6 +382,7 @@ export function buildWardenAttentionView(input: WardenAttentionInput): WardenAtt
         source: item.source,
         subject: item.subject,
         why: item.why,
+        ...(item.context ? { context: item.context } : {}),
         waitingSince: item.waitingSince,
         howToResolve: item.howToResolve,
         raisedBy: item.raisedBy,

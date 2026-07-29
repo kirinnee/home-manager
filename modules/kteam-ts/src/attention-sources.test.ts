@@ -276,8 +276,9 @@ describe('AttentionSources', () => {
     expect(providerItems).toHaveLength(1);
     expect(providerItems[0]).toMatchObject({
       source: 'agent-raised',
-      subject: 'Provider claude is unavailable (2 sessions)',
+      subject: 'Restore provider claude — 2 sessions are stalled on it',
       raisedBy: 'daemon',
+      context: expect.stringContaining('A **provider** is a model account'),
     });
     h.sources.close();
   });
@@ -330,8 +331,12 @@ describe('AttentionSources', () => {
     const h = await harness();
     const snapshot = await h.service.list(SID);
     expect(snapshot.items.map(item => item.source)).toEqual(['question', 'task']);
-    expect(snapshot.items[0]).toMatchObject({ sourceRef: 'q1', subject: 'Ship the release?' });
+    expect(snapshot.items[0]).toMatchObject({ sourceRef: 'q1', subject: 'Answer: Ship the release?' });
     expect(snapshot.items[1]).toMatchObject({ sourceRef: 'F31', why: 'Need the region.' });
+    // Every daemon template carries stranger-readable context: the reader has
+    // not been following this session and must be able to act without it.
+    expect(snapshot.items[0]!.context).toContain('paused mid-run');
+    expect(snapshot.items[1]!.context).toContain('**blocked on you**');
     expect(h.errors).toEqual([]);
     h.sources.close();
   });
@@ -366,10 +371,14 @@ describe('AttentionSources', () => {
       },
       'daemon',
     );
-    await boardWhen(
+    const wardenBoard = await boardWhen(
       firstService,
       snapshot =>
         snapshot.items.filter(item => item.sourceRef?.startsWith('warden:/reports/needs-human.md#')).length === 2,
+    );
+    // "Warden" is a term of art; the item glosses it for a stranger-reader.
+    expect(wardenBoard.items.find(item => item.sourceRef?.startsWith('warden:'))?.context).toContain(
+      'automated supervisor',
     );
     firstSources.close();
 
@@ -486,7 +495,7 @@ describe('AttentionSources', () => {
     const h = await harness(taskV2Snapshot([]));
     let snapshot = await h.service.list(SID);
     expect(snapshot.items.find(item => item.source === 'task')).toMatchObject({
-      subject: '#F31: Ship release',
+      subject: 'Unblock task #F31: Ship release',
       why: 'Need design approval.',
       waitingSince: '2026-07-28T00:01:30.000Z',
     });
@@ -518,7 +527,7 @@ describe('AttentionSources', () => {
     expect(snapshot.items.find(item => item.sourceRef === 'task-reopened:F31')).toMatchObject({
       source: 'agent-raised',
       sourceSeq: 7,
-      subject: '#F31: shipped work reopened from live',
+      subject: 'Re-verify #F31 — shipped work was reopened',
       why: 'The deployed release still returns 404.',
       waitingSince: '2026-07-28T00:04:30.000Z',
       raisedBy: 'daemon',

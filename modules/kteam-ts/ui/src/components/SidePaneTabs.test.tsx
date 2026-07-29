@@ -32,6 +32,8 @@ describe('side pane tabs', () => {
     expect(html).toContain(`aria-controls="${sidePanePanelId('pane-a', 'files')}"`);
     expect(html).toContain('aria-selected="true"');
     expect(html).toContain('min-h-[44px]');
+    expect(html).toContain('min-w-[56px]');
+    expect(html).toContain('overflow-x-auto');
     expect(html).not.toContain('autofocus');
   });
 });

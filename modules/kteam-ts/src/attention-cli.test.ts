@@ -20,11 +20,13 @@ describe('parseAttentionCli', () => {
     });
   });
 
-  test('explicit add accepts why/how and session flags', () => {
+  test('explicit add accepts context/why/how and session flags', () => {
     expect(
       parseAttentionCli([
         'add',
         'Pick region',
+        '--context',
+        'This deploy is the nitroso release; region was never decided.',
         '--why',
         'deploy blocked',
         '--resolve',
@@ -36,9 +38,15 @@ describe('parseAttentionCli', () => {
       command: 'add',
       subject: 'Pick region',
       why: 'deploy blocked',
+      context: 'This deploy is the nitroso release; region was never decided.',
       howToResolve: 'say eu or us',
       session: SID,
     });
+  });
+
+  test('usage teaches the stranger-reader contract', () => {
+    expect(() => parseAttentionCli([])).toThrow(/NOT been following/);
+    expect(() => parseAttentionCli([])).toThrow(/EXPAND every codename/);
   });
 
   test('ls, history and done parse', () => {
@@ -67,6 +75,8 @@ describe('attentionCliRequest', () => {
       path: `/v1/sessions/${SID}/attention`,
       body: { action: 'add', source: 'agent-raised', subject: 'Need approval' },
     });
+    const withContext = parseAttentionCli(['Need approval', '--context', 'Background for the reader.']);
+    expect(attentionCliRequest(withContext, SID).body).toMatchObject({ context: 'Background for the reader.' });
     expect(attentionCliRequest({ command: 'done', id: 'A1', note: 'done' }, SID)).toEqual({
       method: 'POST',
       path: `/v1/sessions/${SID}/attention`,
@@ -110,6 +120,13 @@ describe('rendering', () => {
     expect(output).toContain('[question]');
     expect(output).toContain('raised by daemon');
     expect(output).toContain('?A3');
+  });
+
+  test('list shows context when an item carries it', () => {
+    const base = snapshot();
+    base.items[0] = { ...base.items[0]!, context: 'Background for the stranger-reader.' };
+    expect(renderAttentionList(base)).toContain('context: Background for the stranger-reader.');
+    expect(renderAttentionList(snapshot())).not.toContain('context:');
   });
 
   test('history exposes the resolver, including an agent', () => {

@@ -136,15 +136,15 @@ The batch was **stopped mid-flight** for handover. Sessions are stopped, not des
 
 **Stopped sessions** (all were children of `jessica`, itself a child of the lead session `dixie`):
 
-| Teammate | Was doing | Batch |
-| --- | --- | --- |
-| jessica | integration lead for the UI work | — |
-| max | S1 — reclaim the 80px transcript width | 1 |
-| alfred | theme selector overflow + kb-hide popover | 1 |
-| alexander | never autofocus search on touch | 1 |
-| lenny | touch Enter = newline + mandatory 44px Send | 1 |
-| rosa | drop mobile top-bar status pill + agent count | 1 |
-| cheryl | details/lineage work | 2 |
+| Teammate  | Was doing                                     | Batch |
+| --------- | --------------------------------------------- | ----- |
+| jessica   | integration lead for the UI work              | —     |
+| max       | S1 — reclaim the 80px transcript width        | 1     |
+| alfred    | theme selector overflow + kb-hide popover     | 1     |
+| alexander | never autofocus search on touch               | 1     |
+| lenny     | touch Enter = newline + mandatory 44px Send   | 1     |
+| rosa      | drop mobile top-bar status pill + agent count | 1     |
+| cheryl    | details/lineage work                          | 2     |
 
 **There is UNCOMMITTED, INCOMPLETE batch-1 work in the tree** — roughly five files under
 `modules/kteam-ts/ui/src/components/` (`AgentSidebar.tsx`, `SessionHeader.tsx`, `ThemeToggle.tsx`,

@@ -24,6 +24,22 @@ export const MAX_ATTENTION_SUBJECT_LEN = 240;
 // Attention must be able to carry that complete reason instead of rejecting
 // the very blocker it exists to surface.
 export const MAX_ATTENTION_DETAIL_LEN = 2_048;
+
+/** The reader of an attention item has NOT been following the session that
+ * raised it. Field guidance derived from that fact — the shape, not reviewer
+ * goodwill, is what forces readable output:
+ *  - `subject`      THE ASK. One line: what the human must decide or do.
+ *  - `context`      background for that stranger-reader. Every codename or
+ *                   term of art ("warden", "wedge", "sol") expanded or glossed.
+ *  - `why`          why this needs the human NOW (what is blocked/at risk).
+ *  - `howToResolve` the concrete action that clears it, as short markdown
+ *                   point form. All detail fields render as real markdown. */
+export const ATTENTION_FIELD_GUIDANCE = {
+  subject: 'the ask — one line stating what the human must decide or do',
+  context: 'background a reader who has not followed this session needs; expand all jargon',
+  why: 'why this needs the human now',
+  howToResolve: 'the concrete action that resolves it, in short point form',
+} as const;
 export const MAX_ATTENTION_SOURCE_REF_LEN = 512;
 
 /** `permission` is reserved for the source adapter, but the daemon does not
@@ -88,10 +104,17 @@ export interface AttentionItem {
    * acknowledges exactly this seq, never whichever reopen happens to be latest
    * when the click arrives. */
   sourceSeq?: number;
+  /** The ask, one line: what the human must decide or do. */
   subject: string;
+  /** Why this needs the human now. Markdown. */
   why: string;
+  /** Background for a reader who has NOT been following this session, with
+   * jargon expanded. Markdown. Optional: records predate the field, and some
+   * asks genuinely need none. */
+  context?: string | null;
   /** ISO timestamp. Display order is ascending: oldest unanswered first. */
   waitingSince: string;
+  /** The concrete action that resolves it. Markdown. */
   howToResolve: string;
   raisedBy: AttentionBy;
   raisedBySession: string | null;

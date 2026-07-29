@@ -144,6 +144,7 @@ export function parseAttentionActionBody(value: unknown): AttentionAction {
               : {}),
           subject: optionalString(raw['subject']),
           why: optionalString(raw['why']),
+          ...(optionalString(raw['context']) ? { context: optionalString(raw['context']) } : {}),
           howToResolve: optionalString(raw['howToResolve']),
           ...(optionalString(raw['waitingSince']) ? { waitingSince: optionalString(raw['waitingSince']) } : {}),
         },

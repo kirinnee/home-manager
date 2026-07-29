@@ -2,9 +2,10 @@
 //
 // This deliberately reuses the settled `.kt-sheet-tabs .kt-tab` visual
 // vocabulary from the details bottom sheet: a shared baseline, muted inactive
-// tabs and one accent underline. The full surface set fits without resurrecting
-// the old horizontal scroller by using an icon plus a short visible label;
-// every tab's full surface name remains its accessible name and tooltip.
+// tabs and one accent underline. The strip scrolls horizontally because nine
+// live surfaces cannot share a 390px sheet without falling below the 44px
+// target floor; every tab's full surface name remains its accessible name and
+// tooltip.
 
 import { useRef, type ReactNode } from 'react';
 
@@ -64,7 +65,7 @@ export function SidePaneTabs<T extends string>({
     <div
       role="tablist"
       aria-label="Session explorer"
-      className="kt-sheet-tabs flex shrink-0 items-stretch border-b border-border-soft"
+      className="kt-sheet-tabs flex shrink-0 items-stretch overflow-x-auto border-b border-border-soft"
     >
       {tabs.map(tab => {
         const selected = tab.key === current;
@@ -95,7 +96,7 @@ export function SidePaneTabs<T extends string>({
               // opens and tab changes never run this focus movement.
               requestAnimationFrame(() => refs.current.get(next)?.focus());
             }}
-            className="kt-tab min-h-[44px] min-w-0 flex-1 !flex-col justify-center !gap-0 px-0"
+            className="kt-tab min-h-[44px] min-w-[56px] flex-none !flex-col justify-center !gap-0 px-0"
           >
             {tab.icon}
             <span aria-hidden="true" className="max-w-full truncate text-2xs leading-tight">
