@@ -17,9 +17,9 @@ import { api } from '../lib/api';
 import { useDialogFocus } from '../hooks/useDialogFocus';
 import type { WardenSpawnInfo, WardenVerdict, WardenVerdictKind } from '../types';
 import { displayCallsign } from '../lib/callsign';
-import type { CodeReference } from '../lib/code-references';
+import type { CodeReference } from '../lib/references';
 import type { AttentionId } from '../lib/attention';
-import type { PinReferenceLookup } from '../lib/remark-session-references';
+import { sessionReferenceHost } from '../lib/reference-host';
 // LAZY. Expanding the list only renders rows, so the markdown + syntax
 // highlighting stack is still not needed to see it. The chunk arrives when a
 // REPORT is opened, which most readers never do — so defaulting the list to
@@ -168,6 +168,7 @@ function WardenVerdictsPanel() {
         title={report?.title ?? ''}
         body={report?.body ?? null}
         sessionId={report?.sessionId}
+        {...sessionReferenceHost(report?.sessionId)}
         onClose={closeReport}
       />
     </div>
@@ -239,7 +240,7 @@ export function ReportModal({
   onTaskOpen,
   onCodeReferenceOpen,
   onAttentionOpen,
-  onPinOpen,
+  attentionReferenceResolver,
   onClose,
 }: {
   open: boolean;
@@ -250,7 +251,7 @@ export function ReportModal({
   onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
   onAttentionOpen?: (id: AttentionId, opener?: HTMLElement | null) => void;
-  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
+  attentionReferenceResolver?: (id: AttentionId) => boolean;
   onClose: () => void;
 }) {
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -307,7 +308,7 @@ export function ReportModal({
                 onTaskOpen={onTaskOpen}
                 onCodeReferenceOpen={onCodeReferenceOpen}
                 onAttentionOpen={onAttentionOpen}
-                onPinOpen={onPinOpen}
+                attentionReferenceResolver={attentionReferenceResolver}
               />
             </Suspense>
           )}

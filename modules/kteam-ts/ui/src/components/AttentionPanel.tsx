@@ -37,8 +37,8 @@ import {
 } from '../lib/attention';
 import { cn } from '../lib/utils';
 import { HAS_TOKEN } from '../lib/api';
-import type { CodeReference } from '../lib/code-references';
-import type { PinReferenceLookup } from '../lib/remark-session-references';
+import type { CodeReference } from '../lib/references';
+import type { PinReferenceLookup } from '../lib/pin-links';
 import { Markdown } from './Markdown';
 
 const SOURCE: Record<AttentionSource, { label: string; icon: typeof CircleAlert }> = {

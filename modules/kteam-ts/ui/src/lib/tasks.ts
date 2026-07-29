@@ -140,7 +140,7 @@ const text = (value: unknown): string | null => (typeof value === 'string' && va
 const strings = (value: unknown): string[] =>
   Array.isArray(value) ? [...new Set(value.flatMap(item => (text(item) ? [text(item)!] : [])))] : [];
 
-export const taskReference = (id: string): `#${string}` => `#${id.replace(/^#/, '')}`;
+export const taskReference = (id: string): `&${string}` => `&${id.replace(/^[#&]/u, '')}`;
 
 function phaseForStatus(status: TaskStatus): TaskPhase {
   switch (status) {

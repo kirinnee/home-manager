@@ -35,9 +35,9 @@ import {
 } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { highlightToHtml } from '../lib/highlight';
-import { formatCodeReference, type CodeReference, type CodeReferenceOpenRequest } from '../lib/code-references';
+import { formatCodeReference, type CodeReference, type CodeReferenceOpenRequest } from '../lib/references';
 import type { AttentionId } from '../lib/attention';
-import type { PinReferenceLookup } from '../lib/remark-session-references';
+import type { PinReferenceLookup } from '../lib/pin-links';
 import { langFromPath } from '../lib/tool-extract';
 import { useInputModality } from '../hooks/useInputModality';
 import {

@@ -157,11 +157,11 @@ describe('provenance and scope', () => {
 });
 
 describe('ordering, dedupe and capacity', () => {
-  test('allocates stable monotonic ids and accepts the ? reference sigil', async () => {
+  test('allocates stable monotonic ids and accepts the ! reference sigil', async () => {
     const s = service();
     const first = await s.add(SID, explicit('first'), AGENT);
     expect(first.items[0]!.id).toBe('A1');
-    await s.resolve(SID, '?A1', 'done', HUMAN);
+    await s.resolve(SID, '!A1', 'done', HUMAN);
     const second = await s.add(SID, explicit('second'), AGENT);
     expect(second.items[0]!.id).toBe('A2');
     expect(second.resolved[0]!.id).toBe('A1');

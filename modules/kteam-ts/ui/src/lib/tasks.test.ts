@@ -116,7 +116,7 @@ describe('task-v2 UI parsing', () => {
         type: 'dependency',
         data: { taskId: 'B2', operation: 'remove' },
       }),
-    ).toBe('Removed dependency #B2');
+    ).toBe('Removed dependency &B2');
   });
   test('preserves the daemon parse-error count without trusting malformed counts', () => {
     expect(parseTaskListResponse({ tasks: [raw], parseErrors: 2 })).toMatchObject({ parseErrors: 2 });
@@ -158,8 +158,8 @@ describe('task-v2 pure projections', () => {
         .sort(),
     ).toEqual(['B2', 'C3', 'F1']);
   });
-  test('formats stable # references and descriptive phase/claim history', () => {
-    expect(taskReference('F12')).toBe('#F12');
+  test('formats stable & references and descriptive phase/claim history', () => {
+    expect(taskReference('F12')).toBe('&F12');
     expect(
       taskActivityText({
         v: 2,

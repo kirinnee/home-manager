@@ -273,15 +273,15 @@ describe('the dependency graph is validated as a whole', () => {
     expect(() => assertTaskDag(tasks)).not.toThrow();
   });
 
-  test('a self cycle is refused with the concrete # path', () => {
+  test('a self cycle is refused with the concrete & path', () => {
     const tasks = [task({ id: 'F1', dependsOn: ['F1'] })];
-    expect(() => assertTaskDag(tasks)).toThrow('#F1 → #F1');
+    expect(() => assertTaskDag(tasks)).toThrow('&F1 → &F1');
   });
 
-  test('a direct two-node cycle is refused with the concrete # path', () => {
+  test('a direct two-node cycle is refused with the concrete & path', () => {
     const tasks = [task({ id: 'F1', dependsOn: ['F2'] }), task({ id: 'F2', dependsOn: ['F1'] })];
     expect(() => assertTaskDag(tasks)).toThrow(TaskError);
-    expect(() => assertTaskDag(tasks)).toThrow(/#F1 → #F2 → #F1|#F2 → #F1 → #F2/);
+    expect(() => assertTaskDag(tasks)).toThrow(/&F1 → &F2 → &F1|&F2 → &F1 → &F2/);
   });
 
   test('a long cycle is refused and the error names its code', () => {
@@ -296,14 +296,14 @@ describe('the dependency graph is validated as a whole', () => {
     } catch (error) {
       expect(error).toBeInstanceOf(TaskError);
       expect((error as TaskError).code).toBe('cycle');
-      expect((error as TaskError).message).toContain('#F1');
-      expect((error as TaskError).message).toContain('#F3');
+      expect((error as TaskError).message).toContain('&F1');
+      expect((error as TaskError).message).toContain('&F3');
     }
   });
 
   test('a dependency on a task not in the set is refused as not-found', () => {
     const tasks = [task({ id: 'F1', dependsOn: ['F9'] })];
-    expect(() => assertTaskDag(tasks)).toThrow('#F1 depends on missing task #F9');
+    expect(() => assertTaskDag(tasks)).toThrow('&F1 depends on missing task &F9');
   });
 });
 
@@ -311,7 +311,7 @@ describe('dropping respects live dependents', () => {
   test('a drop is refused while a non-dropped task still depends on it', () => {
     const tasks = [task({ id: 'F1' }), task({ id: 'F2', dependsOn: ['F1'] })];
     expect(taskDependents(tasks, 'F1').map(t => t.id)).toEqual(['F2']);
-    expect(() => assertTaskCanDrop(tasks, 'F1')).toThrow('depended on by #F2');
+    expect(() => assertTaskCanDrop(tasks, 'F1')).toThrow('depended on by &F2');
   });
 
   test('a drop is allowed once every dependent is itself dropped', () => {
@@ -340,7 +340,7 @@ describe('derived dependency blocking', () => {
     const blocked = computeTaskBlocking(dependent, [edge], [dependent, task({ id: 'F1', phase: 'build' })]);
     expect(blocked.blocked).toBe(true);
     expect(blocked.blockedBy).toEqual(['F1']);
-    expect(blocked.blockedReason).toBe('Waiting on #F1');
+    expect(blocked.blockedReason).toBe('Waiting on &F1');
     // blockedSince is dated from the edge that introduced the dependency.
     expect(blocked.blockedSince).toBe('2026-07-26T13:00:00.000Z');
 

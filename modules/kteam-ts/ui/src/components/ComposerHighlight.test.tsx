@@ -4,13 +4,27 @@ import { Composer, ComposerTextarea } from './Composer';
 import {
   COMPOSER_TEXT_METRICS,
   ComposerHighlight,
+  highlightReferenceTokens,
   MARKDOWN_TOKEN_CLASS,
   syncComposerHighlightViewport,
 } from './ComposerHighlight';
+import { tokenizeMarkdown } from '../lib/composer-markdown';
 
 const nullOverlayRef = { current: null };
 
 describe('ComposerHighlight', () => {
+  test('uses the shared reference parser without changing a single composer byte', () => {
+    const text = 'Ping :zelda, inspect @src/api.ts:12-18, track &F12, resolve !A3; keep #F9 and ?A8 plain.';
+    const tokens = highlightReferenceTokens(tokenizeMarkdown(text));
+    expect(tokens.map(token => token.text).join('')).toBe(text);
+    expect(tokens.filter(token => token.type === 'reference').map(token => token.text)).toEqual([
+      ':zelda',
+      '@src/api.ts:12-18',
+      '&F12',
+      '!A3',
+    ]);
+  });
+
   test('the composer keeps one native textarea beside an always-mounted overlay', () => {
     const html = renderToStaticMarkup(<Composer draft="plain" onDraftChange={() => {}} onSubmit={() => {}} compact />);
     expect(html.match(/<textarea\b/gu)?.length).toBe(1);

@@ -1,4 +1,4 @@
-// App-wide proof for canonical pin references.
+// Pin picker identity helpers.
 //
 // The daemon-backed pins store is already hydrated by the foreground session
 // header and converges through pins.updated. This provider subscribes once and
@@ -7,12 +7,8 @@
 // field, so they are deliberately excluded until the authoritative snapshot
 // replaces them.
 
-import { createContext, useContext, useMemo, useSyncExternalStore, type ReactNode } from 'react';
-import { emptyStore, pinsStore, type PinStore } from './pins';
-import { type PinReferenceResolver, type ResolvedPinReference } from './remark-session-references';
-
-const unresolved: PinReferenceResolver = () => null;
-const PinReferenceContext = createContext<PinReferenceResolver>(unresolved);
+import { type PinStore } from './pins';
+import { type PinReferenceResolver, type ResolvedPinReference } from './pin-links';
 const MAX_PIN_REFERENCE_LABEL = 72;
 
 function compactLabel(value: string): string {
@@ -53,14 +49,4 @@ export function createPinReferenceResolver(store: PinStore): PinReferenceResolve
     }
   }
   return lookup => index.get(`${lookup.sessionId}\u0000${lookup.pinId}`) ?? null;
-}
-
-export function PinReferenceProvider({ children }: { children: ReactNode }) {
-  const store = useSyncExternalStore(pinsStore.subscribe, pinsStore.getSnapshot, emptyStore);
-  const resolver = useMemo(() => createPinReferenceResolver(store), [store]);
-  return <PinReferenceContext.Provider value={resolver}>{children}</PinReferenceContext.Provider>;
-}
-
-export function usePinReferenceResolver(): PinReferenceResolver {
-  return useContext(PinReferenceContext);
 }

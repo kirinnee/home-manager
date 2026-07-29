@@ -495,7 +495,7 @@ describe('AttentionSources', () => {
     const h = await harness(taskV2Snapshot([]));
     let snapshot = await h.service.list(SID);
     expect(snapshot.items.find(item => item.source === 'task')).toMatchObject({
-      subject: 'Unblock task #F31: Ship release',
+      subject: 'Unblock task &F31: Ship release',
       why: 'Need design approval.',
       waitingSince: '2026-07-28T00:01:30.000Z',
     });
@@ -527,7 +527,7 @@ describe('AttentionSources', () => {
     expect(snapshot.items.find(item => item.sourceRef === 'task-reopened:F31')).toMatchObject({
       source: 'agent-raised',
       sourceSeq: 7,
-      subject: 'Re-verify #F31 — shipped work was reopened',
+      subject: 'Re-verify &F31 — shipped work was reopened',
       why: 'The deployed release still returns 404.',
       waitingSince: '2026-07-28T00:04:30.000Z',
       raisedBy: 'daemon',

@@ -313,7 +313,7 @@ export class AttentionService {
   ): Promise<AttentionSnapshot> {
     const authorized = await this.authorize(sessionId, actor);
     const canonical = parseAttentionId(id);
-    if (canonical === null) throw new AttentionError('invalid', 'attention id must look like A3 or ?A3');
+    if (canonical === null) throw new AttentionError('invalid', 'attention id must look like A3 or !A3');
     const resolutionNote = optionalText(note, 'resolution note', MAX_ATTENTION_DETAIL_LEN);
     const mutation = await this.store.mutateWithResult(authorized.session.id, async current => {
       const target = current.items.find(item => item.id === canonical);

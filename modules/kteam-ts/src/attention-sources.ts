@@ -5,7 +5,13 @@
 
 import type { SessionView } from './service';
 import type { KTeamEvent, PendingQuestion } from './types';
-import type { ScopedTaskSummary, SessionTaskListResponse, TaskActivity, TaskWorkflow } from './tasks-types';
+import {
+  taskReference,
+  type ScopedTaskSummary,
+  type SessionTaskListResponse,
+  type TaskActivity,
+  type TaskWorkflow,
+} from './tasks-types';
 import { isValidShippedReopenActivity } from './session-tasks-store';
 import type { AddAttentionInput, AttentionService } from './attention-service';
 import {
@@ -98,14 +104,15 @@ function taskAttentionState(task: ScopedTaskSummary): TaskAttentionState {
 }
 
 function taskInput(task: ScopedTaskSummary, state: TaskAttentionState): AddAttentionInput {
+  const reference = taskReference(task.id);
   return {
     source: 'task',
     sourceRef: task.id,
-    subject: subjectLine(`Unblock task #${task.id}: ${task.title}`),
+    subject: subjectLine(`Unblock task ${reference}: ${task.title}`),
     why: state.reason,
-    context: `#${task.id} ("${task.title}") is a task tracked in this session. It is **blocked on you** — no agent can move it forward until you decide.`,
+    context: `${reference} ("${task.title}") is a task tracked in this session. It is **blocked on you** — no agent can move it forward until you decide.`,
     waitingSince: state.since,
-    howToResolve: `- Read the reason above and give the missing decision or input.\n- Once #${task.id} is unblocked, this item clears itself.`,
+    howToResolve: `- Read the reason above and give the missing decision or input.\n- Once ${reference} is unblocked, this item clears itself.`,
   };
 }
 
@@ -129,15 +136,16 @@ function reopenedTaskInputFrom(raw: Record<string, unknown>, waitingSince: strin
   ) {
     return null;
   }
+  const reference = taskReference(id);
   return {
     source: 'agent-raised',
     sourceRef: `${TASK_REOPENED_ATTENTION_SOURCE_REF_PREFIX}${id}`,
     sourceSeq: sourceSeq as number,
-    subject: `Re-verify #${id} — shipped work was reopened`,
+    subject: `Re-verify ${reference} — shipped work was reopened`,
     why: reason,
-    context: `Task #${id} had shipped (it was **${from}** — reviewed and accepted). An agent moved it back to **${to}** for repair, so the "done" you may have seen is no longer true.`,
+    context: `Task ${reference} had shipped (it was **${from}** — reviewed and accepted). An agent moved it back to **${to}** for repair, so the "done" you may have seen is no longer true.`,
     waitingSince,
-    howToResolve: `- Read why #${id} was reopened (reason above).\n- After the repair, **only you** should move it back to done, after verifying it.\n- Then mark this item done.`,
+    howToResolve: `- Read why ${reference} was reopened (reason above).\n- After the repair, **only you** should move it back to done, after verifying it.\n- Then mark this item done.`,
   };
 }
 
@@ -614,7 +622,13 @@ export class AttentionSources {
       for (const id of previous) {
         if (current.has(id)) continue;
         await this.attention
-          .resolveFromSource(sessionId, 'task', id, `Task #${id} no longer requires human attention.`, actor)
+          .resolveFromSource(
+            sessionId,
+            'task',
+            id,
+            `Task ${taskReference(id)} no longer requires human attention.`,
+            actor,
+          )
           .catch(error => this.report(sessionId, `task resolution ${id}`, error));
       }
     }

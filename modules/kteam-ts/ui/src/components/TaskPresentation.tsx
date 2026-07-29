@@ -1,4 +1,4 @@
-// Shared task-v2 cards and detail. All human-facing task references use #F12.
+// Shared task-v2 cards and detail. All human-facing task references use &F12.
 import type { ReactNode } from 'react';
 import {
   Activity,
@@ -15,8 +15,8 @@ import { Markdown } from './Markdown';
 import { Link } from '../lib/router';
 import { parseGithubPr } from '../lib/pins';
 import type { AttentionId } from '../lib/attention';
-import type { CodeReference } from '../lib/code-references';
-import type { PinReferenceLookup } from '../lib/remark-session-references';
+import type { CodeReference } from '../lib/references';
+import type { PinReferenceLookup } from '../lib/pin-links';
 import {
   taskActivityText,
   taskBoardLane,

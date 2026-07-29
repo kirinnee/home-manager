@@ -52,7 +52,7 @@ describe('parseAttentionCli', () => {
   test('ls, history and done parse', () => {
     expect(parseAttentionCli(['ls'])).toEqual({ command: 'ls' });
     expect(parseAttentionCli(['history'])).toEqual({ command: 'history' });
-    expect(parseAttentionCli(['done', '?A3', '--note', 'answered'])).toEqual({
+    expect(parseAttentionCli(['done', '!A3', '--note', 'answered'])).toEqual({
       command: 'done',
       id: 'A3',
       note: 'answered',
@@ -119,7 +119,7 @@ describe('rendering', () => {
     expect(output).toContain('oldest first');
     expect(output).toContain('[question]');
     expect(output).toContain('raised by daemon');
-    expect(output).toContain('?A3');
+    expect(output).toContain('!A3');
   });
 
   test('list shows context when an item carries it', () => {
@@ -147,7 +147,7 @@ describe('rendering', () => {
     const addResponse = snapshot();
     addResponse.items[0] = { ...addResponse.items[0]!, source: 'agent-raised' };
     const recorded = renderAttentionCli(parseAttentionCli(['Choose release?']), addResponse);
-    expect(recorded).toContain('?A3');
+    expect(recorded).toContain('!A3');
     expect(recorded).toContain('1 unresolved');
     expect(renderAttentionCli({ command: 'done', id: 'A1' }, { ...snapshot(), items: [], count: 0 })).toContain(
       '0 unresolved',

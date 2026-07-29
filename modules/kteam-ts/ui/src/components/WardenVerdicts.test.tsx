@@ -145,6 +145,7 @@ describe('WardenVerdicts', () => {
     expect(source).toContain('onTaskOpen={onTaskOpen}');
     expect(source).toContain('onCodeReferenceOpen={onCodeReferenceOpen}');
     expect(source).toContain('onAttentionOpen={onAttentionOpen}');
-    expect(source).toContain('onPinOpen={onPinOpen}');
+    expect(source).not.toContain('onPinOpen={onPinOpen}');
+    expect(source).toContain('{...sessionReferenceHost(report?.sessionId)}');
   });
 });

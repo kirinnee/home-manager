@@ -18,7 +18,7 @@ export const ATTENTION_CLI_USAGE = `kteam attention <command>
   attention add "<the ask>"              same, explicit
              [--context <background>] [--why <why-now>] [--resolve <how>]
   attention ls                           list unresolved items, oldest first
-  attention done ?A3 [--note <text>]
+  attention done !A3 [--note <text>]
                                          retract an item YOU raised; items raised
                                          by the daemon or another agent are
                                          dismissed by the human only
@@ -60,7 +60,7 @@ export function parseAttentionCli(argv: readonly string[]): AttentionCliCommand 
   if (head === 'history' || head === 'resolved') return { command: 'history', ...scoped };
   if (head === 'done' || head === 'resolve') {
     const id = parseAttentionId(positional[1]);
-    if (id === null) return invalid('done needs an attention reference like ?A3 (see `attention ls`)');
+    if (id === null) return invalid('done needs an attention reference like !A3 (see `attention ls`)');
     const note = flags.get('note')?.at(-1);
     return {
       command: 'done',

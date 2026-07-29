@@ -563,7 +563,7 @@ describe('v2 workflow, ask, DAG, and delegated completion', () => {
     const consumer = await service.taskDetail('F2');
     expect(consumer?.task).toMatchObject({
       blocked: true,
-      blockedReason: 'Waiting on #F1',
+      blockedReason: 'Waiting on &F1',
       blockedBy: ['F1'],
     });
     await expect(service.taskAct('F1', { action: 'dependency', taskId: '#F2' })).rejects.toMatchObject({

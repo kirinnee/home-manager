@@ -248,17 +248,17 @@ describe('store-backed repetition tiers', () => {
     expect(first.candidates).toEqual([
       expect.objectContaining({
         kind: 'task',
-        label: '#F38',
+        label: '&F38',
         detail: 'Composer autocomplete',
         badge: 'In progress',
-        replacement: '#F38',
+        replacement: '&F38',
       }),
     ]);
     expect(requests).toHaveLength(0);
 
     tasks = [{ id: 'B7', title: 'New live snapshot', status: 'blocked' as const }];
     const updated = provider.initialCandidates!(referenceContext(3, 'B'))!;
-    expect(updated.candidates[0]).toMatchObject({ label: '#B7', badge: 'Blocked' });
+    expect(updated.candidates[0]).toMatchObject({ label: '&B7', badge: 'Blocked' });
   });
 
   test('@@@@ rows contain canonical attention references and identifying subjects', () => {
@@ -273,12 +273,12 @@ describe('store-backed repetition tiers', () => {
     expect(result.candidates).toEqual([
       expect.objectContaining({
         kind: 'attention',
-        label: '?A3',
+        label: '!A3',
         detail: 'Choose the rollout window',
         badge: 'question',
-        replacement: '?A3',
+        replacement: '!A3',
       }),
-      expect.objectContaining({ label: '?A8', replacement: '?A8' }),
+      expect.objectContaining({ label: '!A8', replacement: '!A8' }),
     ]);
     expect(requests).toHaveLength(0);
   });
@@ -299,12 +299,12 @@ describe('store-backed repetition tiers', () => {
         label: 'pin: Ship after QA',
         detail: 'Note pin',
         badge: 'note',
-        replacement: '[pin: Ship after QA](#kteam-pin-reference?session=one&id=pin-1)',
+        replacement: 'pin: Ship after QA',
       }),
       expect.objectContaining({
         label: 'pin: Agent result',
         detail: 'Message pin · Pinned by ottis',
-        replacement: '[pin: Agent result](#kteam-pin-reference?session=one&id=pin-2)',
+        replacement: 'pin: Agent result',
       }),
     ]);
     expect(result.contextLabel).toBe('@@@@@ session pins');
@@ -331,7 +331,7 @@ describe('store-backed repetition tiers', () => {
     release();
 
     await expect(result).resolves.toMatchObject({
-      candidates: [expect.objectContaining({ label: '#F12', detail: 'Loaded by the existing warmup' })],
+      candidates: [expect.objectContaining({ label: '&F12', detail: 'Loaded by the existing warmup' })],
     });
     expect(provider.snapshotKey).not.toBe(before);
     expect(requests).toEqual([]);
@@ -357,7 +357,7 @@ describe('store-backed repetition tiers', () => {
 });
 
 describe('@ repetition-selected references provider', () => {
-  test('@@ narrows only agents and inserts a stable id-backed link', async () => {
+  test('@@ narrows only agents and inserts the canonical agent sigil', async () => {
     const sessions = [
       agentSession({
         id: 'ms-finished',
@@ -389,7 +389,7 @@ describe('@ repetition-selected references provider', () => {
       id: 'agent:ms-live',
       label: 'ottis',
       badge: 'tool running',
-      replacement: '[@ottis](/session/ms-live#kteam-agent-mention)',
+      replacement: ':ottis',
     });
     expect(initial?.candidates[0]?.detail).toContain('browser-work · Make Browser Real');
     expect(initial?.candidates[0]?.detail).toContain('gpt-5.6-sol · codex-auto-loge');

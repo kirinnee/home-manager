@@ -300,11 +300,12 @@ describe('v2 fields parse additively and round-trip exactly', () => {
     ]);
   });
 
-  test('#F12 references normalise to F12 while storage stays sigil-free', () => {
-    expect(normalizeTaskId('#F12')).toBe('F12');
-    expect(normalizeTaskId(' #f12 ')).toBe('F12');
+  test('&F12 references normalise to F12 while storage stays sigil-free', () => {
+    expect(normalizeTaskId('&F12')).toBe('F12');
+    expect(normalizeTaskId(' &f12 ')).toBe('F12');
+    expect(normalizeTaskId('#F12')).toBe('F12'); // decode-only legacy compatibility
     // The stored form never carries the sigil, so the raw guard rejects it.
-    expect(isTaskId('#F12')).toBe(false);
+    expect(isTaskId('&F12')).toBe(false);
     expect(isTaskId('F12')).toBe(true);
     // Dependencies supplied with a sigil or lower-cased are normalised and de-duped.
     const parsed = parseTaskRecord({ ...record(), dependsOn: ['#f12', 'F12', '#F13', 'F1'] });

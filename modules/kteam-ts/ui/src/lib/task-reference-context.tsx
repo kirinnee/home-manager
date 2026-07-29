@@ -1,13 +1,13 @@
 // App-wide proof for task references.
 //
-// A syntactically valid #F12 is not evidence that the task exists. This provider
+// A syntactically valid &F12 is not evidence that the task exists. This provider
 // maintains one fleet task-id index from the existing aggregate endpoint and
 // refreshes it when the one FleetStore socket reports `tasks.updated`. Every
 // Markdown surface consumes the same resolver; none starts its own request.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api } from './api';
-import { type TaskReferenceResolver } from './remark-task-references';
+import { type TaskReferenceResolver } from './references';
 import { useFleetEvents } from './store';
 import { parseTaskListResponse, type TaskSummary } from './tasks';
 

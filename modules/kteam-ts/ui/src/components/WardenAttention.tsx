@@ -14,10 +14,12 @@
 // same item two resolution workflows that can disagree. The whole row is one
 // tap through to the session instead.
 
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, CircleAlert, Clock3, Gavel, HelpCircle, LoaderCircle, ShieldQuestion, UserRound } from 'lucide-react';
 import { ApiError, api } from '../lib/api';
+import { sessionReferenceHost } from '../lib/reference-host';
 import { Link } from '../lib/router';
+import { Markdown } from './Markdown';
 import { ReportModal } from './WardenVerdicts';
 import type {
   FleetAttentionItem,
@@ -33,9 +35,7 @@ import { cn, fmtAge, fmtRelative } from '../lib/utils';
 const POLL_MS = 30_000;
 
 // Attention prose is authored as markdown (point form, bold, glossed jargon)
-// and must render as markdown here too, not as literal asterisks. Lazy, like
-// WardenVerdicts, so the warden page does not pay for the renderer up front.
-const Markdown = lazy(() => import('./Markdown').then(m => ({ default: m.Markdown })));
+// and must render as markdown here too, not as literal asterisks.
 
 /** What the section is rendering right now. A union, not a pile of booleans:
  *  "loading", "the daemon refused" and "the warden has no judgement" are
@@ -269,7 +269,7 @@ export function WardenAttentionSection({
   onOpenReport,
 }: {
   state: WardenAttentionState;
-  onOpenReport?: (path: string) => void;
+  onOpenReport?: (path: string, sessionId: string, attentionId?: FleetAttentionItem['id']) => void;
 }) {
   return (
     <section
@@ -315,7 +315,7 @@ function ReadyBody({
   stale,
 }: {
   view: WardenAttentionView;
-  onOpenReport?: (path: string) => void;
+  onOpenReport?: (path: string, sessionId: string, attentionId?: FleetAttentionItem['id']) => void;
   stale?: { reason: string };
 }) {
   const items = orderedAttentionItems(view.items);
@@ -447,12 +447,13 @@ function AttentionRow({
 }: {
   item: FleetAttentionItem;
   oldest: boolean;
-  onOpenReport?: (path: string) => void;
+  onOpenReport?: (path: string, sessionId: string, attentionId?: FleetAttentionItem['id']) => void;
 }) {
   const judgement = item.judgement ?? { state: 'none' as const };
   const chip = judgementChip(judgement.state);
   const callsign = displayCallsign(item.teammate) || item.sessionId;
   const reportPath = judgement.reportPath;
+  const referenceHost = sessionReferenceHost(item.sessionId);
 
   return (
     <li
@@ -489,28 +490,39 @@ function AttentionRow({
           )}
           {oldest && <span className="kt-label shrink-0 text-warn">oldest</span>}
         </span>
-
-        {item.subject && <span className="text-cell font-medium leading-snug text-fg-soft">{item.subject}</span>}
       </Link>
 
       <div className="flex flex-col gap-xs px-cell-x pb-row-y">
+        {item.subject && (
+          <Markdown
+            text={item.subject}
+            sessionId={item.sessionId}
+            {...referenceHost}
+            attentionReferenceResolver={id => id === item.id}
+            className="text-cell font-medium leading-snug text-fg-soft"
+          />
+        )}
         {item.why ? (
-          <Suspense fallback={<span className="text-cell leading-base text-muted">{item.why}</span>}>
-            <Markdown text={item.why} sessionId={item.sessionId} className="text-cell leading-base text-muted" />
-          </Suspense>
+          <Markdown
+            text={item.why}
+            sessionId={item.sessionId}
+            {...referenceHost}
+            attentionReferenceResolver={id => id === item.id}
+            className="text-cell leading-base text-muted"
+          />
         ) : (
           <span className="text-cell leading-base text-muted">No reason recorded.</span>
         )}
         {item.context && (
           <div className="rounded-control border border-border-soft bg-surface-2 px-cell-x py-1.5">
             <span className="kt-label block text-faint">Context</span>
-            <Suspense fallback={<span className="text-meta leading-base text-muted">{item.context}</span>}>
-              <Markdown
-                text={item.context}
-                sessionId={item.sessionId}
-                className="mt-0.5 text-meta leading-base text-muted"
-              />
-            </Suspense>
+            <Markdown
+              text={item.context}
+              sessionId={item.sessionId}
+              {...referenceHost}
+              attentionReferenceResolver={id => id === item.id}
+              className="mt-0.5 text-meta leading-base text-muted"
+            />
           </div>
         )}
         <span className="text-meta leading-base text-muted">{judgementSummary(judgement)}</span>
@@ -532,7 +544,7 @@ function AttentionRow({
         <div className="border-t border-border-soft">
           <button
             type="button"
-            onClick={() => onOpenReport(reportPath)}
+            onClick={() => onOpenReport(reportPath, item.sessionId, item.id)}
             className="flex min-h-[44px] w-full items-center gap-1.5 px-cell-x py-1.5 text-left text-meta text-muted hover:bg-surface-2 hover:text-fg"
           >
             <Gavel size={12} aria-hidden="true" />
@@ -547,7 +559,12 @@ function AttentionRow({
 /** Live section: polls the admin-only fleet view and owns the report modal. */
 export function WardenAttention() {
   const [state, setState] = useState<WardenAttentionState>({ status: 'loading' });
-  const [report, setReport] = useState<{ title: string; body: string | null } | null>(null);
+  const [report, setReport] = useState<{
+    title: string;
+    body: string | null;
+    sessionId: string;
+    attentionId?: FleetAttentionItem['id'];
+  } | null>(null);
   const timer = useRef<number | null>(null);
   const closeReport = useCallback(() => setReport(null), []);
 
@@ -575,23 +592,26 @@ export function WardenAttention() {
     };
   }, []);
 
-  const openReport = useCallback(async (path: string) => {
+  const openReport = useCallback(async (path: string, sessionId: string, attentionId?: FleetAttentionItem['id']) => {
     const title = path.split('/').pop() ?? 'report';
-    setReport({ title, body: null });
+    setReport({ title, body: null, sessionId, attentionId });
     try {
-      setReport({ title, body: await api.wardenReport(path) });
+      setReport({ title, body: await api.wardenReport(path), sessionId, attentionId });
     } catch {
-      setReport({ title, body: '_Could not load this report._' });
+      setReport({ title, body: '_Could not load this report._', sessionId, attentionId });
     }
   }, []);
 
   return (
     <>
-      <WardenAttentionSection state={state} onOpenReport={path => void openReport(path)} />
+      <WardenAttentionSection state={state} onOpenReport={(path, sessionId) => void openReport(path, sessionId)} />
       <ReportModal
         open={report !== null}
         title={report?.title ?? ''}
         body={report?.body ?? null}
+        sessionId={report?.sessionId}
+        {...sessionReferenceHost(report?.sessionId)}
+        attentionReferenceResolver={report?.attentionId ? id => id === report.attentionId : undefined}
         onClose={closeReport}
       />
     </>
