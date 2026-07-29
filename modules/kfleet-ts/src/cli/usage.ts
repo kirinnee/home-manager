@@ -48,7 +48,7 @@ const cell = (v?: number): string => `${heatBar(v)} ${heat(v, padL(pct(v), 4))}`
 
 export function createUsageCommand(): Command {
   return new Command('usage')
-    .description('probe each subscription account (claude/codex/z.ai/minimax) for 5h + weekly usage + login status')
+    .description('probe subscription quota and configured CLIProxy provider availability')
     .option('--json', 'machine-readable output')
     .option('--all', 'include untracked (non usage-based) accounts')
     .option('--no-relogin', 'skip the pre-probe token-free refresh of expired OAuth tokens')
@@ -82,12 +82,14 @@ export function createUsageCommand(): Command {
         });
 
         if (opts.json) {
-          console.log(JSON.stringify(opts.all ? rows : rows.filter(r => r.usageBased), null, 2));
+          console.log(
+            JSON.stringify(opts.all ? rows : rows.filter(r => r.usageBased || r.availability !== undefined), null, 2),
+          );
           return;
         }
 
-        const shown = opts.all ? rows : rows.filter(r => r.usageBased);
-        if (shown.length === 0) return logWarn('no usage-based accounts in config');
+        const shown = opts.all ? rows : rows.filter(r => r.usageBased || r.availability !== undefined);
+        if (shown.length === 0) return logWarn('no usage-based or CLIProxy availability accounts in config');
 
         // Group by VARIANT (the wrapper-name infix: default / auto / …) so each section
         // shows one model across its variants together.
@@ -119,11 +121,12 @@ export function createUsageCommand(): Command {
           for (const r of list.sort(
             (a, b) => provKey(a).localeCompare(provKey(b)) || a.binary.localeCompare(b.binary),
           )) {
-            console.log(`  ${row(r, binW)}`);
+            console.log(`  ${usageRow(r, binW)}`);
           }
         }
-        const exhausted = rows.filter(r => r.atLimit);
-        const loggedOut = rows.filter(r => r.authOk === false);
+        const down = rows.filter(r => r.unavailable === true);
+        const exhausted = rows.filter(r => r.atLimit && r.availability === undefined);
+        const loggedOut = rows.filter(r => r.authOk === false && r.availability === undefined);
         // "Errored" = couldn't read usage but the creds ARE fine (transient/endpoint) — distinct from logged-out.
         const errored = rows.filter(r => r.usageBased && !r.ok && r.authOk !== false);
         console.log(
@@ -133,6 +136,12 @@ export function createUsageCommand(): Command {
         );
         if (loggedOut.length)
           logWarn(`${loggedOut.length} NOT logged in (re-auth needed): ${loggedOut.map(r => r.binary).join(', ')}`);
+        if (down.length)
+          logWarn(
+            `${down.length} CLI unavailable: ${down
+              .map(r => `${r.binary} (${(r.unavailableReason ?? 'provider').replaceAll('_', ' ')})`)
+              .join(', ')}`,
+          );
         if (errored.length)
           logDim(`${errored.length} usage unavailable (creds OK): ${errored.map(r => r.binary).join(', ')}`);
         logOk('done');
@@ -145,12 +154,21 @@ export function createUsageCommand(): Command {
  *  columns (no more verbose repeated "resets" prose). The trailing note only appears for the
  *  actionable states (AT LIMIT / not logged in / probe failed). Plain text is padded first, then
  *  colored, so columns line up regardless of status. */
-function row(r: AccountUsage, binW: number): string {
+export function usageRow(r: AccountUsage, binW: number): string {
   const bin = padR(r.binary, binW);
   const prov = pc.dim(padR(r.provider ?? '', PROV_W));
   const blank = cell(undefined); // dim placeholder bar+% for rows with no reading
   const cols = (mark: string, c5: string, cwk: string, r5: string, rwk: string, note: string): string =>
     `${mark} ${bin} ${prov}  ${c5}  ${cwk}  ${pc.dim(padL(r5, RESET_W))} ${pc.dim(padL(rwk, RESET_W))}${note ? `  ${note}` : ''}`;
+  if (r.availability !== undefined) {
+    const reason = (r.unavailableReason ?? 'provider').replaceAll('_', ' ');
+    const retry = until(r.retryAt);
+    const note =
+      r.unavailable === true
+        ? `${pc.red('CLI DOWN')} ${pc.dim(`${reason}${retry ? `; retry in ${retry}` : ''}`)}`
+        : pc.green('CLI available');
+    return cols(r.unavailable === true ? pc.red('✗') : pc.green('✓'), blank, blank, '—', '—', note);
+  }
   if (!r.usageBased) {
     return cols(pc.dim('·'), blank, blank, '—', '—', pc.dim('not usage-based'));
   }

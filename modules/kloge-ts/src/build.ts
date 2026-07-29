@@ -18,5 +18,5 @@ export async function buildPatchedImage(): Promise<void> {
   if (result.code !== 0) die(`patched CLIProxyAPI image build failed (exit ${result.code})`);
 
   ok(`built ${PATCHED_IMAGE}`);
-  log(`opt in: KLOGE_IMAGE=${PATCHED_IMAGE} kloge render`);
+  log('next: kloge render (the maintained image is the default)');
 }

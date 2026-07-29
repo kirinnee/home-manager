@@ -1,0 +1,47 @@
+diff --git a/internal/api/handlers/management/auth_files.go b/internal/api/handlers/management/auth_files.go
+index 6e4c3bd..f9d7156 100644
+--- a/internal/api/handlers/management/auth_files.go
++++ b/internal/api/handlers/management/auth_files.go
+@@ -584,6 +584,42 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
+ 	if !auth.NextRetryAfter.IsZero() {
+ 		entry["next_retry_after"] = auth.NextRetryAfter
+ 	}
++	if len(auth.ModelStates) > 0 {
++		modelStates := make(gin.H, len(auth.ModelStates))
++		for model, state := range auth.ModelStates {
++			if state == nil {
++				continue
++			}
++			quota := gin.H{"exceeded": state.Quota.Exceeded}
++			if !state.Quota.NextRecoverAt.IsZero() {
++				quota["next_recover_at"] = state.Quota.NextRecoverAt
++			}
++			projected := gin.H{
++				"status":      state.Status,
++				"unavailable": state.Unavailable,
++				"quota":       quota,
++			}
++			if !state.NextRetryAfter.IsZero() {
++				projected["next_retry_after"] = state.NextRetryAfter
++			}
++			if state.LastError != nil {
++				lastError := gin.H{}
++				if code := strings.TrimSpace(state.LastError.Code); code != "" {
++					lastError["code"] = code
++				}
++				if state.LastError.HTTPStatus != 0 {
++					lastError["http_status"] = state.LastError.HTTPStatus
++				}
++				if len(lastError) > 0 {
++					projected["last_error"] = lastError
++				}
++			}
++			modelStates[model] = projected
++		}
++		if len(modelStates) > 0 {
++			entry["model_states"] = modelStates
++		}
++	}
+ 	if path != "" {
+ 		entry["path"] = path
+ 		entry["source"] = "file"

@@ -34,30 +34,32 @@ loge/loge-credentials (k8s Secret)         # 3 codex + 3 claude OAuth creds
     codex-1.json codex-2.json codex-3.json
     claude-1.json claude-2.json claude-3.json
   config.yaml                              # CLIProxyAPI config (api key: loge-internal)
-  compose.yaml                             # docker: eceasy/cli-proxy-api, mounts the above
+  management-key                          # generated management bearer key (mode 0600)
+  compose.yaml                             # docker: maintained model-aware image, mounts the above
         │  kloge up            │  kloge push user@box
         ▼                      ▼
   docker @ 127.0.0.1:8317   docker @ box 127.0.0.1:8317
 ```
 
-CLIProxyAPI runs **only in Docker** (image `eceasy/cli-proxy-api`, upstream
-`github.com/router-for-me/CLIProxyAPI`). The container mounts `./auth` at
+CLIProxyAPI runs **only in Docker**. The default image is the locally built,
+pinned `kloge-cliproxy:patched` fork of
+`github.com/router-for-me/CLIProxyAPI`; set `KLOGE_IMAGE` to the upstream image
+only as an explicit rollback. The container mounts `./auth` at
 `/root/.cli-proxy-api` and `./config.yaml` at `/CLIProxyAPI/config.yaml`. The
 port is bound to `127.0.0.1` on whichever host it runs on.
 
 ## Usage
 
 ```bash
+kloge build                    # build the default maintained image with claude-opus-5
 kloge pull                     # pull creds + render config/compose (kubectl, ctx eks-llm-us-east-1)
 kloge pull -c <other-context>  # pull from a different kube context
-kloge build                    # build the opt-in maintained image with claude-opus-5
 kloge up                       # start the container locally -> http://127.0.0.1:8317
 kloge status                   # data dir, creds, container state, served models
 kloge logs -f                  # follow container logs
 kloge down                     # stop the local container
 
-kloge push user@box            # rsync ~/.kloge to the box and start it there
-kloge push user@box --no-up    # copy only, don't start
+kloge push user@box --no-up    # copy only; build/load the maintained image there, then start it
 ```
 
 Point a client at it (real upstream model IDs — this CLIProxyAPI version does
@@ -81,26 +83,47 @@ ssh -N -L 8317:127.0.0.1:8317 user@box
 - `KLOGE_DIR` — data dir (default `~/.kloge`).
 - `KLOGE_PORT` — fallback port when `config.yaml` is absent (default `8317`);
   the rendered `config.yaml` is the source of truth once it exists.
-- `KLOGE_IMAGE` — pin the CLIProxyAPI image (default `eceasy/cli-proxy-api:latest`).
+- `KLOGE_IMAGE` — override the CLIProxyAPI image (default
+  `kloge-cliproxy:patched`; use `eceasy/cli-proxy-api:latest` for rollback).
 - `KLOGE_API_KEY` — client-facing placeholder key (default `loge-internal`).
+- `KLOGE_MANAGEMENT_KEY` — optional management-key import/rotation value. On
+  render, kloge persists it to `~/.kloge/management-key` with mode `0600`;
+  otherwise it generates a durable random key there. This key is separate from
+  the client API key. Point kfleet's matching source at it with
+  `usage.cliProxy[].managementKeyFile` and never put provider credentials there.
+
+The rendered compose publishes the proxy only on host loopback. CLIProxyAPI's
+`remote-management.allow-remote` is enabled because Docker presents host-local
+requests as bridge-peer traffic inside the container; the bearer key is still
+required, the control panel is disabled, and kfleet consumes only
+`GET /v0/management/auth-files`. A
+management outage is reported as unknown by kfleet; it never fabricates quota or
+auth failure from an unreachable proxy. The vanilla auth-files response is not
+model-aware, so aggregate availability remains unknown. The maintained image
+adds a redacted per-model state projection; with that image, kfleet marks a
+wrapper down only when every enabled credential is blocked for the wrapper's
+served primary model. Missing or sparse model state remains unknown.
 
 ## Maintained model-catalog image
 
-Upstream's embedded catalog can lag newly released models. This repository
-contains a pinned, auditable build recipe under `cliproxy-fork/` that applies a
-small model-catalog overlay and builds `kloge-cliproxy:patched`. It is opt-in:
+Upstream's embedded catalog can lag newly released models and its management
+response omits model-scoped availability. This repository contains a pinned,
+auditable build recipe under `cliproxy-fork/` that applies a small model-catalog
+overlay plus a redacted model-state response patch and builds
+`kloge-cliproxy:patched`. It is the rendered default so the configured kfleet
+probe is not silently left on an availability-blind upstream image:
 
 ```bash
 kloge build
-KLOGE_IMAGE=kloge-cliproxy:patched kloge render
+kloge render
 kloge up
 ```
 
 For this image, the rendered compose uses `pull_policy: never` and starts the
 binary with `--local-model`, preventing the three-hour remote catalog refresh
-from replacing maintained additions. The default upstream image and behavior
-are unchanged when `KLOGE_IMAGE` is unset. To roll back, render the upstream
-image again and run `kloge up`:
+from replacing maintained additions. Because the tag is local and compose uses
+`pull_policy: never`, `kloge up` fails visibly if `kloge build` has not produced
+it. To roll back, explicitly render the upstream image and run `kloge up`:
 
 ```bash
 KLOGE_IMAGE=eceasy/cli-proxy-api:latest kloge render
@@ -108,7 +131,7 @@ kloge up
 ```
 
 The patched tag exists only in the Docker store where `kloge build` ran.
-`kloge push` therefore refuses to auto-start a rendered patched compose on a
+`kloge push` therefore refuses to auto-start the default patched compose on a
 remote host. Build or load `kloge-cliproxy:patched` on that host first, use
 `kloge push <host> --no-up`, then start the copied compose there manually.
 

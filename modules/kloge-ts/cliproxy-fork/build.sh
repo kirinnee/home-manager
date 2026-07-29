@@ -55,6 +55,18 @@ jq --slurpfile overlay "${overlay_file}" '
 ' "${models_file}" >"${patched_models}"
 mv -- "${patched_models}" "${models_file}"
 
+patch_dir="${fork_dir}/patches"
+shopt -s nullglob
+patches=("${patch_dir}"/*.patch)
+shopt -u nullglob
+for patch_file in "${patches[@]}"; do
+  echo "Applying $(basename -- "${patch_file}")..."
+  git -C "${source_dir}" apply --check "${patch_file}"
+  git -C "${source_dir}" apply "${patch_file}"
+done
+
+grep -q 'entry\["model_states"\]' "${source_dir}/internal/api/handlers/management/auth_files.go"
+
 jq -e '
   [.claude[] | select(.id == "claude-opus-5")] as $models
   | ($models | length) == 1
@@ -82,12 +94,13 @@ git -C "${source_dir}" diff --check
 
 echo "Building ${image_tag} from patched ${UPSTREAM_REF}..."
 docker build \
-  --build-arg "VERSION=${UPSTREAM_REF}+kloge-opus5" \
+  --build-arg "VERSION=${UPSTREAM_REF}+kloge-opus5.mgmt1" \
   --build-arg "COMMIT=${UPSTREAM_COMMIT}" \
   --build-arg "BUILD_DATE=${UPSTREAM_RELEASE_DATE}" \
   --label "org.opencontainers.image.source=${UPSTREAM_REPOSITORY}" \
   --label "org.opencontainers.image.revision=${UPSTREAM_COMMIT}" \
   --label "io.kloge.model-catalog=claude-opus-5" \
+  --label "io.kloge.management-model-states=redacted-v1" \
   --tag "${image_tag}" \
   "${source_dir}"
 
