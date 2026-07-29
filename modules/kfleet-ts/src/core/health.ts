@@ -7,12 +7,28 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { binDir } from '../deps';
+import { seedFirstRunFlags } from './firstrun';
+import { KIND_SPECS } from './kinds';
 import { resolveAll } from './merge';
 import type { Config, Kind } from './types';
 
 const SENTINEL = 'KFLEET_HEALTH_OK';
 const PROMPT = `Reply with exactly: ${SENTINEL} and nothing else.`;
 const DEFAULT_TIMEOUT_MS = 90_000;
+
+const INHERITED_AGENT_ENV = new Set([
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CONFIG_DIR',
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_SESSION_ID',
+  'CODEX_HOME',
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+]);
 
 export interface AgentHealth {
   name: string; // e.g. "auto-glm52a"
@@ -23,13 +39,60 @@ export interface AgentHealth {
   error?: string; // short reason when down
 }
 
+export interface AgentProbeTarget {
+  name: string;
+  kind: Kind;
+  /** Fully resolved wrapper env. Its keys are intentional and may depend on
+   * same-named inherited variables (for example OPENAI_API_KEY=$OPENAI_API_KEY). */
+  env?: Record<string, string>;
+}
+
+/** Remove provider/session state inherited from whichever agent launched
+ * kfleet. Generated wrappers re-export their own configured values; retaining
+ * another account's values here could make a probe test the wrong credential. */
+export function sanitizeAgentEnv(env: Readonly<NodeJS.ProcessEnv>, preserve: Iterable<string> = []): NodeJS.ProcessEnv {
+  const clean = { ...env };
+  const preserved = new Set(preserve);
+  for (const key of Object.keys(clean)) {
+    if (!preserved.has(key) && (INHERITED_AGENT_ENV.has(key) || /^ANTHROPIC_DEFAULT_.*_MODEL$/.test(key))) {
+      delete clean[key];
+    }
+  }
+  return clean;
+}
+
+const envRefName = (value: string): string | undefined => {
+  const match = /^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})$/.exec(value.trim());
+  return match?.[1] ?? match?.[2];
+};
+
+/** Build the environment a target wrapper is meant to see. Only explicitly
+ * referenced source variables survive sanitization; configured literals and
+ * resolved $VAR/${VAR} references then override inherited values. */
+export function prepareAgentEnv(
+  configured: Record<string, string> | undefined,
+  inherited: Readonly<NodeJS.ProcessEnv>,
+): NodeJS.ProcessEnv {
+  const entries = Object.entries(configured ?? {});
+  const sourceNames = entries.flatMap(([, value]) => {
+    const name = envRefName(value);
+    return name ? [name] : [];
+  });
+  const prepared = sanitizeAgentEnv(inherited, sourceNames);
+  for (const [key, value] of entries) {
+    const sourceName = envRefName(value);
+    prepared[key] = sourceName ? (inherited[sourceName] ?? '') : value;
+  }
+  return prepared;
+}
+
 /** The `auto-*` agents — the non-interactive wrappers automation actually drives.
  *  `auto-` is a variant infix added during expansion, so resolve agents × variants
  *  first (the raw config.agents have no prefix). */
-export function autoAgents(config: Config): { name: string; kind: Kind }[] {
+export function autoAgents(config: Config): AgentProbeTarget[] {
   return resolveAll(config)
     .filter(a => a.name.startsWith('auto-'))
-    .map(a => ({ name: a.name, kind: a.kind }));
+    .map(a => ({ name: a.name, kind: a.kind, ...(a.env ? { env: a.env } : {}) }));
 }
 
 /** Harness-aware, non-interactive "say the sentinel" invocation for a wrapper. */
@@ -42,24 +105,44 @@ function probeCmd(kind: Kind, bin: string): { cmd: string[]; env?: Record<string
   }
 }
 
+/** Resolve a concrete generated wrapper, whether it is on PATH or only in
+ * kfleet's managed bin directory. */
+export function resolveAgentWrapper(a: { name: string; kind: Kind }): { binary: string; resolved?: string } {
+  const binary = `${a.kind}-${a.name}`;
+  const candidate = Bun.which(binary) ?? path.join(binDir, binary);
+  return existsSync(candidate) ? { binary, resolved: candidate } : { binary };
+}
+
+interface ProbeAgentDeps {
+  configDir?: (target: AgentProbeTarget) => string;
+  resolveWrapper?: typeof resolveAgentWrapper;
+}
+
 /** Launch one agent wrapper and decide up/down. Healthy = exit 0 AND the reply
  *  contains the sentinel (so a silent auth/proxy failure that exits 0 still fails). */
-async function probeAgent(a: { name: string; kind: Kind }, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<AgentHealth> {
-  const binary = `${a.kind}-${a.name}`;
+export async function probeAgent(
+  a: AgentProbeTarget,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  deps: ProbeAgentDeps = {},
+): Promise<AgentHealth> {
+  const { binary, resolved } = (deps.resolveWrapper ?? resolveAgentWrapper)(a);
   const t0 = Date.now();
-  const resolved = Bun.which(binary) ?? path.join(binDir, binary);
-  if (!existsSync(resolved)) {
+  if (!resolved) {
     return { name: a.name, kind: a.kind, binary, up: false, ms: 0, error: 'wrapper not found — run `kfleet apply`' };
   }
   const { cmd, env } = probeCmd(a.kind, resolved);
   try {
+    const cwd = tmpdir();
+    const baseEnv = prepareAgentEnv(a.env, process.env);
+    const configDir = deps.configDir?.(a) ?? KIND_SPECS[a.kind].configDir(a.name);
+    seedFirstRunFlags(a.kind, configDir, cwd, baseEnv);
     const proc = Bun.spawn({
       cmd,
-      cwd: tmpdir(),
+      cwd,
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
-      env: env ? { ...process.env, ...env } : process.env,
+      env: env ? { ...baseEnv, ...env } : baseEnv,
     });
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -97,7 +180,7 @@ async function probeAgent(a: { name: string; kind: Kind }, timeoutMs = DEFAULT_T
  *  simultaneously. Results are returned in the same order as `agents`.
  *  `timeoutMs`, if given, is the per-probe budget. */
 export async function probeFleet(
-  agents: { name: string; kind: Kind }[],
+  agents: AgentProbeTarget[],
   concurrency = 8,
   timeoutMs?: number,
 ): Promise<AgentHealth[]> {
