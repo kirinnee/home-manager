@@ -52,9 +52,14 @@ export interface SyncResult {
 }
 
 export interface RebuildResult {
+  /** Sessions that imported successfully — a skipped failure is NOT counted. */
   sessionCount: number;
   eventCount: number;
   problems: JournalProblem[];
+  /** Sessions whose import threw and were skipped so the walk could continue.
+   *  Absent (not empty) when every session imported, so a clean import keeps
+   *  its existing shape. Each entry also has a matching `problems` row. */
+  failedSessionIds?: string[];
 }
 
 export interface EventStoreOptions {
@@ -1397,6 +1402,7 @@ export class EventStore {
     await mkdir(this.home, { recursive: true, mode: 0o700 });
     const sessionIds = await this.discoverSessionIds();
     const problems: JournalProblem[] = [];
+    const failed: string[] = [];
     let eventCount = 0;
     let imported = 0;
     for (const sessionId of sessionIds) {
@@ -1406,12 +1412,48 @@ export class EventStore {
       // demand (resolveIncludingArchived) and revive on the next real write.
       // (A full rebuildIndex still processes them — see its note.)
       if (this.archivedIds.has(sessionId)) continue;
-      const result = await this.syncSession(sessionId);
+      // Per-session failure isolation. ONE session must never abort the walk:
+      // an unhandled throw here (live case: a persistent SQLite trigger raising
+      // `UNIQUE constraint failed` from inside this session's own row write)
+      // used to propagate out of the loop, so every session AFTER it in the
+      // sorted walk was silently never indexed and the caller's whole import
+      // failed. The failure is demoted to a JournalProblem — the same
+      // diagnostic channel journal corruption already uses — and logged, then
+      // the walk continues. This mirrors the per-session isolation recover()
+      // already applies. The skipped session keeps whatever rows it had; the
+      // next sync or boot retries it.
+      let result: SyncResult;
+      try {
+        result = await this.syncSession(sessionId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failed.push(sessionId);
+        problems.push({
+          file: this.eventsFilePathForDiagnostic(sessionId),
+          line: 0,
+          message: `session ${sessionId} failed to import and was skipped: ${message}`,
+        });
+        console.error(
+          `kteamd: session ${sessionId} failed to import; skipping it and continuing the fleet import: ${message}`,
+        );
+        continue;
+      }
       eventCount += result.eventCount;
       imported += 1;
       problems.push(...result.problems);
     }
-    return { sessionCount: imported, eventCount, problems };
+    return { sessionCount: imported, eventCount, problems, ...(failed.length ? { failedSessionIds: failed } : {}) };
+  }
+
+  /** `eventsFile` validates the id and throws on a malformed one — which would
+   *  defeat the very isolation the caller is in the middle of applying. Used
+   *  only to label a diagnostic, so a best-effort path is correct here. */
+  private eventsFilePathForDiagnostic(sessionId: string): string {
+    try {
+      return this.eventsFile(sessionId);
+    } catch {
+      return path.join(this.home, sessionId, 'events.jsonl');
+    }
   }
 
   /** Clear the disposable index and recreate it entirely from session files. */

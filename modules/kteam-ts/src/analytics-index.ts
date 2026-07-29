@@ -16,7 +16,7 @@ import {
 import { AnalyticsQueryError, matcherLikePattern, parseAnalyticsQuery } from './analytics-query';
 import { PRICING_REGISTRY } from './model-cost';
 
-export const ANALYTICS_SCHEMA_VERSION = 6;
+export const ANALYTICS_SCHEMA_VERSION = 7;
 export const ANALYTICS_RAW_LIMIT = 200;
 export const ANALYTICS_GROUP_LIMIT = 500;
 
@@ -82,7 +82,7 @@ const EQUIVALENT_COST_SQL = `
 
 const OUTPUT_TYPES_SQL = "'chat.assistant.text','chat.assistant.thinking','chat.assistant.reasoning','tool.use'";
 const FAILURE_TYPES_SQL = "'session.failed','session.crashed'";
-const MIGRATION_TYPES_SQL = "'session.migrating','session.migrated'";
+const MIGRATION_TYPES_SQL = "'session.migrated'";
 
 export interface AnalyticsIndexOptions {
   databasePath: string;
@@ -472,6 +472,13 @@ export class AnalyticsIndex {
       CREATE TRIGGER IF NOT EXISTS analytics_sessions_insert
       AFTER INSERT ON sessions
       BEGIN
+        -- Explicit UPSERT, not a plain INSERT: the warm analytics materialization
+        -- outlives an EventStore pointer-index rebuild, so a boot re-import that
+        -- INSERTs a session (via INSERT ... ON CONFLICT(id) DO UPDATE) can fire this
+        -- AFTER INSERT trigger while a stale analytics_sessions row still exists.
+        -- The outer statement's conflict policy would turn that collision into an
+        -- ABORT and fail the import; DO UPDATE keeps it idempotent and refreshes the
+        -- derived row exactly as analytics_sessions_update does.
         INSERT INTO analytics_sessions (${SESSION_COLUMNS}) VALUES (
           NEW.id,
           json_extract(NEW.config_json, '$.binary'),
@@ -497,12 +504,36 @@ export class AnalyticsIndex {
             SELECT 1 FROM events e WHERE e.session_id = NEW.id AND e.type IN (${MIGRATION_TYPES_SQL})
           ) THEN 1 ELSE 0 END,
           CURRENT_TIMESTAMP
-        );
-        INSERT OR IGNORE INTO analytics_expected_sources
+        )
+        ON CONFLICT(session_id) DO UPDATE SET
+          wrapper = excluded.wrapper,
+          model = excluded.model,
+          harness = excluded.harness,
+          mode = excluded.mode,
+          status = excluded.status,
+          label = excluded.label,
+          cwd = excluded.cwd,
+          parent = excluded.parent,
+          day = excluded.day,
+          week = excluded.week,
+          created_at = excluded.created_at,
+          started_at = excluded.started_at,
+          finished_at = excluded.finished_at,
+          turns = excluded.turns,
+          context_percent = excluded.context_percent,
+          had_stall = MAX(analytics_sessions.had_stall, excluded.had_stall),
+          had_failure = MAX(analytics_sessions.had_failure, excluded.had_failure),
+          had_migration = MAX(analytics_sessions.had_migration, excluded.had_migration),
+          indexed_at = excluded.indexed_at;
+        -- Same override hazard as analytics_session_source_update: an explicit
+        -- DO NOTHING is not overridable by the outer conflict policy and preserves
+        -- placeholder semantics (never clobber authoritative chat_sources metadata).
+        INSERT INTO analytics_expected_sources
           (session_id, source_file, harness, source_size, source_mtime_ms, seen_at)
         SELECT NEW.id, json_extract(NEW.config_json, '$.transcriptFile'),
           COALESCE(json_extract(NEW.config_json, '$.harness'), 'unknown'), 0, 0, CURRENT_TIMESTAMP
-        WHERE json_extract(NEW.config_json, '$.transcriptFile') IS NOT NULL;
+        WHERE json_extract(NEW.config_json, '$.transcriptFile') IS NOT NULL
+        ON CONFLICT(session_id, source_file) DO NOTHING;
       END;
 
       CREATE TRIGGER IF NOT EXISTS analytics_sessions_update
@@ -561,11 +592,20 @@ export class AnalyticsIndex {
       WHEN COALESCE(json_extract(OLD.config_json, '$.transcriptFile'), '')
         <> COALESCE(json_extract(NEW.config_json, '$.transcriptFile'), '')
       BEGIN
-        INSERT OR IGNORE INTO analytics_expected_sources
+        -- Explicit UPSERT, not INSERT OR IGNORE: when this trigger fires from an
+        -- outer statement that carries its own conflict clause (EventStore persists
+        -- session metadata with INSERT ... ON CONFLICT(id) DO UPDATE), that outer
+        -- policy overrides a trigger-body OR IGNORE and turns a duplicate-key hit
+        -- into an ABORT. A transcript path returning to an already-enrolled value
+        -- would then throw UNIQUE. A per-statement DO NOTHING is not overridable and
+        -- preserves placeholder semantics (never clobber authoritative chat_sources
+        -- metadata with the 0/0 placeholder).
+        INSERT INTO analytics_expected_sources
           (session_id, source_file, harness, source_size, source_mtime_ms, seen_at)
         SELECT NEW.id, json_extract(NEW.config_json, '$.transcriptFile'),
           COALESCE(json_extract(NEW.config_json, '$.harness'), 'unknown'), 0, 0, CURRENT_TIMESTAMP
-        WHERE json_extract(NEW.config_json, '$.transcriptFile') IS NOT NULL;
+        WHERE json_extract(NEW.config_json, '$.transcriptFile') IS NOT NULL
+        ON CONFLICT(session_id, source_file) DO NOTHING;
         UPDATE analytics_sessions SET
           token_known = 0,
           input_tokens = NULL,

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -170,10 +170,293 @@ describe('measured cold/warm boot regressions', () => {
   test('health stays degraded until import, recovery, and warden arming finish', async () => {
     const home = await temporaryHome();
     const manager = await SessionManager.create(createPaths(home), managerOptions());
-    expect(await manager.health()).toMatchObject({ ok: false, bootstrapping: true });
+    expect(await manager.health()).toMatchObject({
+      ok: false,
+      bootstrapping: true,
+      bootstrapState: 'running',
+      bootstrapDegraded: false,
+    });
     await manager.bootstrap();
-    expect(await manager.health()).toMatchObject({ ok: true, bootstrapping: false, wardenTimerArmed: true });
+    expect(await manager.health()).toMatchObject({
+      ok: true,
+      bootstrapping: false,
+      bootstrapState: 'complete',
+      bootstrapDegraded: false,
+      wardenTimerArmed: true,
+    });
     await manager.close();
+  });
+
+  test('a never-settling phase times out, later phases run, and repaired health is serviceable but degraded', async () => {
+    const home = await temporaryHome();
+    const manager = await SessionManager.create(createPaths(home), managerOptions());
+    const internals = manager as unknown as {
+      bootstrapPhaseTimeoutMs: number;
+      store: {
+        importFromDisk: () => Promise<{ sessionCount: number; eventCount: number; problems: unknown[] }>;
+      };
+      recover: () => Promise<void>;
+      startWarden: () => Promise<void>;
+      sweepScratch: () => Promise<unknown>;
+      wardenTimer?: ReturnType<typeof setInterval>;
+    };
+    const ran: string[] = [];
+    internals.bootstrapPhaseTimeoutMs = 20;
+    internals.store.importFromDisk = async () => {
+      ran.push('import');
+      return { sessionCount: 0, eventCount: 0, problems: [] };
+    };
+    internals.recover = async () => {
+      ran.push('recover');
+      await new Promise<void>(() => undefined);
+    };
+    internals.startWarden = async () => {
+      ran.push('warden');
+      internals.wardenTimer = setInterval(() => undefined, 1_000_000);
+    };
+    internals.sweepScratch = async () => {
+      ran.push('scratch-gc');
+      return {};
+    };
+
+    try {
+      const outcome = await Promise.race([
+        manager.bootstrap().then(() => 'settled'),
+        Bun.sleep(500).then(() => 'test deadline exceeded'),
+      ]);
+      expect(outcome).toBe('settled');
+      expect(ran).toEqual(['import', 'recover', 'warden', 'scratch-gc']);
+      expect(manager.bootstrapErrors).toEqual(['bootstrap phase recover failed: timed out after 20ms']);
+      expect(await manager.health()).toMatchObject({
+        ok: true,
+        bootstrapping: false,
+        bootstrapState: 'degraded',
+        bootstrapDegraded: true,
+        bootstrapErrors: 1,
+        wardenTimerArmed: true,
+      });
+    } finally {
+      await manager.close();
+    }
+  });
+
+  test('isolated per-session import failures remain visible as degraded bootstrap diagnostics', async () => {
+    const home = await temporaryHome();
+    const manager = await SessionManager.create(createPaths(home), managerOptions());
+    const internals = manager as unknown as {
+      store: {
+        importFromDisk: () => Promise<{
+          sessionCount: number;
+          eventCount: number;
+          problems: unknown[];
+          failedSessionIds?: string[];
+        }>;
+      };
+      recover: () => Promise<void>;
+      startWarden: () => Promise<void>;
+      sweepScratch: () => Promise<unknown>;
+      wardenTimer?: ReturnType<typeof setInterval>;
+    };
+    const ran: string[] = [];
+    internals.store.importFromDisk = async () => ({
+      sessionCount: 2,
+      eventCount: 2,
+      problems: [],
+      failedSessionIds: ['m-poison'],
+    });
+    internals.recover = async () => {
+      ran.push('recover');
+    };
+    internals.startWarden = async () => {
+      ran.push('warden');
+      internals.wardenTimer = setInterval(() => undefined, 1_000_000);
+    };
+    internals.sweepScratch = async () => {
+      ran.push('scratch-gc');
+      return {};
+    };
+
+    try {
+      await manager.bootstrap();
+      expect(ran).toEqual(['recover', 'warden', 'scratch-gc']);
+      expect(manager.bootstrapErrors).toEqual([
+        'bootstrap phase import failed: 1 session(s) failed to import and were skipped: m-poison',
+      ]);
+      expect(await manager.health()).toMatchObject({
+        ok: true,
+        bootstrapping: false,
+        bootstrapState: 'degraded',
+        bootstrapErrors: 1,
+      });
+    } finally {
+      await manager.close();
+    }
+  });
+
+  test('a timed-out recovery walk cannot resume against stale boot state', async () => {
+    const home = await temporaryHome();
+    const manager = await SessionManager.create(createPaths(home), managerOptions());
+    let releaseBlockedWork!: () => void;
+    let markBlockedWorkEntered!: () => void;
+    const blockedWork = new Promise<void>(resolve => {
+      releaseBlockedWork = resolve;
+    });
+    const blockedWorkEntered = new Promise<void>(resolve => {
+      markBlockedWorkEntered = resolve;
+    });
+    const recovered: string[] = [];
+    const internals = manager as unknown as {
+      bootstrapPhaseTimeoutMs: number;
+      store: {
+        importFromDisk: () => Promise<{ sessionCount: number; eventCount: number; problems: unknown[] }>;
+      };
+      list: () => Promise<unknown[]>;
+      tmux: { listSessions: () => Promise<Set<string>> };
+      serialized: <T>(id: string, work: () => Promise<T>) => Promise<T>;
+      recoverSession: (session: { config: { id: string } }, signal?: AbortSignal) => Promise<void>;
+      startWarden: () => Promise<void>;
+      sweepScratch: () => Promise<unknown>;
+      wardenTimer?: ReturnType<typeof setInterval>;
+    };
+    internals.bootstrapPhaseTimeoutMs = 20;
+    internals.store.importFromDisk = async () => ({ sessionCount: 1, eventCount: 0, problems: [] });
+    internals.list = async () => [
+      {
+        directory: path.join(home, 'stale'),
+        config: { id: 'stale', tmuxSession: 'kteam-stale-agent' },
+        state: { id: 'stale', status: 'running' },
+      },
+    ];
+    internals.tmux = { listSessions: async () => new Set(['kteam-stale-agent']) };
+    internals.serialized = async <T>() => {
+      markBlockedWorkEntered();
+      await blockedWork;
+      return undefined as T;
+    };
+    internals.recoverSession = async session => {
+      recovered.push(session.config.id);
+    };
+    internals.startWarden = async () => {
+      internals.wardenTimer = setInterval(() => undefined, 1_000_000);
+    };
+    internals.sweepScratch = async () => ({});
+
+    try {
+      const bootstrap = manager.bootstrap();
+      await blockedWorkEntered;
+      await bootstrap;
+      releaseBlockedWork();
+      await Bun.sleep(10);
+      expect(recovered).toEqual([]);
+      expect(manager.bootstrapErrors).toContain('bootstrap phase recover failed: timed out after 20ms');
+    } finally {
+      releaseBlockedWork();
+      await manager.close();
+    }
+  });
+
+  test('a phase rejection after its deadline is logged instead of being swallowed', async () => {
+    const home = await temporaryHome();
+    const manager = await SessionManager.create(createPaths(home), managerOptions());
+    let rejectRecover!: (error: Error) => void;
+    const internals = manager as unknown as {
+      bootstrapPhaseTimeoutMs: number;
+      store: {
+        importFromDisk: () => Promise<{ sessionCount: number; eventCount: number; problems: unknown[] }>;
+      };
+      recover: () => Promise<void>;
+      startWarden: () => Promise<void>;
+      sweepScratch: () => Promise<unknown>;
+      wardenTimer?: ReturnType<typeof setInterval>;
+    };
+    internals.bootstrapPhaseTimeoutMs = 20;
+    internals.store.importFromDisk = async () => ({ sessionCount: 0, eventCount: 0, problems: [] });
+    internals.recover = async () =>
+      await new Promise<void>((_resolve, reject) => {
+        rejectRecover = reject;
+      });
+    internals.startWarden = async () => {
+      internals.wardenTimer = setInterval(() => undefined, 1_000_000);
+    };
+    internals.sweepScratch = async () => ({});
+    const errors = spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      await manager.bootstrap();
+      rejectRecover(new Error('late UNIQUE detail'));
+      await Bun.sleep(0);
+      expect(
+        errors.mock.calls.some(call =>
+          call.some(part => String(part).includes('failed after its deadline: late UNIQUE detail')),
+        ),
+      ).toBe(true);
+    } finally {
+      errors.mockRestore();
+      await manager.close();
+    }
+  });
+
+  test('a timed-out warden state read releases the single-flight latch for a fresh retry', async () => {
+    const home = await temporaryHome();
+    const manager = await SessionManager.create(createPaths(home), managerOptions());
+    const internals = manager as unknown as {
+      wardenStateReadTimeoutMs: number;
+      readWardenState: () => Promise<Record<string, unknown> | undefined>;
+      startWarden: () => Promise<void>;
+      wardenStarting?: Promise<void>;
+      wardenTimer?: ReturnType<typeof setInterval>;
+    };
+    let reads = 0;
+    internals.wardenStateReadTimeoutMs = 20;
+    internals.readWardenState = async () => {
+      reads += 1;
+      if (reads === 1) await new Promise<void>(() => undefined);
+      return {};
+    };
+
+    try {
+      await expect(internals.startWarden()).rejects.toThrow('warden state read timed out after 20ms');
+      expect(internals.wardenStarting).toBeUndefined();
+      await internals.startWarden();
+      expect(reads).toBe(2);
+      expect(internals.wardenTimer).toBeDefined();
+    } finally {
+      await manager.close();
+    }
+  });
+
+  test('concurrent and repeated warden arming shares one state read and one timer', async () => {
+    const home = await temporaryHome();
+    const manager = await SessionManager.create(createPaths(home), managerOptions());
+    const internals = manager as unknown as {
+      readWardenState: () => Promise<Record<string, unknown> | undefined>;
+      startWarden: () => Promise<void>;
+      wardenTimer?: ReturnType<typeof setInterval>;
+    };
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>(resolve => {
+      releaseRead = resolve;
+    });
+    let reads = 0;
+    internals.readWardenState = async () => {
+      reads += 1;
+      await readGate;
+      return {};
+    };
+    let first: ReturnType<typeof setInterval> | undefined;
+    try {
+      const starts = [internals.startWarden(), internals.startWarden()];
+      releaseRead();
+      await Promise.all(starts);
+      first = internals.wardenTimer;
+      await internals.startWarden();
+      expect(reads).toBe(1);
+      expect(first).toBeDefined();
+      expect(internals.wardenTimer).toBe(first);
+    } finally {
+      if (first && internals.wardenTimer !== first) clearInterval(first);
+      await manager.close();
+    }
   });
 
   test('recovery skips absent terminal panes but freshly probes every active session', async () => {

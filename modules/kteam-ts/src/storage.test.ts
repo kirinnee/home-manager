@@ -159,6 +159,73 @@ describe('filesystem import and SQLite rebuild', () => {
     expect(store.replay('imported').map(event => event.sequence)).toEqual([1, 2, 3]);
     store.close();
   });
+
+  test('one failing session is isolated: the walk continues and later sessions still import', async () => {
+    const home = await temporaryHome();
+    // Sorted walk order is a → m-poison → z, so the poisoned session sits in
+    // the MIDDLE: proving `z` imported proves the failure did not abort the
+    // rest of the fleet (the pre-fix behaviour lost every session after it).
+    const ids = ['a-healthy', 'm-poison', 'z-healthy'];
+    for (const id of ids) {
+      const event = {
+        schemaVersion: 1,
+        sequence: 1,
+        sessionId: id,
+        time: '2026-07-29T00:00:00.000Z',
+        type: 'session.started',
+        data: {},
+      };
+      await mkdir(path.join(home, id), { recursive: true });
+      await writeFile(path.join(home, id, 'events.jsonl'), `${JSON.stringify(event)}\n`);
+    }
+
+    const store = await EventStore.open({ home, importExisting: false });
+    // Deterministic poison in the same shape as the live incident: a persistent
+    // trigger that aborts from INSIDE this one session's own row write, so the
+    // throw comes out of the store's own statement rather than the test.
+    const poisoner = new Database(path.join(home, 'daemon', 'kteam.sqlite'));
+    poisoner.exec(
+      `CREATE TRIGGER poison_one_session AFTER INSERT ON sessions WHEN NEW.id = 'm-poison'
+       BEGIN SELECT RAISE(ABORT, 'UNIQUE constraint failed: analytics_expected_sources.session_id'); END;`,
+    );
+    poisoner.close();
+
+    // The import RESOLVES rather than throwing — that is the isolation.
+    const imported = await store.importFromDisk();
+
+    // Both healthy sessions are indexed, including the one AFTER the failure.
+    expect(store.replay('a-healthy').map(event => event.sequence)).toEqual([1]);
+    expect(store.replay('z-healthy').map(event => event.sequence)).toEqual([1]);
+    expect(imported.sessionCount).toBe(2);
+    expect(imported.eventCount).toBe(2);
+
+    // Diagnostics are preserved, not swallowed: exactly one reported failure,
+    // naming the session and carrying the underlying error text.
+    expect(imported.failedSessionIds).toEqual(['m-poison']);
+    expect(imported.problems).toHaveLength(1);
+    expect(imported.problems[0]!.message).toContain('m-poison');
+    expect(imported.problems[0]!.message).toContain('UNIQUE constraint failed');
+    expect(imported.problems[0]!.file).toBe(path.join(home, 'm-poison', 'events.jsonl'));
+
+    // The store stays usable after the isolated failure.
+    const next = await store.append('z-healthy', 'session.resumed', {});
+    expect(next.sequence).toBe(2);
+    store.close();
+  });
+
+  test('a clean import reports no failures and omits failedSessionIds entirely', async () => {
+    const home = await temporaryHome();
+    const store = await EventStore.open({ home });
+    await store.append('session-a', 'session.started', {});
+    store.close();
+
+    const reopened = await EventStore.open({ home, importExisting: false });
+    const imported = await reopened.importFromDisk();
+    expect(imported.sessionCount).toBe(1);
+    expect(imported.problems).toEqual([]);
+    expect(imported.failedSessionIds).toBeUndefined();
+    reopened.close();
+  });
 });
 
 describe('pointer index (A2)', () => {

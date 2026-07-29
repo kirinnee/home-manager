@@ -12,6 +12,7 @@ import {
   parseProcessTable,
   renderInflightCli,
   renderInflightReport,
+  renderMigrationOutcome,
   summarizeToolInput,
   worstVerdict,
   type InflightReport,
@@ -403,6 +404,104 @@ describe('rendering + handoff (test 3, 4)', () => {
   test('handoff message names the report path', () => {
     expect(handoffMessage('/dir/migration-inflight.md')).toContain('/dir/migration-inflight.md');
     expect(handoffMessage('/dir/migration-inflight.md')).toContain('migrated');
+  });
+
+  test('the pre-API half states the target as REQUESTED and never claims the move happened', () => {
+    const md = renderInflightReport(report, {
+      sessionId: 'sess',
+      targetAgent: 'claude-auto-x',
+      targetModel: 'opus',
+      forced: true,
+      at: '2026-07-26T00:00:00Z',
+    });
+    // It is written BEFORE the daemon call, so this exact claim must be absent.
+    expect(md).not.toContain('Migrated onto');
+    expect(md).toContain('Migration requested onto');
+    expect(md).toContain('PENDING');
+    // …while still naming the target and carrying the forensic content.
+    expect(md).toContain('claude-auto-x');
+    expect(md).toContain('FORCED');
+  });
+});
+
+describe('renderMigrationOutcome — the settled truth appended after the daemon call', () => {
+  const base = {
+    from: 'claude-auto-a',
+    targetAgent: 'claude-auto-b',
+    targetModel: 'opus',
+    at: '2026-07-26T01:00:00Z',
+  };
+
+  test('success is clearly distinct and names the observed wrapper, model, and status', () => {
+    const md = renderMigrationOutcome({
+      ...base,
+      ok: true,
+      observed: { binary: 'claude-auto-b', model: 'opus', status: 'running' },
+    });
+    expect(md).toContain('MIGRATION SUCCEEDED');
+    expect(md).not.toContain('MIGRATION FAILED');
+    expect(md).not.toContain('UNKNOWN');
+    expect(md).toContain('claude-auto-b');
+    expect(md).toContain('`opus`');
+    expect(md).toContain('`running`');
+  });
+
+  test('failure carries the error detail and the observed restored wrapper + status', () => {
+    const md = renderMigrationOutcome({
+      ...base,
+      ok: false,
+      detail: 'migration to claude-auto-b failed: pane never became ready',
+      observed: { binary: 'claude-auto-a', model: 'glm-5.2', status: 'failed' },
+    });
+    expect(md).toContain('MIGRATION FAILED');
+    expect(md).not.toContain('MIGRATION SUCCEEDED');
+    expect(md).toContain('did NOT complete');
+    expect(md).toContain('pane never became ready');
+    expect(md).toContain('claude-auto-a');
+    expect(md).toContain('the ORIGINAL account; the session did not move');
+    expect(md).toContain('`failed`');
+  });
+
+  test('a failure still staged on the target reports an INCOMPLETE rollback, not a restore', () => {
+    const md = renderMigrationOutcome({
+      ...base,
+      ok: false,
+      detail: 'daemon died mid-migrate',
+      observed: { binary: 'claude-auto-b', status: 'kill_failed' },
+    });
+    expect(md).toContain('the rollback did not complete');
+    expect(md).toContain('`kill_failed`');
+    expect(md).not.toContain('the session did not move');
+  });
+
+  test('a daemon-side refusal that never moved the session is reported truthfully', () => {
+    const md = renderMigrationOutcome({
+      ...base,
+      ok: false,
+      detail: 'refusing context-window downgrade from claude-opus-5[1m] (1000000 tokens)',
+      observed: { binary: 'claude-auto-a', model: 'claude-opus-5[1m]', status: 'rate_limited' },
+    });
+    expect(md).toContain('refusing context-window downgrade');
+    expect(md).toContain('the session did not move');
+    expect(md).toContain('`rate_limited`');
+    expect(md).not.toContain('rollback did not complete');
+  });
+
+  test('an unfetchable post-failure state stays explicitly UNKNOWN and claims no rollback', () => {
+    const md = renderMigrationOutcome({ ...base, ok: false, detail: 'socket hang up' });
+    expect(md).toContain('MIGRATION FAILED');
+    expect(md).toContain('socket hang up');
+    expect(md).toContain('**UNKNOWN**');
+    expect(md).toContain('NOT confirmed');
+    // Never assert a restore the CLI could not observe.
+    expect(md).not.toContain('the session did not move');
+    expect(md).not.toContain('Session now on:');
+  });
+
+  test('a missing error detail still renders a failure rather than an empty line', () => {
+    const md = renderMigrationOutcome({ ...base, ok: false, observed: { status: 'failed' } });
+    expect(md).toContain('Error: no detail reported');
+    expect(md).toContain('the daemon reported no wrapper');
   });
 });
 
