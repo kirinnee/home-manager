@@ -28,6 +28,7 @@ const item = (over: Partial<AttentionItem> = {}): AttentionItem => ({
   id: over.id ?? 'A1',
   source: over.source ?? 'agent-raised',
   sourceRef: over.sourceRef ?? null,
+  ...(over.sourceSeq === undefined ? {} : { sourceSeq: over.sourceSeq }),
   subject: over.subject ?? 'Choose a deployment window',
   why: over.why ?? 'The release cannot proceed without it.',
   waitingSince: over.waitingSince ?? '2026-07-28T00:00:00.000Z',
@@ -60,6 +61,10 @@ describe('path and item parsing', () => {
     expect(parseAttentionItem({ ...item(), subject: '' })).toBeNull();
     expect(parseAttentionItem({ ...item(), waitingSince: 'not-a-date' })).toBeNull();
     expect(parseAttentionItem({ ...item(), raisedBy: 'agent', raisedBySession: null })).toBeNull();
+    expect(parseAttentionItem(item({ sourceSeq: 7 }))?.sourceSeq).toBe(7);
+    for (const sourceSeq of [0, -1, 1.5, '7', null, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(parseAttentionItem({ ...item(), sourceSeq })).toBeNull();
+    }
   });
 });
 
@@ -119,7 +124,7 @@ describe('parseAttentionFile', () => {
     expect(parsed.parseErrorIds).toContain('<nextId>');
   });
 
-  test('migrates a reopen resolution into an additive watermark that survives audit pruning', () => {
+  test('keeps legacy watermarks readable until explicit compaction and never rematerialises them', async () => {
     const resolved: ResolvedAttentionItem = {
       ...item({ source: 'agent-raised', sourceRef: 'task-reopened:F31' }),
       resolvedAt: '2026-07-28T04:00:00.000Z',
@@ -135,6 +140,7 @@ describe('parseAttentionFile', () => {
         nextId: 2,
         items: [],
         resolved: [resolved],
+        reopenResolvedAt: { F31: '2026-07-28T04:00:00.000Z' },
         count: 0,
         updatedAt: '2026-07-28T04:00:00.000Z',
       }),
@@ -143,9 +149,20 @@ describe('parseAttentionFile', () => {
     expect(parsed.parseErrors).toBe(0);
     expect(parsed.file.reopenResolvedAt).toEqual({ F31: '2026-07-28T04:00:00.000Z' });
 
-    const pruned = parseAttentionFile(JSON.stringify(serializeAttentionFile({ ...parsed.file, resolved: [] })), SID);
-    expect(pruned.parseErrors).toBe(0);
-    expect(pruned.file.reopenResolvedAt).toEqual({ F31: '2026-07-28T04:00:00.000Z' });
+    const withoutMap = parseAttentionFile(
+      JSON.stringify(serializeAttentionFile({ ...parsed.file, reopenResolvedAt: undefined })),
+      SID,
+    );
+    expect(withoutMap.parseErrors).toBe(0);
+    expect(withoutMap.file.reopenResolvedAt).toBeUndefined();
+
+    await writeFile(attentionFile(paths, SID), JSON.stringify(serializeAttentionFile(parsed.file)));
+    const store = new AttentionStore(paths, { role: 'daemon' });
+    expect((await store.compactLegacyReopenWatermarks(SID)).changed).toBe(true);
+    const compacted = JSON.parse(await readFile(attentionFile(paths, SID), 'utf8'));
+    expect(compacted.reopenResolvedAt).toBeUndefined();
+    expect((await store.snapshot(SID)).reopenResolvedAt).toBeUndefined();
+    expect((await store.compactLegacyReopenWatermarks(SID)).changed).toBe(false);
   });
 });
 
@@ -176,11 +193,12 @@ describe('AttentionStore', () => {
     await store.mutate(SID, current => ({
       ...current,
       nextId: 2,
-      items: [...current.items, { ...item({ id: 'A1' }), rogue: 'no' } as AttentionItem],
+      items: [...current.items, { ...item({ id: 'A1', sourceSeq: 9 }), rogue: 'no' } as AttentionItem],
     }));
     const raw = JSON.parse(await readFile(attentionFile(paths, SID), 'utf8'));
     expect(raw.count).toBe(1);
     expect(raw.items[0].rogue).toBeUndefined();
+    expect(raw.items[0].sourceSeq).toBe(9);
   });
 
   test('never evicts active items at capacity', async () => {

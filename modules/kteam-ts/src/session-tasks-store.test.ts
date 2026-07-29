@@ -68,6 +68,19 @@ function activity(seq: number, type: TaskActivity['type'] = 'note'): TaskActivit
   };
 }
 
+function shippedReopenActivity(seq: number): TaskActivity {
+  return {
+    ...activity(seq, 'status'),
+    data: {
+      phaseFrom: 'live',
+      phaseTo: 'build',
+      reason: 'The shipped result regressed.',
+      backward: true,
+      reopened: true,
+    },
+  };
+}
+
 async function create(sessionId: string, title = 'new'): Promise<StoredSessionTask> {
   const result = await store.create(sessionId, 'feature', id => ({
     task: record(id, { title, assignee: sessionId, createdBy: sessionId }),
@@ -106,6 +119,79 @@ describe('layout and defensive parsing', () => {
     expect(parsed.file.tasks.map(entry => entry.task.id)).toEqual(['F1']);
     expect(parsed.parseErrorIds).toEqual(['F2']);
     expect(parsed.activityParseErrors.get('F1')).toBe(1);
+  });
+
+  test('reopen acknowledgement round-trips while legacy and malformed fields fail toward visibility', async () => {
+    await store.create('ms-a', 'feature', id => ({
+      task: record(id, { reopenAckSeq: 7 }),
+      activity: [
+        activity(1, 'created'),
+        ...Array.from({ length: 5 }, (_, index) => activity(index + 2)),
+        shippedReopenActivity(7),
+      ],
+    }));
+    const written = JSON.parse(await readFile(store.file('ms-a'), 'utf8'));
+    expect(written.tasks[0].task.reopenAckSeq).toBe(7);
+    expect((await store.read('ms-a')).file.tasks[0]?.task.reopenAckSeq).toBe(7);
+
+    for (const malformed of [0, -1, 1.5, '7', null, Number.MAX_SAFE_INTEGER + 1]) {
+      const parsed = parseSessionTaskFile(
+        JSON.stringify({
+          v: SESSION_TASK_FILE_VERSION,
+          sessionId: 'ms-a',
+          updatedAt: at,
+          migratedGlobalIds: [],
+          tasks: [{ task: { ...record('F2'), reopenAckSeq: malformed }, activity: [] }],
+        }),
+        'ms-a',
+      );
+      expect(parsed.parseErrors).toBe(0);
+      expect(parsed.file.tasks[0]?.task.reopenAckSeq).toBeUndefined();
+    }
+
+    const legacy = parseSessionTaskFile(
+      JSON.stringify({
+        v: SESSION_TASK_FILE_VERSION,
+        sessionId: 'ms-a',
+        updatedAt: at,
+        migratedGlobalIds: [],
+        tasks: [{ task: record('F3'), activity: [] }],
+      }),
+      'ms-a',
+    );
+    expect(legacy.parseErrors).toBe(0);
+    expect(legacy.file.tasks[0]?.task.reopenAckSeq).toBeUndefined();
+
+    const future = parseSessionTaskFile(
+      JSON.stringify({
+        v: SESSION_TASK_FILE_VERSION,
+        sessionId: 'ms-a',
+        updatedAt: at,
+        migratedGlobalIds: [],
+        tasks: [{ task: { ...record('F4'), reopenAckSeq: 8 }, activity: [shippedReopenActivity(7)] }],
+      }),
+      'ms-a',
+    );
+    expect(future.parseErrors).toBe(0);
+    expect(future.file.tasks[0]?.task.reopenAckSeq).toBeUndefined();
+
+    const inRangeNonReopen = parseSessionTaskFile(
+      JSON.stringify({
+        v: SESSION_TASK_FILE_VERSION,
+        sessionId: 'ms-a',
+        updatedAt: at,
+        migratedGlobalIds: [],
+        tasks: [
+          {
+            task: { ...record('F5'), reopenAckSeq: 7 },
+            activity: [shippedReopenActivity(5), activity(7)],
+          },
+        ],
+      }),
+      'ms-a',
+    );
+    expect(inRangeNonReopen.parseErrors).toBe(0);
+    expect(inRangeNonReopen.file.tasks[0]?.task.reopenAckSeq).toBeUndefined();
   });
 
   test('a torn whole file is fatal and a mutation refuses to overwrite it', async () => {

@@ -34,12 +34,18 @@ export interface AttentionDeps {
    * directory owns the board. Returning a boolean here is unsafe: an alias can
    * pass existence checks and then become a phantom directory name. */
   resolve(sessionRef: string): Promise<{ id: string; name: string | null } | null>;
+  /** Task-owned acknowledgement hook. Optional for narrow readers/tests; the
+   * daemon wires TaskService so resolution can persist the displayed reopen
+   * generation before the Attention item is moved to audit history. */
+  ackReopen?(sessionId: string, taskId: string, seq: number, actor: AttentionActor, note?: string): Promise<void>;
 }
 
 export interface AddAttentionInput {
   /** Non-daemon callers may only create explicit agent-raised items. */
   source?: AttentionSource;
   sourceRef?: string | null;
+  /** Honoured only for trusted daemon source adapters. */
+  sourceSeq?: number;
   subject?: string;
   why?: string;
   howToResolve?: string;
@@ -90,6 +96,13 @@ function validIso(value: unknown, label: string): string {
     throw new AttentionError('invalid', `${label} must be an ISO timestamp`);
   }
   return value;
+}
+
+function validSourceSeq(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    throw new AttentionError('invalid', 'sourceSeq must be a safe integer of at least 1');
+  }
+  return value as number;
 }
 
 const sameText = (a: string, b: string): boolean => a.trim() === b.trim();
@@ -157,9 +170,14 @@ export class AttentionService {
     const why = requiredText(input.why, 'why', MAX_ATTENTION_DETAIL_LEN);
     const howToResolve = requiredText(input.howToResolve, 'howToResolve', MAX_ATTENTION_DETAIL_LEN);
     const sourceRef = optionalText(input.sourceRef, 'sourceRef', MAX_ATTENTION_SOURCE_REF_LEN);
-    if (taskIdFromReopenedAttentionSourceRef(sourceRef) !== null && provenance.by !== 'daemon') {
+    const reopenedTaskId = taskIdFromReopenedAttentionSourceRef(sourceRef);
+    if (reopenedTaskId !== null && provenance.by !== 'daemon') {
       throw new AttentionError('forbidden', 'task-reopened source references are reserved for the daemon');
     }
+    const sourceSeq =
+      provenance.by === 'daemon' && reopenedTaskId !== null && input.sourceSeq !== undefined
+        ? validSourceSeq(input.sourceSeq)
+        : undefined;
     const waitingSince =
       provenance.by === 'daemon' && input.waitingSince !== undefined
         ? validIso(input.waitingSince, 'waitingSince')
@@ -167,6 +185,7 @@ export class AttentionService {
     const itemWithoutId: Omit<AttentionItem, 'id'> = {
       source,
       sourceRef,
+      ...(sourceSeq === undefined ? {} : { sourceSeq }),
       subject,
       why,
       waitingSince,
@@ -180,10 +199,20 @@ export class AttentionService {
       if (sourceRef !== null) {
         const existing = current.items.find(item => item.source === source && item.sourceRef === sourceRef);
         if (existing) {
+          // A late delivery may describe an older generation than the item the
+          // resolver can currently see. Never regress either its token or text.
+          if (
+            reopenedTaskId !== null &&
+            existing.sourceSeq !== undefined &&
+            (sourceSeq === undefined || sourceSeq < existing.sourceSeq)
+          ) {
+            return current;
+          }
           if (
             sameText(existing.subject, subject) &&
             sameText(existing.why, why) &&
-            sameText(existing.howToResolve, howToResolve)
+            sameText(existing.howToResolve, howToResolve) &&
+            (reopenedTaskId === null || existing.sourceSeq === sourceSeq)
           ) {
             return current;
           }
@@ -193,9 +222,34 @@ export class AttentionService {
           return {
             ...current,
             items: current.items.map(item =>
-              item.id === existing.id ? { ...item, subject, why, howToResolve } : item,
+              item.id === existing.id
+                ? {
+                    ...item,
+                    subject,
+                    why,
+                    howToResolve,
+                    ...(sourceSeq === undefined ? {} : { sourceSeq }),
+                  }
+                : item,
             ),
           };
+        }
+        // Startup queues live events while durable baselines are seeded. If a
+        // resolver clears generation R before that queue drains, its duplicate
+        // delivery must not recreate the item. The fresh audit row binds this
+        // guard to R; a genuinely newer generation still raises normally.
+        if (
+          reopenedTaskId !== null &&
+          sourceSeq !== undefined &&
+          current.resolved.some(
+            item =>
+              item.source === source &&
+              item.sourceRef === sourceRef &&
+              item.sourceSeq !== undefined &&
+              item.sourceSeq >= sourceSeq,
+          )
+        ) {
+          return current;
         }
       }
       const duplicate = current.items.some(
@@ -235,7 +289,7 @@ export class AttentionService {
     const canonical = parseAttentionId(id);
     if (canonical === null) throw new AttentionError('invalid', 'attention id must look like A3 or ?A3');
     const resolutionNote = optionalText(note, 'resolution note', MAX_ATTENTION_DETAIL_LEN);
-    const mutation = await this.store.mutateWithResult(authorized.session.id, current => {
+    const mutation = await this.store.mutateWithResult(authorized.session.id, async current => {
       const target = current.items.find(item => item.id === canonical);
       // A retried resolve is idempotent and may not overwrite the original
       // resolver with whoever happened to retry it.
@@ -243,6 +297,7 @@ export class AttentionService {
         if (current.resolved.some(item => item.id === canonical)) return current;
         throw new AttentionError('not-found', `no unresolved attention item ${canonical} in this session`);
       }
+      await this.acknowledgeReopen(authorized.session.id, target, authorized.provenance, resolutionNote);
       return resolveState(current, target, authorized.provenance, resolutionNote);
     });
     return this.finishMutation(mutation, authorized.provenance);
@@ -264,9 +319,11 @@ export class AttentionService {
     const provenance = await this.sourceProvenance(actor);
     const ref = requiredText(sourceRef, 'sourceRef', MAX_ATTENTION_SOURCE_REF_LEN);
     const resolutionNote = optionalText(note, 'resolution note', MAX_ATTENTION_DETAIL_LEN);
-    const mutation = await this.store.mutateWithResult(session.id, current => {
+    const mutation = await this.store.mutateWithResult(session.id, async current => {
       const target = current.items.find(item => item.source === source && item.sourceRef === ref);
-      return target === undefined ? current : resolveState(current, target, provenance, resolutionNote);
+      if (target === undefined) return current;
+      await this.acknowledgeReopen(session.id, target, provenance, resolutionNote);
+      return resolveState(current, target, provenance, resolutionNote);
     });
     return this.finishMutation(mutation, provenance);
   }
@@ -319,6 +376,30 @@ export class AttentionService {
     return { id: resolved.id, name };
   }
 
+  private async acknowledgeReopen(
+    sessionId: string,
+    target: AttentionItem,
+    provenance: Provenance,
+    resolutionNote: string | null,
+  ): Promise<void> {
+    if (target.raisedBy !== 'daemon' || target.source !== 'agent-raised' || target.sourceSeq === undefined) return;
+    const taskId = taskIdFromReopenedAttentionSourceRef(target.sourceRef);
+    if (taskId === null || this.deps.ackReopen === undefined) return;
+    const actor: AttentionActor =
+      provenance.by === 'human'
+        ? { actor: 'user' }
+        : provenance.by === 'daemon'
+          ? { actor: 'daemon' }
+          : { actor: provenance.session, actorName: provenance.name };
+    await this.deps.ackReopen(sessionId, taskId, target.sourceSeq, actor, resolutionNote ?? undefined);
+  }
+
+  /** Drop the transition-only timestamp map after task migration succeeds. */
+  async compactLegacyReopenWatermarks(sessionId: string): Promise<AttentionSnapshot> {
+    const session = await this.resolveSession(sessionId);
+    return this.finishMutation(await this.store.compactLegacyReopenWatermarks(session.id), DAEMON_PROVENANCE);
+  }
+
   private finishMutation(mutation: AttentionMutation, provenance: Provenance): AttentionSnapshot {
     return mutation.changed ? this.emit(mutation.snapshot, provenance) : mutation.snapshot;
   }
@@ -360,23 +441,9 @@ function resolveState(
     resolvedByName: provenance.name,
     resolutionNote,
   };
-  const reopenedTaskId =
-    target.source === 'agent-raised' ? taskIdFromReopenedAttentionSourceRef(target.sourceRef) : null;
-  const previousReopenResolution = reopenedTaskId === null ? undefined : current.reopenResolvedAt?.[reopenedTaskId];
   return {
     ...current,
     items: current.items.filter(item => item.id !== target.id),
     resolved: [resolved, ...current.resolved],
-    ...(reopenedTaskId === null
-      ? {}
-      : {
-          reopenResolvedAt: {
-            ...(current.reopenResolvedAt ?? {}),
-            [reopenedTaskId]:
-              previousReopenResolution !== undefined && Date.parse(previousReopenResolution) > Date.parse(resolvedAt)
-                ? previousReopenResolution
-                : resolvedAt,
-          },
-        }),
   };
 }
