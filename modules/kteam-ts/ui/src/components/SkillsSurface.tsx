@@ -39,6 +39,36 @@ export function filterSkills(skills: readonly ComposerSkillSummary[], query: str
   return skills.filter(skill => `${skill.name}\n${skill.description}`.toLocaleLowerCase().includes(needle));
 }
 
+export type SkillBadge = 'claude' | 'codex' | 'both' | 'unknown';
+export interface SkillGroup {
+  scope: 'global' | 'project';
+  label: 'Global' | 'Project';
+  skills: ComposerSkillSummary[];
+}
+
+/** Older daemons did not report scope; those user-level account skills belong
+ * in Global until the daemon can establish otherwise. Origin is deliberately
+ * different: missing or malformed provenance stays visibly unknown. */
+export function groupSkills(skills: readonly ComposerSkillSummary[], query: string): SkillGroup[] {
+  const matching = filterSkills(skills, query);
+  return (['global', 'project'] as const).map(scope => ({
+    scope,
+    label: scope === 'global' ? 'Global' : 'Project',
+    skills: matching.filter(skill => (skill.scope === 'project' ? 'project' : 'global') === scope),
+  }));
+}
+
+export function skillBadge(origin: ComposerSkillSummary['origin']): SkillBadge {
+  return origin === 'claude' || origin === 'codex' || origin === 'both' ? origin : 'unknown';
+}
+
+function badgeLabel(badge: SkillBadge): string {
+  if (badge === 'claude') return 'Available for Claude';
+  if (badge === 'codex') return 'Available for Codex';
+  if (badge === 'both') return 'Available for Claude and Codex';
+  return 'Skill origin is unknown';
+}
+
 /** Append one invocation as a new draft token while preserving real content. */
 export function appendSkillInvocation(draft: string, invocation: string): string {
   if (draft.trim().length === 0) return `${invocation} `;
@@ -80,8 +110,9 @@ export function SkillsCatalogList({
   query: string;
   onInsert: (invocation: string) => void;
 }) {
-  const skills = filterSkills(catalog.skills, query);
-  if (skills.length === 0) {
+  const groups = groupSkills(catalog.skills, query);
+  const skillCount = groups.reduce((count, group) => count + group.skills.length, 0);
+  if (skillCount === 0) {
     return (
       <div className="flex flex-col items-center gap-2 py-8 text-center">
         <Sparkles size={22} aria-hidden="true" className="text-faint" />
@@ -93,27 +124,53 @@ export function SkillsCatalogList({
   }
 
   return (
-    <ul className="m-0 list-none divide-y divide-border-soft rounded-md border border-border-soft bg-surface p-0">
-      {skills.map(skill => {
-        const invocation = skillInsertText(catalog.harness, skill.name);
+    <div className="flex min-w-0 flex-col gap-4">
+      {groups.map(group => {
+        if (group.skills.length === 0) return null;
         return (
-          <li key={skill.name}>
-            <button
-              type="button"
-              className="flex min-h-[64px] w-full flex-col items-stretch gap-1 px-3 py-2 text-left hover:bg-surface-2"
-              onClick={() => insertSkillIntoDraft(onInsert, catalog.harness, skill.name)}
-              aria-label={`Insert ${invocation} into composer draft. ${skill.description}`}
+          <section key={group.scope} aria-labelledby={`skills-${group.scope}-heading`} className="min-w-0">
+            <h3
+              id={`skills-${group.scope}-heading`}
+              className="m-0 mb-1 px-1 text-meta font-semibold uppercase tracking-wide text-muted"
             >
-              <span className="flex min-w-0 items-center justify-between gap-2">
-                <code className="min-w-0 truncate font-mono text-cell font-semibold text-accent">{invocation}</code>
-                <span className="shrink-0 text-meta text-muted">Insert into draft</span>
-              </span>
-              <span className="text-cell leading-base text-muted">{skill.description}</span>
-            </button>
-          </li>
+              {group.label}
+            </h3>
+            <ul className="m-0 list-none divide-y divide-border-soft rounded-md border border-border-soft bg-surface p-0">
+              {group.skills.map(skill => {
+                const invocation = skillInsertText(catalog.harness, skill.name);
+                const badge = skillBadge(skill.origin);
+                return (
+                  <li key={skill.name}>
+                    <button
+                      type="button"
+                      className="flex min-h-[64px] w-full flex-col items-stretch gap-1 px-3 py-2 text-left hover:bg-surface-2"
+                      onClick={() => insertSkillIntoDraft(onInsert, catalog.harness, skill.name)}
+                      aria-label={`Insert ${invocation} into composer draft. ${skill.description}`}
+                    >
+                      <span className="flex min-w-0 items-center justify-between gap-2">
+                        <code className="min-w-0 truncate font-mono text-cell font-semibold text-accent">
+                          {invocation}
+                        </code>
+                        <span className="flex shrink-0 items-center gap-2 text-meta text-muted">
+                          <span
+                            className="rounded border border-border-soft bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] leading-none text-muted"
+                            aria-label={badgeLabel(badge)}
+                          >
+                            {badge}
+                          </span>
+                          <span>Insert into draft</span>
+                        </span>
+                      </span>
+                      <span className="text-cell leading-base text-muted">{skill.description}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
         );
       })}
-    </ul>
+    </div>
   );
 }
 

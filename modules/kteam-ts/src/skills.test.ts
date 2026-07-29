@@ -71,11 +71,11 @@ describe('listSkills', () => {
     await skill('alpha', 'name: Alpha\ndescription: A');
 
     expect(await listSkills(home)).toEqual([
-      { name: 'Alpha', description: 'A' },
-      { name: 'Builtin', description: 'system skill' },
-      { name: 'Same', description: 'direct override with continuation' },
-      { name: 'same', description: 'direct name differs by case' },
-      { name: 'zebra', description: 'Z' },
+      { name: 'Alpha', description: 'A', scope: 'global', origin: 'unknown' },
+      { name: 'Builtin', description: 'system skill', scope: 'global', origin: 'unknown' },
+      { name: 'Same', description: 'direct override with continuation', scope: 'global', origin: 'unknown' },
+      { name: 'same', description: 'direct name differs by case', scope: 'global', origin: 'unknown' },
+      { name: 'zebra', description: 'Z', scope: 'global', origin: 'unknown' },
     ]);
   });
 
@@ -94,7 +94,9 @@ describe('listSkills', () => {
     expect(await listSkills(home)).toEqual([]);
 
     await skill('review-agent', 'name: review-agent\ndescription: user-selectable account override');
-    expect(await listSkills(home)).toEqual([{ name: 'review-agent', description: 'user-selectable account override' }]);
+    expect(await listSkills(home)).toEqual([
+      { name: 'review-agent', description: 'user-selectable account override', scope: 'global', origin: 'unknown' },
+    ]);
   });
 
   test('follows Home Manager root and directory links but not a manifest link', async () => {
@@ -112,7 +114,9 @@ describe('listSkills', () => {
       await mkdir(path.join(catalog, 'linked-file'), { recursive: true });
       await symlink(path.join(outside, 'foreign', 'SKILL.md'), path.join(catalog, 'linked-file', 'SKILL.md'));
 
-      expect(await listSkills(home)).toEqual([{ name: 'linked', description: 'Home Manager store entry' }]);
+      expect(await listSkills(home)).toEqual([
+        { name: 'linked', description: 'Home Manager store entry', scope: 'global', origin: 'unknown' },
+      ]);
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
@@ -127,5 +131,45 @@ describe('listSkills', () => {
     );
 
     expect(await listSkills(home)).toEqual([]);
+  });
+
+  test('groups project skills separately and derives badges from the source directories', async () => {
+    const codexFleet = path.join(home, 'codex-fleet');
+    const project = path.join(home, 'project');
+    await skill('claude-only', 'name: claude-only\ndescription: fleet Claude skill');
+    await skill('shared', 'name: shared\ndescription: fleet Claude skill');
+    await mkdir(path.join(codexFleet, 'shared'), { recursive: true });
+    await writeFile(
+      path.join(codexFleet, 'shared', 'SKILL.md'),
+      '---\nname: shared\ndescription: fleet Codex skill\n---\n',
+    );
+    await mkdir(path.join(project, '.claude', 'skills', 'local'), { recursive: true });
+    await writeFile(
+      path.join(project, '.claude', 'skills', 'local', 'SKILL.md'),
+      '---\nname: local\ndescription: project Claude skill\n---\n',
+    );
+    await mkdir(path.join(project, '.claude', 'skills', 'paired'), { recursive: true });
+    await writeFile(
+      path.join(project, '.claude', 'skills', 'paired', 'SKILL.md'),
+      '---\nname: paired\ndescription: project Claude skill\n---\n',
+    );
+    await mkdir(path.join(project, '.agents', 'skills', 'paired'), { recursive: true });
+    await writeFile(
+      path.join(project, '.agents', 'skills', 'paired', 'SKILL.md'),
+      '---\nname: paired\ndescription: project Codex skill\n---\n',
+    );
+
+    expect(
+      await listSkills(home, {
+        harness: 'claude',
+        projectRoot: project,
+        globalRoots: { claude: path.join(home, 'skills'), codex: codexFleet },
+      }),
+    ).toEqual([
+      { name: 'claude-only', description: 'fleet Claude skill', scope: 'global', origin: 'claude' },
+      { name: 'local', description: 'project Claude skill', scope: 'project', origin: 'claude' },
+      { name: 'paired', description: 'project Claude skill', scope: 'project', origin: 'both' },
+      { name: 'shared', description: 'fleet Claude skill', scope: 'global', origin: 'both' },
+    ]);
   });
 });

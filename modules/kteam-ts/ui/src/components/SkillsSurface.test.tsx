@@ -4,7 +4,9 @@ import type { ComposerSkillsCatalog } from './composer-autocomplete-providers';
 import {
   appendSkillInvocation,
   filterSkills,
+  groupSkills,
   insertSkillIntoDraft,
+  skillBadge,
   SkillsCatalogList,
   SkillsSurface,
   skillsEmptyCopy,
@@ -14,8 +16,8 @@ const catalog: ComposerSkillsCatalog = {
   harness: 'codex',
   harnessHomeResolved: true,
   skills: [
-    { name: 'frontend-design', description: 'Build polished web interfaces' },
-    { name: 'summary', description: 'Give an accessible recap' },
+    { name: 'frontend-design', description: 'Build polished web interfaces', scope: 'global', origin: 'both' },
+    { name: 'summary', description: 'Give an accessible recap', scope: 'project', origin: 'codex' },
   ],
 };
 
@@ -31,6 +33,17 @@ describe('skills surface model', () => {
     expect(skillsEmptyCopy(false, '', 0)).toContain('harness home could not be resolved');
     expect(skillsEmptyCopy(undefined, '', 0)).toContain('daemon cannot confirm');
     expect(skillsEmptyCopy(true, 'nope', 2)).toBe('No skills match “nope”.');
+  });
+
+  test('groups filtered skills by scope and never upgrades an unknown origin', () => {
+    expect(groupSkills(catalog.skills, '').map(group => [group.label, group.skills.map(skill => skill.name)])).toEqual([
+      ['Global', ['frontend-design']],
+      ['Project', ['summary']],
+    ]);
+    expect(groupSkills(catalog.skills, 'summary')[0]!.skills).toEqual([]);
+    expect(skillBadge(undefined)).toBe('unknown');
+    expect(skillBadge('not-a-real-origin' as never)).toBe('unknown');
+    expect(skillBadge('both')).toBe('both');
   });
 
   test('appends a draft token and preserves existing text', () => {
@@ -52,9 +65,25 @@ describe('skills surface rendering', () => {
     const html = renderToStaticMarkup(<SkillsCatalogList catalog={catalog} query="" onInsert={() => undefined} />);
     expect(html).toContain('$summary');
     expect(html).toContain('Give an accessible recap');
+    expect(html).toContain('>Global</h3>');
+    expect(html).toContain('>Project</h3>');
+    expect(html).toContain('>both</span>');
+    expect(html).toContain('>codex</span>');
     expect(html).toContain('Insert into draft');
     expect(html).toContain('aria-label="Insert $summary into composer draft. Give an accessible recap"');
     expect(html).not.toContain('<form');
+  });
+
+  test('renders missing provenance as an explicit unknown badge', () => {
+    const html = renderToStaticMarkup(
+      <SkillsCatalogList
+        catalog={{ ...catalog, skills: [{ name: 'legacy', description: 'Old daemon response' }] }}
+        query=""
+        onInsert={() => undefined}
+      />,
+    );
+    expect(html).toContain('>unknown</span>');
+    expect(html).toContain('aria-label="Skill origin is unknown"');
   });
 
   test('opens loading without autofocus or a focus call', async () => {

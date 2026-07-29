@@ -566,6 +566,7 @@ describe('UI to daemon route coverage', () => {
     const patterns = collected.routes.map(route => route.pattern);
     expect(patterns.some(path => path.includes('/terminals'))).toBe(true);
     expect(patterns.some(path => path.includes('/browser'))).toBe(true);
+    expect(patterns).toContain('/v1/sessions/*/skills');
     expect(patterns).toContain('/v1/sessions/*/runtime-models');
   });
 

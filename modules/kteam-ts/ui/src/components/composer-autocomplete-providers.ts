@@ -77,6 +77,9 @@ const noPins = () => EMPTY_PINS;
 export interface ComposerSkillSummary {
   name: string;
   description: string;
+  /** Optional for older daemons; absence is displayed as unknown provenance. */
+  scope?: 'global' | 'project';
+  origin?: 'claude' | 'codex' | 'both' | 'unknown';
 }
 
 export interface ComposerSkillsResponse {
