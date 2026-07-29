@@ -82,6 +82,26 @@ export interface WardenDetectOptions {
   susSubprocessSeconds: number;
 }
 
+/** A sweep observes sessions that are still live enough for a warden action.
+ *  Terminal history belongs to the activity log, not to the next warden pass.
+ *  Keep this selection separate from detection: callers that inspect a saved
+ *  historical snapshot may still use `detectAnomalies()` directly. */
+export const WARDEN_SCANNABLE_STATUSES: readonly SessionStatus[] = [
+  'running',
+  'thinking',
+  'tool_running',
+  'awaiting_question',
+  'awaiting_user',
+  'interrupted',
+  'rate_limited',
+  'retrying',
+  'waiting',
+];
+
+export function isWardenScannableStatus(status: SessionStatus): boolean {
+  return WARDEN_SCANNABLE_STATUSES.includes(status);
+}
+
 /** Statuses that MUST have a live monitor handle — a session claiming to be
  *  actively working with no monitor is a dead-monitor anomaly. */
 const ACTIVE_MONITORED: SessionStatus[] = ['running', 'thinking', 'tool_running'];

@@ -104,6 +104,7 @@ import { searchRecords } from './transcript-search';
 import {
   detectAnomalies,
   fingerprintAnomalies,
+  isWardenScannableStatus,
   WAITING_BACKSTOP_MS,
   WARDEN_LABEL,
   type WardenAnomaly,
@@ -423,10 +424,8 @@ const wardenReportInstructions = (reportPath: string): string[] => [
   '- Keep one idea per bullet.',
   '- Keep every line short and plain.',
   '- Bold one key value per bullet.',
-  `- Before writing, read the daemon spawn facts at: ${provenancePath(reportPath)}`,
-  '- Include the exact CLI, resolved model, and harness.',
-  '- Include whether failover happened.',
-  '- If failover happened, include the original CLI and exact daemon reason.',
+  '- Do not write CLI, model, harness, or failover facts: the daemon injects those from session metadata when rendering.',
+  `- The daemon-owned provenance sidecar is: ${provenancePath(reportPath)}`,
   '',
 ];
 interface WardenSweep {
@@ -7728,7 +7727,10 @@ export class SessionManager implements KTeamService {
     // the next interval fires; failures are logged, never fatal.
     void this.sweepScratch().catch(error => console.error(`kteamd: scratch gc sweep failed: ${error}`));
     const sessions = await this.list();
-    const views: WardenSessionView[] = sessions.map(view => ({
+    // A warden sweeps live work only. Terminal sessions are durable history;
+    // re-opening completed/failed/stopped work caused noisy, stale reports.
+    const scanSessions = sessions.filter(view => isWardenScannableStatus(view.state.status));
+    const views: WardenSessionView[] = scanSessions.map(view => ({
       config: view.config,
       state: view.state,
       hasLiveMonitor: this.monitors.has(view.config.id),
@@ -7750,8 +7752,8 @@ export class SessionManager implements KTeamService {
     // only current auto sessions are candidates, and no live tmux/LLM work is
     // invoked. Confirmation requires a later, time-separated sweep.
     const providerViews: ProviderSnapshotView[] = [];
-    const providerEligible = providerEligibleSessionIds(sessions);
-    const providerCandidates = sessions.filter(
+    const providerEligible = providerEligibleSessionIds(scanSessions);
+    const providerCandidates = scanSessions.filter(
       view => providerEligible.has(view.config.id) && providerSnapshotEligible(view),
     );
     for (let index = 0; index < providerCandidates.length; index += 16) {
@@ -8212,7 +8214,7 @@ export class SessionManager implements KTeamService {
               'unambiguous from its own context; otherwise state precisely what a human must decide in the report.',
             ];
     return [
-      `You are an ASSIGNED kteam warden for exactly one session: ${target.config.id} (teammate ${target.config.teammate ?? '-'}).`,
+      `You are an ASSIGNED kteam warden for exactly one session: ${target.config.id} (teammate ${target.config.teammate ? `:${target.config.teammate}` : 'unknown'}).`,
       'It was flagged sus (alive but weird) by the fleet sweep. Investigate THIS session only and deliver one verdict.',
       '',
       '## The anomaly',
@@ -8234,7 +8236,7 @@ export class SessionManager implements KTeamService {
       `- RESUME â \`kteam resume ${target.config.id}\` if the turn is dead but the session should continue.`,
       `- KILL â \`kteam stop ${target.config.id}\` ONLY if the session is demonstrably burning time/tokens with no progress.`,
       '  (Your token can stop only this assigned session.)',
-      '- NEEDS_HUMAN â no safe warden action can resolve the human decision.',
+      '- NEEDS_HUMAN â the rare exception: use only when you are genuinely uncertain whether KILL would destroy needed work or cause irreversible harm. State that exact uncertainty; never use it merely because acting feels risky.',
       '',
       '## Rules',
       '- Do NOT touch any other session. No git writes, no repository edits, no new non-warden sessions.',
@@ -8244,7 +8246,7 @@ export class SessionManager implements KTeamService {
       '```',
       'Verdict: LEAVE|NUDGE|RESUME|KILL|NEEDS_HUMAN',
       '',
-      `# Warden report â ${target.config.id} (teammate ${target.config.teammate ?? '-'}, ${target.config.label ?? '-'})`,
+      `# Warden report â ${target.config.id} (teammate ${target.config.teammate ? `:${target.config.teammate}` : 'unknown'}, ${target.config.label ?? '-'})`,
       '',
       `- **Anomaly kind:** ${anomaly.kind}`,
       '',
@@ -8424,24 +8426,26 @@ export class SessionManager implements KTeamService {
       `A deterministic sweep at ${at} found the anomalies below. Triage them and take only the SAFE, obvious recovery actions.`,
       '',
       '## ALLOWED actions',
-      '- `kteam resume <id> [message]` a stalled/failed session whose failure reason is clearly transient (network, connection, timeout, overloaded, a dropped harness process). Read the session chat/turn files first.',
+      '- `kteam resume <id> [message]` a live session whose interruption is clearly transient (network, connection, timeout, overloaded, a dropped harness process). Read the session chat/turn files first.',
       '- `kteam send <id> <nudge>` a session that looks wedged but recoverable.',
       '- `kteam migrate <id> -a <wrapper>` a QUOTA/rate-limited session onto a usable same-kind account. Only pick a wrapper from that session\'s "Migrate candidates" list below (never guess) â the session keeps its conversation and continues on the new account.',
       "- Answer a question ONLY when its answer is unambiguous from that session's OWN chat.jsonl / turns/ files. If you must guess, do not answer.",
       '',
       '## FORBIDDEN â never do these',
-      '- Do NOT stop or remove (`kteam stop`/`kteam delete`) any session.',
+      '- Do NOT remove (`kteam delete`) any session.',
+      '- Stop only a session for which your warden capability authorizes `kteam stop`, and only with clear evidence that it is burning time/tokens with no progress.',
       '- Do NOT run any git operations, and do NOT edit any repository files.',
       '- Do NOT start any non-warden session.',
       '',
       '## Required output',
       `- Write a report to EXACTLY this path: ${reportPath}`,
-      '- State what you found, what you did per session, and what still needs a human.',
-      '- Write one `## Anomaly: <session-id> â <teammate> / <label>` section per anomaly record; repeat a session in separate sections when it has multiple anomaly kinds.',
+      '- State the outcome and action per session; keep the report short.',
+      '- Write one `## Anomaly: <session-id> â :<teammate> / <label>` section per anomaly record; repeat a session in separate sections when it has multiple anomaly kinds.',
       '- Put `- **Anomaly kind:** <kind>` inside EVERY anomaly section.',
       '- Put `Verdict: LEAVE|NUDGE|RESUME|KILL|NEEDS_HUMAN` inside EVERY anomaly section.',
       '- Put `- **Outcome:** <short reason>` directly under each verdict.',
       '- Never use one fleet-wide verdict as the verdict for multiple sessions.',
+      '- Use NEEDS_HUMAN only for a genuine, explicit uncertainty about whether stopping would destroy needed work or cause irreversible harm. Otherwise act (or LEAVE) and log the outcome.',
       ...wardenReportInstructions(reportPath),
       '- When the sweep is done, run: `kteam signal done`.',
       '',
@@ -8545,7 +8549,10 @@ export class SessionManager implements KTeamService {
       return requests;
     };
     for (const verdict of verdicts) {
-      if (verdict.verdict !== 'needs_human' || !verdict.targetSession) continue;
+      // Attention is a narrow exception: a report must explicitly use the
+      // structured NEEDS_HUMAN verdict. Legacy prose may remain visible in
+      // report history, but cannot turn into a durable human interruption.
+      if (verdict.verdict !== 'needs_human' || verdict.explicitNeedsHuman !== true || !verdict.targetSession) continue;
       const view = byId.get(verdict.targetSession);
       if (!view) continue;
       const reason = verdict.reason ?? 'a warden concluded this session needs a human decision';

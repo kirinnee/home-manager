@@ -2126,6 +2126,7 @@ describe('needs_human flag + sweep dedupe (turn-018)', () => {
         targetSession: 's1',
         anomalyKind: 'abandoned_wreckage',
         verdict: 'needs_human',
+        explicitNeedsHuman: true,
         reason: 'resume fails deterministically',
         reportPath: '/r.md',
       },
@@ -2213,6 +2214,7 @@ describe('needs_human flag + sweep dedupe (turn-018)', () => {
         targetSession: 's1',
         anomalyKind: 'abandoned_wreckage',
         verdict: 'needs_human',
+        explicitNeedsHuman: true,
         reason: 'a later-written report with an older sweep title',
         reportPath: '/new-report.md',
       },
@@ -2223,6 +2225,34 @@ describe('needs_human flag + sweep dedupe (turn-018)', () => {
     expect(state.needsHuman).toBe('a later-written report with an older sweep title');
     expect(state.needsHumanReportPath).toBe('/new-report.md');
     expect(writes).toBe(2);
+  });
+
+  test('heuristic needs-human prose stays quiet without an explicit verdict marker', async () => {
+    const transient: string[] = [];
+    let state: Record<string, unknown> = { id: 's1', status: 'running', turn: 9 };
+    const manager = bareManager();
+    manager.wardenVerdicts = async () => [
+      {
+        at: 'now',
+        targetSession: 's1',
+        anomalyKind: 'sus_thinking',
+        verdict: 'needs_human',
+        reason: 'legacy prose says a human may be needed',
+        reportPath: '/heuristic.md',
+      },
+    ];
+    manager.store = {
+      updateState: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        state = mutate(state);
+        return state;
+      },
+    };
+    manager.emitTransient = (type: string) => transient.push(type);
+    await (manager as unknown as { reconcileNeedsHuman: (sessions: unknown[]) => Promise<void> }).reconcileNeedsHuman([
+      { config: { id: 's1' }, state, directory: '/x/s1' },
+    ]);
+    expect(state.needsHuman).toBeUndefined();
+    expect(transient).toEqual([]);
   });
 });
 

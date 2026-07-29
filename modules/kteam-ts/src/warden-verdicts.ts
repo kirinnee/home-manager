@@ -35,6 +35,10 @@ export interface WardenVerdict {
   /** Exact anomaly class judged by this report block. */
   anomalyKind?: WardenAnomalyKind;
   verdict: WardenVerdictKind;
+  /** True only when this exact report block carries `Verdict: NEEDS_HUMAN`.
+   *  Attention requests require this explicit marker; heuristic legacy prose
+   *  remains report history and never interrupts a human by itself. */
+  explicitNeedsHuman?: boolean;
   reason?: string;
   reportPath: string;
   /** Daemon-owned spawn facts from the report's optional JSON sidecar. */
@@ -235,6 +239,7 @@ export function parseWardenReports(files: WardenReportFile[], limit = 20): Warde
           label: b.label,
           ...(anomalyKind ? { anomalyKind } : {}),
           verdict,
+          ...(blockVerdict === 'needs_human' ? { explicitNeedsHuman: true } : {}),
           reason:
             verdictSummary(b.block) ?? reportedReason(b.block) ?? (blocks.length === 1 ? reportSummary : undefined),
           reportPath: file.path,
@@ -253,6 +258,7 @@ export function parseWardenReports(files: WardenReportFile[], limit = 20): Warde
         label: header?.label,
         ...(anomalyKind ? { anomalyKind } : {}),
         verdict: reportVerdict,
+        ...(structuredVerdict(file.content) === 'needs_human' ? { explicitNeedsHuman: true } : {}),
         reason: reportSummary,
         reportPath: file.path,
       });
