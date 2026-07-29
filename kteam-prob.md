@@ -2870,6 +2870,7 @@ escalation. Pin one test where a single sweep has both anomaly classes and cap
 
 _(Linda, session `ms3wfazx-e3f00d06`; traced independently by Dakota
 `ms3wkmyk-111d22de`; append-only diagnosis, no daemon fix.)_
+
 ---
 
 ## 2026-07-27 — `running` status hides credential-429 dead shells (liveness blind spot)
@@ -2893,7 +2894,7 @@ same account-wide failure and that "several already have" died this way.
 
 **Why the existing signals don't catch it.** `subprocess`/`pane` liveness stay fresh (the harness
 is genuinely alive and repainting its retry countdown), so the stall monitor sees a healthy
-process. The two signals that *do* discriminate — `context 0% used` after N turns, and a
+process. The two signals that _do_ discriminate — `context 0% used` after N turns, and a
 `transcript` age far exceeding turn age — are surfaced in `status` but not acted on.
 
 **Suspected code path** (`modules/kteam-ts`): the liveness/stall evaluation that feeds the
@@ -2924,7 +2925,7 @@ pane**. They sit in `starting` indefinitely and do zero work, while still counti
 `ms50memc-60fd173b`, `ms50ogy4-3531cf89`, `ms50s6wu-36444fe4`):
 
 - `events.jsonl` seq 3: `session.launch_backgrounded` — `"launch still in progress after 45s
-  (bootstrap queue); it continues in the background"`. No subsequent event.
+(bootstrap queue); it continues in the background"`. No subsequent event.
 - `logs/turn-001.txt` is **0 bytes** for every one of the five.
 - `tmux has-session -t kteam-<id>-agent` → no pane for any of the five. `tmux ls` listed only two
   panes fleet-wide, neither of them these.

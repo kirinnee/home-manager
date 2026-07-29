@@ -10,7 +10,7 @@ export function keychainSuffix(configDir: string): string {
 
 /** Read a macOS Keychain generic-password secret by service name (-w = raw). Bounded
  *  by `timeoutMs` so a locked/stalled Keychain can't hang the whole probe cycle. */
-export async function readKeychain(service: string, timeoutMs: number): Promise<string | null> {
+async function readKeychain(service: string, timeoutMs: number): Promise<string | null> {
   try {
     const proc = Bun.spawn({
       cmd: ['security', 'find-generic-password', '-s', service, '-w'],
