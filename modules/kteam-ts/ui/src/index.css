@@ -1367,19 +1367,26 @@ body {
 /* ---- chat width surface (item 5) ---------------------------------------
    The chat pane's horizontal measure, toggled by `data-chat-width` on the
    surface that wraps the transcript card + composer (SessionChatPage).
-   'readable' centers and caps the whole surface at a comfortable measure.
-   'full' removes both that outer cap and Transcript's legacy 880px inner cap,
-   so prose and code—not only overflowing tables—can use the pane. Below either
-   cap the rules are inert, which is why the setting is mostly for desktop.
-   The readable measure remains tunable per theme. */
+   'readable' caps that surface at 768px; 'balanced' is the measured middle at
+   900px. Both stay centered. 'balanced' and 'full' remove Transcript's legacy
+   880px inner cap so their prose, code and tables reach the intended surface.
+   At 768px and below every rule is inert, so all three modes remain identical
+   on phones. Both capped measures remain tunable per theme. */
 .kt-content {
   max-width: var(--chat-measure-content, 880px);
 }
+.kt-chat-surface[data-chat-width='balanced'],
 .kt-chat-surface[data-chat-width='readable'] {
-  max-width: var(--chat-measure-readable, 768px);
   margin-left: auto;
   margin-right: auto;
 }
+.kt-chat-surface[data-chat-width='balanced'] {
+  max-width: var(--chat-measure-balanced, 900px);
+}
+.kt-chat-surface[data-chat-width='readable'] {
+  max-width: var(--chat-measure-readable, 768px);
+}
+.kt-chat-surface[data-chat-width='balanced'] .kt-content,
 .kt-chat-surface[data-chat-width='full'] .kt-content {
   max-width: none;
 }

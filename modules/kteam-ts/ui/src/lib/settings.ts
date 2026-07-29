@@ -38,13 +38,17 @@ export const SETTINGS_DEFINITIONS: readonly SettingDefinition[] = [
     id: 'chat-width',
     label: 'Conversation width',
     description:
-      'Full-bleed is the default. Choose whether a wide conversation uses the available pane or is capped at 768px and centred; narrower panes look the same in either mode.',
+      'Full-bleed is the default. On a wide conversation, choose the available pane, a balanced 900px cap, or a readable 768px column; at 768px and below all three look the same.',
     keywords: [
       'chat',
       'conversation',
       'width',
       'measure',
       'readable',
+      'balanced',
+      'middle',
+      'medium',
+      'in-between',
       'full',
       'full pane',
       'full-bleed',

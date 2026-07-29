@@ -16,7 +16,17 @@ describe('SettingsPage', () => {
     expect(html).toContain('aria-label="Colour mode"');
     expect(html).toContain('aria-label="Theme family"');
     expect(html).toContain('aria-label="Where speech is transcribed"');
-    for (const label of ['Default', 'Large', 'Larger', 'Full', 'Compact', 'Minimal', 'Full-bleed', 'Readable column']) {
+    for (const label of [
+      'Default',
+      'Large',
+      'Larger',
+      'Full',
+      'Compact',
+      'Minimal',
+      'Full-bleed',
+      'Balanced',
+      'Readable column',
+    ]) {
       expect(html).toContain(`>${label}<`);
     }
     expect(html).toContain('Full-bleed · default');

@@ -209,19 +209,14 @@ export function SessionChatPage({
   // becomes the app's only top row, so it inherits the drawer trigger and the
   // theme picker. `matchMedia`-driven: it fires on the crossing, not per pixel.
   const compact = useLayoutMode() === 'drawer';
-  // CHAT WIDTH (item 5). The mechanism lives here; the settings control and the
-  // persisted store field are nina's (`SettingsPage.tsx` / `lib/store.tsx`). We
-  // read the value DEFENSIVELY off `UiControls` so that the day nina lands
-  // `chatWidth` on the additive `kteam-ui-controls-v1` payload it flows straight
-  // through with no further edit here. Until then the field is absent and we
-  // default to 'full' — full-bleed, exactly today's behaviour — so the mechanism
-  // is correct and invisible. 'readable' caps the whole chat column (transcript
-  // AND composer, so they stay aligned) at a reading measure; see `.kt-chat-surface`
-  // in index.css. It is a no-op below that measure, which is why this is "mostly
-  // for desktop": a phone viewport is already narrower than the cap.
+  // CHAT WIDTH. The store owns and defensively parses the versioned preference;
+  // this surface consumes the normalized three-value union directly so a new
+  // mode can never be silently collapsed to a boolean. 'full' remains today's
+  // uncapped default, while 'balanced' and 'readable' cap the whole chat column
+  // (transcript AND composer, so they stay aligned) at 900px and 768px. Below
+  // 768px every rule is inert, so phones render identically in all three modes.
   const [uiControls] = useUiControls();
-  const chatWidth: 'full' | 'readable' =
-    (uiControls as { chatWidth?: 'full' | 'readable' }).chatWidth === 'readable' ? 'readable' : 'full';
+  const { chatWidth } = uiControls;
   // The cached SessionView. Navigating to a session you have seen paints its
   // header immediately instead of after a round trip; the store keeps it fresh
   // from the socket (deltas + one batched GET per burst).
@@ -1317,10 +1312,10 @@ export function SessionChatPage({
         <TerminalView sessionId={sessionId} tmuxSession={view?.config.tmuxSession ?? ''} />
       ) : (
         <AttachmentImageProvider>
-          {/* CHAT WIDTH SURFACE (item 5): `data-chat-width` drives the max-width.
-              'full' (default) is full-bleed — no cap, today's behaviour. 'readable'
-              caps the whole column so transcript and composer narrow together and
-              stay centered. Below the cap this is inert (phones are unaffected). */}
+          {/* CHAT WIDTH SURFACE: `data-chat-width` drives the max-width. 'full'
+              (default) is uncapped; 'balanced' caps at 900px; 'readable' caps at
+              768px. Both caps narrow transcript and composer together and stay
+              centered. At 768px and below all three are identical. */}
           <div className="kt-chat-surface flex min-h-0 min-w-0 w-full flex-1 flex-col" data-chat-width={chatWidth}>
             {/* ONE pane scroller: the transcript. The details drawer is a fixed
               overlay with its own internal scroller, so this stays true.

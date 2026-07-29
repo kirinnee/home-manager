@@ -36,6 +36,7 @@ describe('shared settings catalog', () => {
     expect(settingsPaletteEntries('density')[0]?.settingId).toBe('density');
     expect(settingsPaletteEntries('conversation width')[0]?.settingId).toBe('chat-width');
     expect(settingsPaletteEntries('full-bleed')[0]?.settingId).toBe('chat-width');
+    expect(settingsPaletteEntries('balanced')[0]?.settingId).toBe('chat-width');
     expect(settingsPaletteEntries('markdown preview')[0]?.settingId).toBe('composer-markdown');
     expect(settingsPaletteEntries('dark').map(entry => entry.settingId)).toContain('theme');
     expect(settingsPaletteEntries('microphone').map(entry => entry.settingId)).toContain('dictation');
