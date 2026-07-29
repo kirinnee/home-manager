@@ -2,7 +2,16 @@ import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { credStatus, isOAuth, pickDonor, syncIdentity } from './login';
+import {
+  credStatus,
+  filterLiveIdentities,
+  interactiveLogin,
+  isOAuth,
+  loginMember,
+  pickDonor,
+  resolveLoginTarget,
+  syncIdentity,
+} from './login';
 import type { Identity, MemberStatus } from './login';
 
 // A JWT whose exp is far in the future / past (payload only — exp in seconds).
@@ -41,6 +50,136 @@ describe('pickDonor', () => {
   test('refreshable is donor when nothing valid; none when all missing', () => {
     expect(pickDonor([m('a', 'missing'), m('b', 'refreshable', 2)])?.name).toBe('b');
     expect(pickDonor([m('a', 'missing'), m('b', 'missing')])).toBeUndefined();
+  });
+});
+
+describe('loginMember', () => {
+  test('prefers the default variant, falls back to the first member, and rejects an empty identity', () => {
+    const auto: MemberStatus = { name: 'auto-kirin', variant: 'auto', dir: '/tmp/auto', state: 'missing' };
+    const normal: MemberStatus = { name: 'kirin', variant: 'default', dir: '/tmp/default', state: 'missing' };
+    const identity: Identity = { kind: 'claude', base: 'kirin', oauth: true, members: [auto, normal] };
+
+    expect(loginMember(identity)).toBe(normal);
+    expect(loginMember({ ...identity, members: [auto] })).toBe(auto);
+    expect(() => loginMember({ ...identity, members: [] })).toThrow(/no members/);
+  });
+});
+
+describe('filterLiveIdentities', () => {
+  const identity = (base: string): Identity => ({
+    kind: 'claude',
+    base,
+    oauth: true,
+    members: [
+      { name: `auto-${base}`, variant: 'auto', dir: `/tmp/auto-${base}`, state: 'missing' },
+      { name: base, variant: 'default', dir: `/tmp/${base}`, state: 'missing' },
+    ],
+  });
+
+  test('probes default members concurrently and partitions working from failed identities', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const calls: string[] = [];
+    const result = await filterLiveIdentities(
+      [identity('works'), identity('broken')],
+      async member => {
+        calls.push(`${member.kind}-${member.name}`);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await Bun.sleep(5);
+        active -= 1;
+        return member.name === 'works' ? { up: true } : { up: false, error: 'token rejected' };
+      },
+      2,
+    );
+
+    expect(calls.sort()).toEqual(['claude-broken', 'claude-works']);
+    expect(maxActive).toBe(2);
+    expect(result.live.map(item => item.identity.base)).toEqual(['works']);
+    expect(result.dead.map(item => [item.identity.base, item.error])).toEqual([['broken', 'token rejected']]);
+  });
+
+  test('turns a thrown probe error into an interactive-login candidate', async () => {
+    const result = await filterLiveIdentities([identity('kirin')], async () => {
+      throw new Error('probe crashed');
+    });
+
+    expect(result.live).toEqual([]);
+    expect(result.dead[0]?.error).toBe('probe crashed');
+  });
+
+  test('carries the selected wrapper env into the probe target', async () => {
+    const target = identity('kirin');
+    target.members[1]!.env = { CLAUDE_CODE_OAUTH_TOKEN: '$CLAUDE_CODE_OAUTH_TOKEN' };
+    let seen: Record<string, string> | undefined;
+
+    await filterLiveIdentities([target], async member => {
+      seen = member.env;
+      return { up: true };
+    });
+
+    expect(seen).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: '$CLAUDE_CODE_OAUTH_TOKEN' });
+  });
+});
+
+describe('resolveLoginTarget', () => {
+  const identity: Identity = {
+    kind: 'claude',
+    base: 'kirin',
+    oauth: true,
+    members: [{ name: 'kirin', variant: 'default', dir: '/tmp/kirin', state: 'missing' }],
+  };
+
+  test('uses the generated member wrapper when available', () => {
+    const target = resolveLoginTarget(identity, {
+      resolveWrapper: () => ({ binary: 'claude-kirin', resolved: '/managed/claude-kirin' }),
+      which: () => {
+        throw new Error('raw lookup must not run');
+      },
+    });
+
+    expect(target.via).toBe('wrapper');
+    expect(target.cmd).toEqual(['/managed/claude-kirin', '/login']);
+  });
+
+  test('falls back to the raw binary and keeps the existing missing-CLI error', () => {
+    const resolveWrapper = () => ({ binary: 'claude-kirin' });
+    expect(resolveLoginTarget(identity, { resolveWrapper, which: () => '/usr/bin/claude' })).toMatchObject({
+      via: 'raw',
+      cmd: ['/usr/bin/claude', '/login'],
+    });
+    expect(() => resolveLoginTarget(identity, { resolveWrapper, which: () => null })).toThrow(/CLI is not installed/);
+  });
+
+  test('seeds first-run flags before spawning the raw fallback', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'kfleet-login-raw-'));
+    const targetApiKey = 'sk-ant-raw-target-key-that-is-longer-than-twenty';
+    const rawIdentity: Identity = {
+      ...identity,
+      members: [{ ...identity.members[0]!, dir, env: { ANTHROPIC_API_KEY: targetApiKey } }],
+    };
+    let spawned = false;
+
+    await interactiveLogin(rawIdentity, {
+      resolveWrapper: () => ({ binary: 'claude-kirin' }),
+      which: () => '/usr/bin/claude',
+      cwd: '/workspace',
+      env: { PATH: '/bin', CLAUDECODE: '1', ANTHROPIC_API_KEY: 'wrong-inherited-key' },
+      spawn: options => {
+        const config = JSON.parse(readFileSync(path.join(dir, '.claude.json'), 'utf8')) as Record<string, any>;
+        expect(config.hasCompletedOnboarding).toBe(true);
+        expect(config.projects['/workspace'].hasTrustDialogAccepted).toBe(true);
+        expect(config.customApiKeyResponses.approved).toEqual([targetApiKey.slice(-20)]);
+        expect(options.cmd).toEqual(['/usr/bin/claude', '/login']);
+        expect(options.env.CLAUDE_CONFIG_DIR).toBe(dir);
+        expect(options.env.ANTHROPIC_API_KEY).toBe(targetApiKey);
+        expect(options.env.CLAUDECODE).toBeUndefined();
+        spawned = true;
+        return { exited: Promise.resolve(0) };
+      },
+    });
+
+    expect(spawned).toBe(true);
   });
 });
 

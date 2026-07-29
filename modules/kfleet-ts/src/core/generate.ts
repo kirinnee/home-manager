@@ -67,6 +67,8 @@ const wrapperPath = (a: { kind: string; name: string }): string => path.join(bin
 //       chose true is never clobbered.
 // Runs on every launch (guarded so it's a no-op once all flags are set), which
 // self-heals any dir regardless of how it was created. Toggle with CLAUDE_AUTOTRUST=0.
+// Login/health also seed these fields without jq in firstrun.ts; keep the two
+// implementations aligned while wrappers retain their launch-time self-heal.
 const AUTOTRUST = `if [ "\${CLAUDE_AUTOTRUST:-1}" = "1" ]; then
   _ct_cfg="$CLAUDE_CONFIG_DIR/.claude.json"
   if command -v jq >/dev/null 2>&1 && ! jq -e --arg d "$PWD" '((.projects[$d].hasTrustDialogAccepted) == true) and (.hasCompletedOnboarding == true) and (.hasCompletedClaudeInChromeOnboarding == true) and (.claudeInChromeDefaultEnabled != null)' "$_ct_cfg" >/dev/null 2>&1; then
