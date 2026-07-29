@@ -1,155 +1,203 @@
-# Unified side pane tabs — design (board F146, wave 1)
+# Unified side pane tabs — design (board F146, per-instance rework)
 
 ## Goal
 
-Every session-scoped surface (web, files, tasks, terminals, pins, skills,
-tree/lineage, mcp, needs/attention, cost/analytics) becomes ONE tab system in
-the side pane. A **+ button** opens a picker to choose what is visible.
-Default tabs: **pins, tasks, skills, tree, mcp, needs, cost**. On mobile the
-tabs are NEVER a horizontal strip — a tab control opens a modal to switch.
+The side pane strip is IDE-shaped. Two kinds of tab:
 
-## One model, one new file
+1. **Utility tabs** — singletons, the defaults, toggled via the + picker:
+   **pins, tasks, skills, tree (lineage), mcp, needs (attention), cost
+   (analytics)**. Unchanged from wave 1.
+2. **Instance tabs** — **one tab per open file, one per open browser page,
+   one per terminal**. Open `api.ts` and `README.md` and you get TWO file
+   tabs, each showing its own file, each closable independently. Two pages =
+   two browser tabs, each with its own page state.
 
-`ui/src/lib/side-pane-tab-model.ts` owns BOTH halves of tab identity:
+```
+[Pins][Tasks][Skills][Tree][MCP][Needs][Cost][api.ts][README.md][github.com][term 1][+]
+```
 
-1. **The tab registry** — which tabs exist at all.
-2. **The per-session tab state** — which tabs are open in a session's strip,
-   and which one is active.
+This corrects wave 1, which shipped `browser` and `files` as singletons (one
+shared Browser tab, one shared Files tab). The human's ruling, verbatim:
+_"i meant to add a single browser tab and a single file tab! for that
+feature! …and the answer is 1 tab per file!"_
 
-Both are module-level external stores (subscribe + versioned snapshot), read
-by React through `useSyncExternalStore`. Module state, not React state, for
-the same reason the old `sessionPanes` map was: retained session panes are
-created and destroyed by the App-level LRU, and an evicted-then-revisited
-session must come back to the tabs it had.
+On mobile the tabs are NEVER a horizontal strip — a tab control opens a modal
+to switch, exactly as before, now listing instance tabs with their labels and
+per-tab close.
 
-### Tab identity
+## One model, one file
+
+`ui/src/lib/side-pane-tab-model.ts` owns tab identity and per-session state.
+Module-level external stores (subscribe + versioned snapshot) read through
+`useSyncExternalStore`, so an evicted-then-revisited session comes back to the
+tabs it had.
+
+### Instance identity
 
 ```ts
-type SidePaneTabId = string; // built-ins use the SidePaneSurface literals
+type SidePaneInstanceKind = 'file' | 'browser' | 'terminal';
 
-interface SidePaneTabDefinition {
-  id: SidePaneTabId;
-  label: string; // full accessible name ("Lineage")
-  shortLabel: string; // compact strip name ("Tree")
-  closeLabel: string; // sheet dismiss label
-  icon: LucideIcon;
-  /** Strip position; open tabs render sorted by this, then by label. */
-  order: number;
-  /** Member of the default strip for every new session. */
-  defaultOpen?: boolean;
-  /** Honest capability gate: tab renders an explicit placeholder body. */
-  unavailableReason?: string;
-  /** Once opened, stays mounted (hidden) on desktop — live sockets etc. */
-  retain?: boolean;
-  /** Wave-2 seam: body for tabs registered OUTSIDE SidePane.tsx. Built-in
-   *  surfaces omit it (SidePane renders them via its own switch, which needs
-   *  bespoke delivery props the generic contract must not grow). */
-  render?: (props: SidePaneTabRenderProps) => ReactNode;
+interface SidePaneTabInstance {
+  id: SidePaneTabId; // `${kind}:${key}` — file:src/api.ts, browser:page-7, terminal:t1
+  kind: SidePaneInstanceKind;
+  key: string; // file path | page id | terminal id
+  label: string; // SHORT strip label: basename / page host or title / terminal name
+  title: string; // FULL path or URL — the hover title and accessible name
+  order: number; // insertion counter; kinds group files → pages → terminals
+  destination?: BrowserDestination | null; // browser pages carry their own page state
+  selection?: SidePaneFileSelection; // file tabs carry a delivered line range
+  revision: number; // bumps on re-delivery, so "same tab, new line range" is observable
 }
 ```
 
-The ten built-in surfaces are declared IN the model file (single source of
-truth, no import cycle); `SIDE_PANE_SURFACES` in SidePane.tsx is re-derived
-from them so every existing consumer (bento launcher, LineageSurface.test)
-keeps its import unchanged.
+Ids carry the instance (`file:<path>`, `browser:<pageId>`, `terminal:<id>`);
+utility tabs keep their plain singleton ids. `parseSidePaneInstanceTabId`
+recognises exactly the three kinds — a wave-2 singleton id containing a colon
+is not misread as an instance.
 
-**Registration surface (wave 2):** `registerSidePaneTab(def)` → unregister
-fn; `getSidePaneTabDefinition(s)`, `subscribeSidePaneTabRegistry`. A wave-2
-module (browser HUD, files bar, skills groups, shared search) registers from
-its own module scope — every current surface module is already imported by
-SidePane.tsx, so registration executes without touching wave-1 files. Late
-registration is live: the registry is versioned and the strip re-renders.
-Duplicate ids replace (last registration wins) so hot reload cannot dupe.
+### The open calls — one path per kind
 
-### Per-session state
+- `openSidePaneFileTab(sessionId, path, selection?)` — **one tab per file.**
+  Opening a path already in the strip FOCUSES the existing tab (and updates
+  its selection + revision); it never duplicates. Labels: basename in the
+  strip, full path on hover. EVERY entry point that opens a file routes here:
+  transcript file links and code references land via the host's
+  `openCodeReference` (SidePane.tsx), and the files tree's row-open is a
+  one-line integration through the same host callback.
+- `openSidePaneBrowserTab(sessionId, destination?, {forceNew?})` — **one tab
+  per page.** A destination already open in some page focuses that page;
+  otherwise a new page tab with its own state. `forceNew` (the + picker's
+  "New Browser tab") always creates a fresh empty page. With no destination,
+  the most recent page is focused when one exists. Labels: page host (or
+  "New page"), full URL on hover; `setSidePaneInstanceLabel` retitles on
+  navigation.
+- `openSidePaneTerminalTab(sessionId, terminalId, label?)` — **one tab per
+  terminal**, same focus-not-duplicate contract. The terminals deck stays the
+  working singleton until its owner lands the one-line calls (see
+  Integration).
 
-```ts
-interface SidePaneTabsState {
-  open: readonly SidePaneTabId[]; // the strip, unordered set semantics
-  active: SidePaneTabId | null; // null = pane closed
-  browser: BrowserDestination | null; // browser payload rides along, as before
-}
-```
+Closing an instance tab (`removeSidePaneTab` on an instance id) DISPOSES only
+that instance: it leaves `open` and the `instances` map, its retained body
+unmounts, and `subscribeSidePaneInstanceClose` listeners fire (the deck kills
+its pty there). Closing the last file tab leaves NO phantom "Files"/"Browser"
+tab — the strip simply shrinks to what is actually open, with the nearest
+neighbour activated. Singleton removal keeps wave-1 semantics (a hidden
+retained deck keeps its scrollback).
 
-Defaults for a fresh session: `open` = the `defaultOpen` definitions —
-**pins, tasks, skills, lineage (Tree), mcp, attention (Needs), analytics
-(Cost)** — `active: null`.
+### Legacy singletons and the + picker
 
-Actions (all `(sessionId, …)`, all bump one global version so any workspace
-or wave-2 listener can subscribe):
+- The `browser` registry entry is now a CATALOGUE entry (`instanceKind:
+'browser'`): its id never enters the strip. `openSidePaneTab(sessionId,
+'browser')` — the bento launcher, old header toggles — redirects to
+  focus-or-create a page instance. In the + picker it renders as an ACTION
+  ("New Browser tab", "Opens a new tab"), never a pressed toggle, and always
+  creates a fresh page (requirement: + adds a NEW instance).
+- The `files` entry stays a singleton: it is the file PICKER — the directory
+  tree. Files opened FROM it become per-file instance tabs. It is a tab only
+  when the reader explicitly adds it; no file open ever materialises it.
+- The `terminals` entry stays the deck singleton until integration; the model
+  already speaks `terminal:<id>`.
+- `SidePaneTabsState.browser` (the wave-1 singleton payload) survives as the
+  back-compat seam for the historical `readSidePaneState` snapshot; live
+  pages each carry their own `destination`.
 
-- `openSidePaneTab(id)` — add to `open` if absent, set active. This is the
-  ONE path used by the + picker, header toggles, transcript links,
-  `openTask`/`openCodeReference`/`openAttention`/`openPin` — so a programmatic
-  open of a non-default surface (files, browser, terminals) adds its tab.
-- `activateSidePaneTab(id)` — switch among open tabs.
-- `deactivateSidePane()` — close the pane; the open set survives.
-- `removeSidePaneTab(id)` — take a tab out of the strip (picker toggle-off).
-  If it was active, activate its nearest open neighbour (or close the pane
-  when it was the last tab). Any tab, including defaults, may be removed —
-  "we can select what we want to see". Removal does NOT unmount a retained
-  surface (terminals scrollback / browser profile survive being hidden;
-  deliberate, same retention rules as switching away).
-- `setSidePaneBrowserDestination(dest)` — browser payload write.
+### Rendering instance tabs
 
-State is per-session and in-memory (module map), exactly the scope the old
-snapshot had. Persisting the chosen tab set as a durable preference is a
-possible follow-up, not in this wave.
+`resolveSidePaneTab(sessionId, id)` resolves registry entries as registered
+and SYNTHESIZES a definition for an open instance (label = full path/URL,
+shortLabel = basename/host, `closeLabel`, kind icon, kind-grouped strip
+order, `retain` for browser/terminal, the instance attached). An id that is
+neither registered nor a live instance resolves to nothing — an unknown tab
+must not invent a position, and its body (if somehow active) says so.
 
-**Back-compat seam:** `readSidePaneState` / `writeSidePaneState` /
-`resetSidePaneStates` and the `SidePaneSnapshot {surface, browser}` shape stay
-exported from SidePane.tsx as thin views over the model (`surface` ≡
-`active`), so existing tests and any external caller keep working.
+Bodies:
+
+- **file** — `FileInstanceSurface` in SidePane.tsx: fetches through the same
+  daemon endpoint as the Files tree (`fsApi.file`), renders through the files
+  surface's own exported `FileBody` (Markdown as prose, highlighting, the
+  daemon's refusal verdicts), honours the delivered line range and scrolls it
+  into view once per delivery (`revision`). Loading and failure render as
+  themselves, with retry — never as an empty file.
+- **browser** — one `UnifiedBrowserSurface` per page tab, each mounted (and
+  retained) separately with its own destination, engine choice and history.
+- **terminal** — `registerSidePaneInstanceBody('terminal', render)`: the
+  wave-2 seam EXTENDED, not forked. `registerSidePaneTab` still covers
+  singleton tabs exactly as wave 2 builds against it; an instance KIND
+  registers one body for all its tabs, from its owner's module scope. Until
+  the deck registers, a terminal tab renders the honest "no terminal body is
+  registered" placeholder (and nothing in-tree opens one yet).
+
+Retention: browser pages and terminals retain per instance (hidden, mounted,
+desktop only); files remount per open — a fetch is cheap, and remount is what
+keeps transient state honest. A retained id must still RESOLVE to stay
+mounted: closing a page disposes it, it is not parked invisibly forever.
 
 ## SidePaneTabs.tsx — two presentations, never a mobile strip
 
-- **Desktop (`presentation: 'pane'`)**: a real WAI-ARIA tablist of the OPEN
-  tabs (roving tabindex, wrap-around arrows, Home/End — unchanged policy),
-  followed by a sibling **+ button** (`aria-haspopup="dialog"`, label "Add or
-  remove tabs") that opens an anchored non-modal picker popover (same
-  pointer-down-outside + Escape dismissal as the launcher popover).
-- **Mobile (`presentation: 'sheet'`)**: NO tablist at all. One **tab
-  control** — a 44px button row showing the active tab's icon + label with an
-  explicit "Switch tab" affordance — opens a **modal** (the shared
-  focus-trapped BottomSheet, z-[80] above the surface sheet at z-[70]).
-  The modal lists every OPEN tab (tap → activate + dismiss, current one marked
-  `aria-current`) and, under a separator, the not-yet-open definitions ("Add a
-  tab": tap → open + activate + dismiss) plus per-row remove toggles for open
-  ones. So the one modal is both the switcher the requirement names and the
-  mobile home of the + picker.
-- **Picker rows** for unavailable tabs (mcp) stay ENABLED as tabs — the human
-  named mcp a default tab; its body is the honest "no data source" placeholder
-  (rule: absence renders as unknown, and a tab that exists but has no data is
-  exactly that). The top-bar bento launcher keeps its old disabled treatment —
-  it opens data sources, the strip shows chosen tabs.
-- `sidePaneTabId` / `sidePanePanelId` / `nextSidePaneTab` keep their exports.
-  `role=tabpanel` + `aria-labelledby` wiring is desktop-only; the mobile body
-  is a plain region inside the sheet dialog (there is no tab element to label
-  it, and the sheet itself is labelled by the surface title).
+- **Desktop (`pane`)**: the WAI-ARIA tablist of open tabs (roving tabindex,
+  wrap-around arrows, Home/End) + the sibling + picker. THE STRIP IS EXACTLY
+  ONE ROW: `overflow-x-auto overflow-y-hidden` — `overflow-x: auto` alone
+  computes `overflow-y` as auto and grows the phantom vertical scrollbar the
+  human flagged (2026-07-29 screenshot); the + button stays pinned at the
+  end outside the scroller. Instance tabs render icon + basename/host
+  (`max-w-[148px]`, truncated, full path/URL as hover title and accessible
+  name) plus a close affordance: a pointer ✕ (presentation span — a nested
+  button is invalid inside `role=tab`) and the **Delete key**
+  (`aria-keyshortcuts="Delete"`). Singleton tabs are untouched.
+- **Mobile (`sheet`, 390px)**: NO tablist, ever. The single 44px tab control
+  names the active tab (instance tabs by short label) and opens the
+  focus-trapped switcher modal (shared BottomSheet, z-[80]): every open tab
+  with the current one marked and PER-TAB close — "Close api.ts tab" for
+  instances, "Remove X tab" for singletons — then the "Add a tab" catalogue.
+  An `instanceKind` entry stays offered even while pages are open ("one
+  more"), and reads "New Browser tab".
+- `sidePaneTabId`/`sidePanePanelId`/`nextSidePaneTab` keep their exports and
+  the keyboard policy is unchanged.
 
 ## SidePane.tsx changes
 
-- Workspace reads `{open, active, browser}` from the model with
-  `useSyncExternalStore` (snapshot identity is cached per session, version
-  bumps on write). `host.open/close/toggle` map to model actions; delivery
-  requests (task/code-ref/attention/pin sequences) stay exactly as they are.
-- `SurfaceBody` keeps its bespoke switch for the ten built-ins; an active tab
-  that is NOT a built-in renders its registered `render(props)`, and an id
-  with no registration renders an explicit unknown-tab placeholder (never a
-  confident default).
-- Retention (`RETAINED_SURFACES`, everRetained, hidden-shell) is unchanged.
-- Bento launcher, announcements, focus rules (never steal on open, restore
-  opener on close), non-modal desktop pane, mobile BottomSheet: unchanged.
+- `openCodeReference` → `openSidePaneFileTab(sessionId, reference.path,
+selection)`. The request-channel plumbing (`requestedCodeReference`,
+  sequence ref) is gone: the line range rides ON the instance, revisioned by
+  the model. Task/attention/pin deliveries are untouched.
+- `openDestination` (transcript links via InAppBrowserContext) →
+  `openSidePaneBrowserTab(sessionId, destination)`; the legacy singleton
+  payload is still written for historical snapshot readers.
+- `SurfaceBody` routes instance tabs first (file/browser built-in bodies,
+  terminal via the registered kind body), then the wave-1 singleton switch,
+  then registered wave-2 renders, then the explicit unknown placeholder.
+- Announcements name the instance's short label; browser announcements append
+  the page's own URL, not a shared payload.
+- Focus rules (never steal on open, restore opener on close), the non-modal
+  desktop pane, the mobile BottomSheet, resize, and the bento launcher are
+  unchanged.
+
+## Integration lines OUTSIDE this ownership (for the lead)
+
+1. **Files tree (turner, FilesTab.tsx)** — in the tree's row-open path, call
+   the host instead of appending an internal tab:
+   `onCodeReferenceOpen?.({ path })` (the prop FilesTab already receives).
+   Its internal `OpenFileTabs` strip can then retire.
+2. **Terminals deck (WebTerminals.tsx)** — on terminal create/select:
+   `openSidePaneTerminalTab(sessionId, term.id, term.title)`; subscribe
+   `subscribeSidePaneInstanceClose` to kill the pty when a terminal tab is
+   closed; register the per-terminal body with
+   `registerSidePaneInstanceBody('terminal', …)`.
+3. **Browser HUD (detrick)** — on navigation/title change:
+   `setSidePaneInstanceLabel(sessionId, tabId, { label: title || host,
+title: url, destination })`.
 
 ## Testing
 
-- Model: defaults seed the human's seven tabs; open/activate/remove/neighbour
-  policies; per-session isolation; registry register/replace/unregister and
-  version bumps; back-compat snapshot views.
-- SidePaneTabs: desktop markup (tablist, + button present, roving tabindex,
-  no autofocus); mobile markup (NO role=tablist, no overflow-x strip, tab
-  control advertises the modal); keyboard policy fn unchanged.
-- SidePane.test.tsx updated where markup counts changed (compact sheet no
-  longer renders 9 tabs; desktop strip shows the open set) — flagged to the
-  lead: that file was pre-existing and is touched only to keep its contract
-  assertions true.
+- Model: one-tab-per-file focus-not-duplicate; selection re-delivery bumps
+  revision; per-page tabs with same-href focus and `forceNew`; the legacy
+  `browser` redirect; kind grouping and insertion order; instance disposal +
+  close listeners; no-phantom-tab on last close; synthesized definitions;
+  label derivation (basename/host, full title); id parsing; instance-body
+  registration. Wave-1 suites (defaults, singleton removal, registry seam)
+  unchanged and passing.
+- SidePaneTabs: strip one-row overflow contract; instance tab label/title/✕/
+  Delete markup; picker "New …" action rows; switcher modal instance rows.
+- SidePane: two files = two tabs with no phantom Files tab; per-page
+  announcement with the page's own URL; source contract that references and
+  destinations route through the instance calls.

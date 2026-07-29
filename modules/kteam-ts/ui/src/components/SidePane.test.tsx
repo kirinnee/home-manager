@@ -25,6 +25,7 @@ import {
   type SidePaneHost,
 } from './SidePane';
 import { browserDestination } from './InAppBrowser';
+import { openSidePaneBrowserTab, openSidePaneFileTab } from '../lib/side-pane-tab-model';
 
 let capturedHost: SidePaneHost | null = null;
 
@@ -175,12 +176,13 @@ describe('workspace', () => {
     expect(typeof capturedHost?.openPin).toBe('function');
   });
 
-  test('code-reference delivery stays monotonic and clears only the handled sequence', async () => {
+  test('a code reference opens a per-file instance tab carrying its line range', async () => {
     const source = await Bun.file(new URL('./SidePane.tsx', import.meta.url)).text();
-    expect(source).toContain('const codeReferenceSequence = useRef(0);');
-    expect(source).toContain('sequence: ++codeReferenceSequence.current');
-    expect(source).toContain('requestedReference={requestedCodeReference}');
-    expect(source).toContain('current?.sequence === sequence ? null : current');
+    // The one open-instance call: transcript links, code references and the
+    // files tree all route here instead of a shared singleton Files tab.
+    expect(source).toContain('openSidePaneFileTab(sessionId, reference.path, selection)');
+    // A destination becomes a per-page instance tab through the same model.
+    expect(source).toContain('openSidePaneBrowserTab(sessionId, destination)');
   });
 
   test('pin delivery is session-scoped, monotonic, and clears only the handled sequence', async () => {
@@ -238,6 +240,41 @@ describe('workspace', () => {
     expect(html).toContain('Where to?');
     expect(html).toContain('Nothing opens until you choose where to go.');
     expect(html).not.toContain('autofocus');
+  });
+
+  test('two open files are two tabs, each closable, with no phantom Files tab', () => {
+    openSidePaneFileTab('session-a', 'src/api.ts');
+    openSidePaneFileTab('session-a', 'README.md', { line: 3 });
+    const html = renderToStaticMarkup(
+      <SidePaneWorkspace sessionId="session-a" compact={false} cwd="/repo/worktree">
+        <main>Conversation</main>
+      </SidePaneWorkspace>,
+    );
+    // Seven default utility tabs plus one tab PER FILE.
+    expect(html).toContain('aria-label="src/api.ts"');
+    expect(html).toContain('aria-label="README.md"');
+    expect(html.match(/aria-keyshortcuts="Delete"/g)?.length).toBe(2);
+    // The singleton Files (tree) tab did not sneak into the strip.
+    expect(html).not.toContain('aria-label="Files"');
+    // The active file body names its path and loads honestly (no data in a
+    // static render — the loading state is the truthful body).
+    expect(html).toContain('>README.md</h2>');
+    expect(html).toContain('Loading README.md');
+    expect(html).not.toContain('autofocus');
+  });
+
+  test('a browser page instance announces its own URL, not a shared payload', () => {
+    const dest = browserDestination('https://example.com/docs', 'https://app.example.test/')!;
+    const id = openSidePaneBrowserTab('session-a', dest);
+    const html = renderToStaticMarkup(
+      <SidePaneWorkspace sessionId="session-a" compact={false}>
+        <main>Conversation</main>
+      </SidePaneWorkspace>,
+    );
+    expect(id.startsWith('browser:')).toBe(true);
+    expect(html).toContain('Opened example.com beside the conversation: https://example.com/docs');
+    // The page tab is in the strip under its host label.
+    expect(html).toContain('aria-label="https://example.com/docs"');
   });
 
   test('the Terminals tab hosts the real retained terminal deck', () => {

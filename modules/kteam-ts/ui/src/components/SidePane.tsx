@@ -52,6 +52,7 @@ import {
   Cable,
   ChartNoAxesCombined,
   CircleAlert,
+  FileCode2,
   FolderGit2,
   GitFork,
   LayoutGrid,
@@ -63,19 +64,25 @@ import {
 import {
   activateSidePaneTab,
   deactivateSidePane,
+  getSidePaneInstanceBody,
   getSidePaneTabDefinition,
   getSidePaneTabDefinitions,
+  openSidePaneBrowserTab,
+  openSidePaneFileTab,
   openSidePaneTab,
   readSidePaneTabsState,
   removeSidePaneTab,
   resetSidePaneTabsStates,
+  resolveSidePaneTab,
   SIDE_PANE_BUILT_IN_TABS,
   sortSidePaneTabs,
   subscribeSidePaneTabRegistry,
   subscribeSidePaneTabsState,
   writeSidePaneTabsState,
+  type SidePaneInstanceKind,
   type SidePaneTabDefinition,
   type SidePaneTabId,
+  type SidePaneTabInstance,
 } from '../lib/side-pane-tab-model';
 import {
   clampSidePaneWidth,
@@ -88,13 +95,14 @@ import {
   SIDE_PANE_WORKSPACE_GAP,
   subscribeSidePanePreferences,
 } from '../lib/side-pane-preferences';
-import type { CodeReference, CodeReferenceOpenRequest } from '../lib/code-references';
+import type { CodeReference } from '../lib/code-references';
 import type { AttentionId } from '../lib/attention';
 import type { PinReferenceLookup } from '../lib/remark-session-references';
 import { BottomSheet } from './SessionDetails';
 import { Button } from './Primitives';
 import { InAppBrowserContext, type BrowserDestination, type InAppBrowserHost } from './InAppBrowser';
-import { FilesTab } from './FilesTab';
+import { describeFsError, fsApi, isAbort, type FsFile } from './files-api';
+import { FileBody, FilesTab } from './FilesTab';
 import { PinSurface, type PinOpenRequest } from './PinSheet';
 import { SessionTasksSurface, type TaskOpenRequest } from './SessionTasks';
 import { AnalyticsSurface } from './AnalyticsSurface';
@@ -170,10 +178,14 @@ export function sidePaneAnnouncement(
   surface: SidePaneTabId,
   presentation: SidePanePresentation,
   browser: BrowserDestination | null,
+  /** Resolved label for instance tabs (a file's path, a page's URL host);
+   *  singleton ids keep resolving through the registry. */
+  label?: string,
 ): string {
-  const label = getSidePaneTabDefinition(surface)?.label ?? surface;
-  const base = presentation === 'pane' ? `Opened ${label} beside the conversation` : `Opened ${label}`;
-  return surface === 'browser' && browser ? `${base}: ${browser.href}` : base;
+  const resolved = label ?? getSidePaneTabDefinition(surface)?.label ?? surface;
+  const base = presentation === 'pane' ? `Opened ${resolved} beside the conversation` : `Opened ${resolved}`;
+  const isBrowser = surface === 'browser' || surface.startsWith('browser:');
+  return isBrowser && browser ? `${base}: ${browser.href}` : base;
 }
 
 // ---- per-session memory ------------------------------------------------------
@@ -202,6 +214,7 @@ export function writeSidePaneState(sessionId: string, next: SidePaneSnapshot): v
     open: next.surface && !current.open.includes(next.surface) ? [...current.open, next.surface] : current.open,
     active: next.surface,
     browser: next.browser,
+    instances: current.instances,
   });
 }
 
@@ -315,16 +328,12 @@ function FilesSurface({
   presentation,
   titleId,
   onClose,
-  requestedReference,
-  onRequestedReferenceHandled,
   onTaskOpen,
   onCodeReferenceOpen,
   onAttentionOpen,
   onPinOpen,
 }: SurfaceProps & {
   cwd?: string;
-  requestedReference?: CodeReferenceOpenRequest | null;
-  onRequestedReferenceHandled?: (sequence: number) => void;
   onTaskOpen?: SidePaneHost['openTask'];
   onCodeReferenceOpen?: SidePaneHost['openCodeReference'];
   onAttentionOpen?: NonNullable<SidePaneHost['openAttention']>;
@@ -341,13 +350,13 @@ function FilesSurface({
         closeLabel={SIDE_PANE_SURFACES.files.closeLabel}
       />
       {/* FilesTab is re-hosted, not redesigned: it owns its sections, viewer
-          stack, probe and error copy exactly as it did as a page tab. */}
+          stack, probe and error copy exactly as it did as a page tab. Line
+          deliveries no longer arrive here — a code reference opens its own
+          per-file instance tab carrying the selection. */}
       <div className="flex min-h-0 flex-1 flex-col px-panel pb-2 pt-2">
         <FilesTab
           sessionId={sessionId}
           cwd={cwd}
-          requestedReference={requestedReference}
-          onRequestedReferenceHandled={onRequestedReferenceHandled}
           onTaskOpen={onTaskOpen}
           onCodeReferenceOpen={onCodeReferenceOpen}
           onAttentionOpen={onAttentionOpen}
@@ -432,6 +441,116 @@ function AnalyticsPaneSurface({ sessionId, presentation, titleId, onClose }: Sur
   );
 }
 
+/** ONE FILE, ONE TAB. The body of a `file:<path>` instance: fetch the file
+ *  from the same daemon endpoint the Files tree reads, render it through the
+ *  files surface's own `FileBody` (Markdown as prose, code highlighted, the
+ *  daemon's refusal verdicts respected), and honour a delivered line range.
+ *  Loading and failure render as themselves — never as an empty file. */
+function FileInstanceSurface({
+  instance,
+  sessionId,
+  cwd,
+  presentation,
+  titleId,
+  onClose,
+  onTaskOpen,
+  onCodeReferenceOpen,
+  onAttentionOpen,
+  onPinOpen,
+}: SurfaceProps & {
+  instance: SidePaneTabInstance;
+  cwd?: string;
+  onTaskOpen?: SidePaneHost['openTask'];
+  onCodeReferenceOpen?: SidePaneHost['openCodeReference'];
+  onAttentionOpen?: NonNullable<SidePaneHost['openAttention']>;
+  onPinOpen?: NonNullable<SidePaneHost['openPin']>;
+}) {
+  const path = instance.key;
+  const [nonce, setNonce] = useState(0);
+  // The result is only rendered against the path that asked for it, so a
+  // reused surface can never paint one frame of the previous file's bytes.
+  const [resource, setResource] = useState<{ path: string; file: FsFile | null; error: string | null } | null>(null);
+  const targetLineRef = useRef<HTMLSpanElement | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let live = true;
+    fsApi
+      .file(sessionId, path, undefined, controller.signal)
+      .then(file => {
+        if (live) setResource({ path, file, error: null });
+      })
+      .catch(error => {
+        if (!live || controller.signal.aborted || isAbort(error)) return;
+        setResource({ path, file: null, error: describeFsError(error) });
+      });
+    return () => {
+      live = false;
+      controller.abort();
+    };
+  }, [sessionId, path, nonce]);
+
+  // A delivered line range scrolls into view once per delivery (revision
+  // bumps on every re-delivery to an already-open tab), never on plain
+  // re-render — the reader's own scroll position is theirs.
+  const loaded = resource?.path === path && resource.file !== null;
+  useEffect(() => {
+    if (!instance.selection || !loaded) return;
+    const frame = requestAnimationFrame(() => {
+      targetLineRef.current?.scrollIntoView({ block: 'center', inline: 'nearest' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [instance.selection, instance.revision, loaded]);
+
+  const fresh = resource !== null && resource.path === path;
+  return (
+    <>
+      <SurfaceHeader
+        icon={<FileCode2 size={17} />}
+        label={instance.label}
+        titleId={titleId}
+        presentation={presentation}
+        onClose={onClose}
+        closeLabel={`Close ${instance.label}`}
+      />
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-panel pb-2 pt-2">
+        <p className="m-0 mb-2 shrink-0 truncate text-2xs text-muted" title={path}>
+          {path}
+        </p>
+        {!fresh && (
+          <p className="m-0 text-ui text-muted" role="status">
+            Loading {instance.label}…
+          </p>
+        )}
+        {fresh && resource.error !== null && (
+          <div role="alert" className="text-ui text-muted">
+            <p className="m-0">
+              Could not load {path}: {resource.error}
+            </p>
+            <Button type="button" variant="ghost" className="mt-2" onClick={() => setNonce(n => n + 1)}>
+              Retry
+            </Button>
+          </div>
+        )}
+        {fresh && resource.file !== null && (
+          <FileBody
+            file={resource.file}
+            path={path}
+            selection={instance.selection}
+            targetLineRef={targetLineRef}
+            sessionId={sessionId}
+            cwd={cwd}
+            onTaskOpen={onTaskOpen}
+            onCodeReferenceOpen={onCodeReferenceOpen}
+            onAttentionOpen={onAttentionOpen}
+            onPinOpen={onPinOpen}
+          />
+        )}
+      </div>
+    </>
+  );
+}
+
 function TerminalsSurface({ sessionId, cwd, presentation, titleId, onClose }: SurfaceProps & { cwd?: string }) {
   return (
     <>
@@ -450,6 +569,7 @@ function TerminalsSurface({ sessionId, cwd, presentation, titleId, onClose }: Su
 
 function SurfaceBody({
   surface,
+  instance,
   sessionId,
   cwd,
   browser,
@@ -460,8 +580,6 @@ function SurfaceBody({
   isActive,
   requestedTask,
   onRequestedTaskHandled,
-  requestedCodeReference,
-  onRequestedCodeReferenceHandled,
   requestedAttention,
   onRequestedAttentionHandled,
   requestedPin,
@@ -472,6 +590,8 @@ function SurfaceBody({
   onPinOpen,
 }: {
   surface: SidePaneTabId;
+  /** Present when `surface` is an instance tab (file / browser page / terminal). */
+  instance?: SidePaneTabInstance;
   sessionId: string;
   cwd?: string;
   browser: BrowserDestination | null;
@@ -482,8 +602,6 @@ function SurfaceBody({
   isActive: boolean;
   requestedTask?: TaskOpenRequest | null;
   onRequestedTaskHandled?: (sequence: number) => void;
-  requestedCodeReference?: CodeReferenceOpenRequest | null;
-  onRequestedCodeReferenceHandled?: (sequence: number) => void;
   requestedAttention?: { id: AttentionId; sequence: number } | null;
   onRequestedAttentionHandled?: (sequence: number) => void;
   requestedPin?: PinOpenRequest | null;
@@ -493,6 +611,66 @@ function SurfaceBody({
   onAttentionOpen?: NonNullable<SidePaneHost['openAttention']>;
   onPinOpen?: NonNullable<SidePaneHost['openPin']>;
 }) {
+  // Instance tabs first: each renders ITS OWN instance — its own file, its own
+  // page — never a shared singleton body.
+  if (instance) {
+    switch (instance.kind) {
+      case 'file':
+        return (
+          <FileInstanceSurface
+            instance={instance}
+            sessionId={sessionId}
+            cwd={cwd}
+            presentation={presentation}
+            titleId={titleId}
+            onClose={onClose}
+            onTaskOpen={onTaskOpen}
+            onCodeReferenceOpen={onCodeReferenceOpen}
+            onAttentionOpen={onAttentionOpen}
+            onPinOpen={onPinOpen}
+          />
+        );
+      case 'browser':
+        // One UnifiedBrowserSurface per page tab; retention keeps each page's
+        // engine, history and profile alive while another tab is showing.
+        return (
+          <UnifiedBrowserSurface
+            sessionId={sessionId}
+            destination={instance.destination ?? null}
+            presentation={presentation}
+            titleId={titleId}
+            onClose={onClose}
+            isActive={isActive}
+          />
+        );
+      case 'terminal': {
+        // The terminals deck owns terminal rendering. It (or any wave-2
+        // module) claims the kind via registerSidePaneInstanceBody; until that
+        // registration exists a terminal tab says so instead of pretending.
+        const render = getSidePaneInstanceBody('terminal');
+        if (render) {
+          return <>{render({ sessionId, presentation, titleId, onClose, cwd, isActive, instance })}</>;
+        }
+        return (
+          <>
+            <SurfaceHeader
+              icon={<SquareTerminal size={17} />}
+              label={instance.label}
+              titleId={titleId}
+              presentation={presentation}
+              onClose={onClose}
+              closeLabel={`Close ${instance.label}`}
+            />
+            <div className="flex min-h-[240px] flex-1 items-center justify-center px-panel py-8 text-center">
+              <p className="m-0 max-w-xs text-ui leading-base text-muted">
+                No terminal body is registered in this build; open the Terminals tab for the deck.
+              </p>
+            </div>
+          </>
+        );
+      }
+    }
+  }
   switch (surface) {
     case 'browser':
       return (
@@ -513,8 +691,6 @@ function SurfaceBody({
           presentation={presentation}
           titleId={titleId}
           onClose={onClose}
-          requestedReference={requestedCodeReference}
-          onRequestedReferenceHandled={onRequestedCodeReferenceHandled}
           onTaskOpen={onTaskOpen}
           onCodeReferenceOpen={onCodeReferenceOpen}
           onAttentionOpen={onAttentionOpen}
@@ -942,9 +1118,9 @@ export function SidePaneWorkspace({
   const [requestedTask, setRequestedTask] = useState<TaskOpenRequest | null>(null);
   // Delivery requests are transient, unlike the durable surface/browser
   // snapshot. Keep an independent monotonic sequence so clearing a handled
-  // request can never make the next click repeat an id FilesTab has seen.
-  const codeReferenceSequence = useRef(0);
-  const [requestedCodeReference, setRequestedCodeReference] = useState<CodeReferenceOpenRequest | null>(null);
+  // request can never make the next click repeat an id a surface has seen.
+  // (Code references need no request channel any more: they ride on the
+  // per-file instance tab itself, revisioned by the model.)
   const attentionSequence = useRef(0);
   const [requestedAttention, setRequestedAttention] = useState<{ id: AttentionId; sequence: number } | null>(null);
   const pinSequence = useRef(0);
@@ -965,17 +1141,17 @@ export function SidePaneWorkspace({
   // invent a tab); its body, if active, says so explicitly.
   const openTabDefs = useMemo(
     () =>
-      sortSidePaneTabs(state.open)
-        .map(id => getSidePaneTabDefinition(id))
+      sortSidePaneTabs(state.open, state.instances)
+        .map(id => resolveSidePaneTab(sessionId, id))
         .filter((def): def is SidePaneTabDefinition => def !== undefined),
     // allTabs keys the registry version: a (un)registration re-resolves.
-    [state.open, allTabs],
+    [state, sessionId, allTabs],
   );
   useEffect(() => {
     const active = state.active;
-    if (!active || compact || getSidePaneTabDefinition(active)?.retain !== true) return;
+    if (!active || compact || resolveSidePaneTab(sessionId, active)?.retain !== true) return;
     setEverRetained(current => (current.has(active) ? current : new Set(current).add(active)));
-  }, [compact, state.active]);
+  }, [compact, sessionId, state.active]);
 
   const open = useCallback(
     (surface: SidePaneTabId, opener?: HTMLElement | null) => {
@@ -1015,12 +1191,33 @@ export function SidePaneWorkspace({
     [open],
   );
 
+  // ONE TAB PER FILE: transcript links, code references and (via the lead's
+  // integration line) the files tree all land here — the same open-instance
+  // call. Re-opening a path focuses its existing tab with the new line range.
   const openCodeReference = useCallback(
     (reference: CodeReference, opener?: HTMLElement | null) => {
-      setRequestedCodeReference({ reference, sequence: ++codeReferenceSequence.current });
-      open('files', opener);
+      if (opener) openerRef.current = opener;
+      const line = reference.line;
+      const selection =
+        line !== undefined && Number.isSafeInteger(line) && line >= 1
+          ? {
+              line,
+              ...(reference.endLine !== undefined &&
+              Number.isSafeInteger(reference.endLine) &&
+              reference.endLine >= line
+                ? { endLine: reference.endLine }
+                : {}),
+              ...(reference.endLine === undefined &&
+              reference.column !== undefined &&
+              Number.isSafeInteger(reference.column) &&
+              reference.column >= 1
+                ? { column: reference.column }
+                : {}),
+            }
+          : undefined;
+      openSidePaneFileTab(sessionId, reference.path, selection);
     },
-    [open],
+    [sessionId],
   );
 
   const openAttention = useCallback(
@@ -1043,18 +1240,28 @@ export function SidePaneWorkspace({
     [open, sessionId],
   );
 
-  // The browser surface's payload rides in the same per-session state, so a
-  // revisited session restores the page it was reading. One write: the
-  // browser tab joins the strip, activates, and carries its destination.
+  // ONE TAB PER PAGE: a transcript link opens its destination as a page
+  // instance — a page already showing that URL is focused, anything else gets
+  // a fresh tab with its own state. The legacy singleton payload keeps riding
+  // in session state for the historical snapshot readers.
   const openDestination = useCallback(
     (destination: BrowserDestination, opener: HTMLElement) => {
       openerRef.current = opener;
       const current = readSidePaneTabsState(sessionId);
-      writeSidePaneTabsState(sessionId, {
-        open: current.open.includes('browser') ? current.open : [...current.open, 'browser'],
-        active: 'browser',
-        browser: destination,
-      });
+      writeSidePaneTabsState(sessionId, { ...current, browser: destination });
+      openSidePaneBrowserTab(sessionId, destination);
+    },
+    [sessionId],
+  );
+
+  // The + picker's instance entries always create a NEW instance: a fresh
+  // empty browser page (files and terminals spawn instances from their own
+  // surfaces — the tree picks files, the deck opens terminals).
+  const openNewInstance = useCallback(
+    (kind: SidePaneInstanceKind) => {
+      if (kind === 'browser') openSidePaneBrowserTab(sessionId, null, { forceNew: true });
+      else if (kind === 'file') openSidePaneTab(sessionId, 'files');
+      else openSidePaneTab(sessionId, 'terminals');
     },
     [sessionId],
   );
@@ -1098,13 +1305,19 @@ export function SidePaneWorkspace({
   // reason InAppBrowser never cleared its destination on close). The desktop
   // pane unmounts immediately — it has no exit animation.
   const lastSurfaceRef = useRef<SidePaneTabId | null>(null);
-  if (state.active) lastSurfaceRef.current = state.active;
+  // Instance payloads linger with the surface: a just-closed file/page tab
+  // must not flash "not registered" behind the sheet's slide-out.
+  const lastInstanceRef = useRef<SidePaneTabInstance | undefined>(undefined);
+  if (state.active) {
+    lastSurfaceRef.current = state.active;
+    lastInstanceRef.current = state.instances[state.active];
+  }
   const sheetSurface = state.active ?? lastSurfaceRef.current;
   const displaySurface = compact ? sheetSurface : state.active;
   // `role=tabpanel` wiring is desktop-only: the mobile presentation has no
   // tablist (the switcher modal replaced the strip), so there is no tab
   // element for the panel to be labelled by — the sheet dialog labels itself.
-  const body = displaySurface && !(getSidePaneTabDefinition(displaySurface)?.retain === true && !compact) && (
+  const body = displaySurface && !(resolveSidePaneTab(sessionId, displaySurface)?.retain === true && !compact) && (
     <div
       id={sidePanePanelId(paneId, displaySurface)}
       role={compact ? undefined : 'tabpanel'}
@@ -1113,6 +1326,10 @@ export function SidePaneWorkspace({
     >
       <SurfaceBody
         surface={displaySurface}
+        instance={
+          state.instances[displaySurface] ??
+          (displaySurface === lastSurfaceRef.current ? lastInstanceRef.current : undefined)
+        }
         sessionId={sessionId}
         cwd={cwd}
         browser={state.browser}
@@ -1123,10 +1340,6 @@ export function SidePaneWorkspace({
         isActive={active && state.active === displaySurface}
         requestedTask={requestedTask}
         onRequestedTaskHandled={() => setRequestedTask(null)}
-        requestedCodeReference={requestedCodeReference}
-        onRequestedCodeReferenceHandled={sequence =>
-          setRequestedCodeReference(current => (current?.sequence === sequence ? null : current))
-        }
         requestedAttention={requestedAttention}
         onRequestedAttentionHandled={sequence =>
           setRequestedAttention(current => (current?.sequence === sequence ? null : current))
@@ -1148,13 +1361,18 @@ export function SidePaneWorkspace({
   // never tears it down. Desktop only; the sheet path never retains. The OPEN
   // surface joins the list synchronously — the everRetained effect lands a
   // render later, and a first open must not paint blank for that frame.
+  // A retained id must still RESOLVE to stay mounted: a singleton (terminals
+  // deck) survives being hidden or toggled out of the strip, but a CLOSED
+  // instance tab (its ✕) no longer resolves — closing a browser page disposes
+  // that page, it does not park it invisibly forever.
+  const liveRetained = [...everRetained].filter(id => resolveSidePaneTab(sessionId, id)?.retain === true);
   const retainedList =
     !compact &&
     state.active &&
-    getSidePaneTabDefinition(state.active)?.retain === true &&
-    !everRetained.has(state.active)
-      ? [...everRetained, state.active]
-      : [...everRetained];
+    resolveSidePaneTab(sessionId, state.active)?.retain === true &&
+    !liveRetained.includes(state.active)
+      ? [...liveRetained, state.active]
+      : liveRetained;
   const retainedBodies = !compact
     ? retainedList.map(surface => (
         <div
@@ -1171,6 +1389,7 @@ export function SidePaneWorkspace({
         >
           <SurfaceBody
             surface={surface}
+            instance={state.instances[surface]}
             sessionId={sessionId}
             cwd={cwd}
             browser={state.browser}
@@ -1181,10 +1400,6 @@ export function SidePaneWorkspace({
             isActive={active && state.active === surface}
             requestedTask={requestedTask}
             onRequestedTaskHandled={() => setRequestedTask(null)}
-            requestedCodeReference={requestedCodeReference}
-            onRequestedCodeReferenceHandled={sequence =>
-              setRequestedCodeReference(current => (current?.sequence === sequence ? null : current))
-            }
             requestedAttention={requestedAttention}
             onRequestedAttentionHandled={sequence =>
               setRequestedAttention(current => (current?.sequence === sequence ? null : current))
@@ -1201,7 +1416,9 @@ export function SidePaneWorkspace({
         </div>
       ))
     : [];
-  const paneVisible = !compact && (surfaceOpen || everRetained.size > 0);
+  const paneVisible = !compact && (surfaceOpen || retainedList.length > 0);
+  const activeDef = state.active ? resolveSidePaneTab(sessionId, state.active) : undefined;
+  const activeBrowser = state.active ? (state.instances[state.active]?.destination ?? state.browser) : state.browser;
 
   return (
     <SidePaneContext.Provider value={host}>
@@ -1228,6 +1445,7 @@ export function SidePaneWorkspace({
                   onSelect={id => activateSidePaneTab(sessionId, id)}
                   onAdd={open}
                   onRemove={id => removeSidePaneTab(sessionId, id)}
+                  onNewInstance={openNewInstance}
                 />
               )}
               {body}
@@ -1236,7 +1454,16 @@ export function SidePaneWorkspace({
           )}
         </div>
         <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          {state.active ? sidePaneAnnouncement(state.active, presentation, state.browser) : ''}
+          {/* Instance tabs announce their short name (basename, page host);
+              the browser announcement already appends the full URL. */}
+          {state.active
+            ? sidePaneAnnouncement(
+                state.active,
+                presentation,
+                activeBrowser,
+                activeDef?.instance?.label ?? activeDef?.label,
+              )
+            : ''}
         </div>
         {compact && sheetSurface && (
           <BottomSheet
@@ -1244,7 +1471,7 @@ export function SidePaneWorkspace({
             open={surfaceOpen}
             onClose={close}
             labelledBy={titleId}
-            closeLabel={getSidePaneTabDefinition(sheetSurface)?.closeLabel ?? 'Close'}
+            closeLabel={resolveSidePaneTab(sessionId, sheetSurface)?.closeLabel ?? 'Close'}
             panelClassName="h-full overflow-hidden bg-surface"
             maxHeight="calc(var(--app-h, 100dvh) - var(--gap-xs))"
             zIndexClass="z-[70]"
@@ -1258,6 +1485,7 @@ export function SidePaneWorkspace({
               onSelect={id => activateSidePaneTab(sessionId, id)}
               onAdd={open}
               onRemove={id => removeSidePaneTab(sessionId, id)}
+              onNewInstance={openNewInstance}
             />
             {body}
           </BottomSheet>

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { FolderGit2, Globe2, ListTodo } from 'lucide-react';
+import { FileCode2, FolderGit2, Globe2, ListTodo } from 'lucide-react';
 import type { SidePaneTabDefinition } from '../lib/side-pane-tab-model';
 import {
   nextSidePaneTab,
@@ -36,6 +36,29 @@ const TASKS: SidePaneTabDefinition = {
   order: 30,
   unavailableReason: 'No task source yet.',
 };
+
+/** A synthesized per-instance definition, exactly as `resolveSidePaneTab`
+ *  shapes one: full path as the accessible label, basename as the strip name,
+ *  the instance riding along. */
+const FILE_API: SidePaneTabDefinition = {
+  id: 'file:src/api.ts',
+  label: 'src/api.ts',
+  shortLabel: 'api.ts',
+  closeLabel: 'Close api.ts',
+  icon: FileCode2,
+  order: 1001,
+  instance: {
+    id: 'file:src/api.ts',
+    kind: 'file',
+    key: 'src/api.ts',
+    label: 'api.ts',
+    title: 'src/api.ts',
+    order: 1,
+    revision: 1,
+  },
+};
+/** The Browser catalogue entry spawns page instances instead of toggling. */
+const NEW_PAGE: SidePaneTabDefinition = { ...BROWSER, instanceKind: 'browser' };
 
 const OPEN = [BROWSER, FILES];
 const ALL = [BROWSER, FILES, TASKS];
@@ -87,6 +110,37 @@ describe('desktop strip', () => {
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain('Choose tabs');
   });
+
+  test('the strip is one row tall: horizontal overflow only, never a vertical scrollbar', () => {
+    expect(html).toContain('overflow-x-auto');
+    expect(html).toContain('overflow-y-hidden');
+  });
+
+  test('an instance tab shows its short label, full-path hover title and a close affordance', () => {
+    const withInstance = renderToStaticMarkup(
+      <SidePaneTabs
+        paneId="pane-a"
+        presentation="pane"
+        tabs={[...OPEN, FILE_API]}
+        all={ALL}
+        current="file:src/api.ts"
+        onSelect={NOOP}
+        onAdd={NOOP}
+        onRemove={NOOP}
+      />,
+    );
+    // The accessible name and hover title are the FULL path; the visible
+    // strip text is the basename, capped so long names cannot blow up 390px.
+    expect(withInstance).toContain('aria-label="src/api.ts"');
+    expect(withInstance).toContain('title="src/api.ts"');
+    expect(withInstance).toContain('>api.ts</span>');
+    expect(withInstance).toContain('max-w-[148px]');
+    // Closable independently: pointer ✕ plus the Delete-key shortcut.
+    expect(withInstance).toContain('title="Close api.ts"');
+    expect(withInstance).toContain('aria-keyshortcuts="Delete"');
+    // Singleton tabs stay exactly as they were — no close affordance.
+    expect(withInstance).not.toContain('title="Close Browser"');
+  });
 });
 
 describe('tab picker list', () => {
@@ -101,6 +155,17 @@ describe('tab picker list', () => {
     // Unavailable tabs stay choosable — their BODY is the honest placeholder —
     // but the picker says so up front.
     expect(html).toContain('Unavailable');
+  });
+
+  test('an instance-spawning entry is an action, not a toggle: it always adds a NEW tab', () => {
+    const html = renderToStaticMarkup(
+      <SidePaneTabPickerList all={[NEW_PAGE, FILES]} openIds={['files']} onAdd={NOOP} onRemove={NOOP} />,
+    );
+    expect(html).toContain('aria-label="New Browser tab"');
+    expect(html).toContain('Opens a new tab');
+    // No pressed state: the entry is never "in the strip" — its instances are.
+    expect(html).not.toContain('aria-label="Remove Browser tab"');
+    expect(html).not.toContain('aria-label="Add Browser tab"');
   });
 });
 
@@ -150,5 +215,35 @@ describe('mobile switcher modal content', () => {
     expect(html).toContain('Add a tab');
     expect(html).toContain('aria-label="Add Tasks tab"');
     expect(html).not.toContain('aria-label="Add Browser tab"');
+  });
+
+  test('instance tabs list with their label and per-tab close — never a strip', () => {
+    const withInstance = renderToStaticMarkup(
+      <SidePaneTabSwitcherList
+        tabs={[FILES, FILE_API]}
+        all={ALL}
+        current="file:src/api.ts"
+        onSelect={NOOP}
+        onAdd={NOOP}
+        onRemove={NOOP}
+      />,
+    );
+    expect(withInstance).not.toContain('role="tablist"');
+    expect(withInstance).toContain('title="src/api.ts"');
+    expect(withInstance).toContain('aria-label="Close api.ts tab"');
+    expect(withInstance.match(/aria-current="true"/g)?.length).toBe(1);
+    // An instance-spawning catalogue entry stays offered even while its
+    // instances are open — it always means "one more".
+    const withCatalogue = renderToStaticMarkup(
+      <SidePaneTabSwitcherList
+        tabs={[FILES]}
+        all={[NEW_PAGE, FILES]}
+        current="files"
+        onSelect={NOOP}
+        onAdd={NOOP}
+        onRemove={NOOP}
+      />,
+    );
+    expect(withCatalogue).toContain('aria-label="New Browser tab"');
   });
 });
