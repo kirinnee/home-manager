@@ -121,7 +121,7 @@ const optionalString = (value: unknown): string | undefined => (typeof value ===
 
 const id = (value: unknown): AttentionId => {
   const parsed = parseAttentionId(value);
-  if (parsed === null) throw new AttentionError('invalid', 'an attention id like A3 or ?A3 is required');
+  if (parsed === null) throw new AttentionError('invalid', 'an attention id like A3 or !A3 is required');
   return parsed;
 };
 

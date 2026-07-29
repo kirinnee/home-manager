@@ -47,12 +47,12 @@ const task: TaskSummary = {
 };
 
 describe('task-v2 presentation', () => {
-  test('row exposes # references, primary blocked state, dependency blocking, and claimed files', () => {
+  test('row exposes & references, primary blocked state, dependency blocking, and claimed files', () => {
     const html = renderToStaticMarkup(<TaskRow task={task} onOpen={() => undefined} />);
-    expect(html).toContain('#B7');
+    expect(html).toContain('&amp;B7');
     expect(html).toContain('Blocked');
     expect(html).toContain('Waiting for #F12');
-    expect(html).toContain('Blocked by #F12');
+    expect(html).toContain('Blocked by &amp;F12');
     expect(html).toContain('kteam#42');
     expect(html).toContain('src/api-server.ts');
     expect(html).not.toContain('Agent-originated');
@@ -188,7 +188,7 @@ describe('task-v2 presentation', () => {
         onOpen={() => undefined}
       />,
     );
-    expect(html).toContain('Shares files with #F30');
+    expect(html).toContain('Shares files with &amp;F30');
   });
   test('detail lists files and links a cross-session file conflict to its owning session', () => {
     const html = renderToStaticMarkup(
@@ -199,7 +199,7 @@ describe('task-v2 presentation', () => {
       />,
     );
     expect(html).toContain('src/api-server.ts');
-    expect(html).toContain('#F30');
+    expect(html).toContain('&amp;F30');
     expect(html).toContain('href="/session/ms-other"');
     expect(html).toContain('not a blocker'); // advisory framing, never a blocker
   });
@@ -271,7 +271,7 @@ describe('task-v2 presentation', () => {
     expect(html).toContain('<p>Questions reach UI</p>');
     expect(html).toContain('Waiting for #F12');
     expect(html).toContain('<p>Assigned to ottis.</p>');
-    expect(html).toContain('<p>Depends on #F12.</p>');
+    expect(html).toContain('<p>Depends on &amp;F12.</p>');
     expect(html.match(/Waiting for #F12/g)).toHaveLength(1);
     expect(html.match(/<strong>/g)).toHaveLength(1);
   });
@@ -321,7 +321,7 @@ describe('task-v2 presentation', () => {
       />,
     );
     for (const text of [
-      '#B7',
+      '&amp;B7',
       'Research first',
       'Audit phase Build',
       'Original ask',
@@ -330,7 +330,7 @@ describe('task-v2 presentation', () => {
       'Add the source link too.',
       'Open clarification source',
       'Depends on',
-      '#F12',
+      '&amp;F12',
       'Blocked',
       'research → design: approved design direction',
       'Completion claim: ms-sasha',

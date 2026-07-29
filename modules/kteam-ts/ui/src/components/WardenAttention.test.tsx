@@ -358,8 +358,9 @@ describe('WardenAttentionSection', () => {
     const anchorEnd = html.indexOf('</a>');
     expect(anchorEnd).toBeGreaterThan(-1);
     expect(html.indexOf('Asked which database to target and stopped.')).toBeGreaterThan(anchorEnd);
-    // The subject (the ask) stays inside the tap target.
-    expect(html.indexOf('Needs a decision on the migration')).toBeLessThan(anchorEnd);
+    // The subject is authored prose too, so it stays outside the session link
+    // and can contain a reference link without creating nested anchors.
+    expect(html.indexOf('Needs a decision on the migration')).toBeGreaterThan(anchorEnd);
   });
 
   test('never renders howToResolve — the per-session panel owns resolution', () => {

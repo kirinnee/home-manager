@@ -15,41 +15,27 @@
 import { memo, useEffect, useMemo, useState, type MouseEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import {
-  agentSessionHref,
-  parseAgentMentionHref,
-  remarkAgentMentions,
-  type AgentMentionResolver,
-  type ResolvedAgentMention,
-} from '../lib/agent-mentions';
+import { agentSessionHref, type AgentMentionResolver } from '../lib/agent-mentions';
 import { useAgentMentionResolver } from '../lib/agent-mention-context';
 import {
-  findCodeReferences,
-  parseCodeReferenceHref,
-  remarkCodeReferences,
+  findReferences,
+  parseReferenceHref,
+  referenceHref,
+  referenceIdentity,
+  remarkReferences,
+  revalidateReference,
+  type AttentionReferenceResolver,
   type CodeReference,
-} from '../lib/code-references';
+  type ReferenceResolvers,
+  type ResolvedReference,
+  type TaskReferenceResolver,
+} from '../lib/references';
 import { fenceLanguage, highlightToHtml } from '../lib/highlight';
 import { useAttentionCache } from '../hooks/useAttention';
 import { remarkTableLabels } from '../lib/remark-table-labels';
-import {
-  parseTaskReferenceHref,
-  remarkTaskReferences,
-  type TaskReferenceResolver,
-} from '../lib/remark-task-references';
 import { navigate } from '../lib/router';
 import { useTaskReferenceResolver } from '../lib/task-reference-context';
-import {
-  parseAttentionReferenceHref,
-  parsePinReferenceHref,
-  pinReferenceHref,
-  remarkSessionReferences,
-  type AttentionReferenceResolver,
-  type PinReferenceLookup,
-  type PinReferenceResolver,
-  type ResolvedPinReference,
-} from '../lib/remark-session-references';
-import { usePinReferenceResolver } from '../lib/pin-reference-context';
+import { type PinReferenceLookup, type PinReferenceResolver } from '../lib/pin-links';
 import { resolveFsFilePaths } from './files-api';
 import { InAppBrowserLink } from './InAppBrowser';
 
@@ -65,59 +51,13 @@ interface MarkdownAstLinkNode {
 }
 
 /** @internal Kept exported so the forged-link policy has a focused regression. */
-export function codeReferenceHasTrustedOrigin(
+export function referenceHasTrustedOrigin(
   node: MarkdownAstLinkNode | null | undefined,
-  reference: CodeReference,
-  resolvedCanonicalPaths: ReadonlySet<string>,
-): boolean {
-  return resolvedCanonicalPaths.has(reference.path) && node?.properties?.['data-code-reference'] === reference.path;
-}
-
-/** Reserved task fragments are authored bytes, not existence proof. Only the
- * task transform can stamp this mdast-origin marker, and the live task index is
- * checked again in the renderer before the delivery callback is exposed. */
-export function taskReferenceHasTrustedOrigin(
-  node: MarkdownAstLinkNode | null | undefined,
-  taskId: string,
-  resolveTask: TaskReferenceResolver,
-): boolean {
-  if (node?.properties?.['data-task-reference'] !== taskId) return false;
-  try {
-    return resolveTask(taskId);
-  } catch {
-    return false;
-  }
-}
-
-export function attentionReferenceHasTrustedOrigin(
-  node: MarkdownAstLinkNode | null | undefined,
-  attentionId: Parameters<AttentionReferenceResolver>[0],
-  resolveAttention: AttentionReferenceResolver,
-): boolean {
-  if (node?.properties?.['data-attention-reference'] !== attentionId) return false;
-  try {
-    return resolveAttention(attentionId);
-  } catch {
-    return false;
-  }
-}
-
-export function pinReferenceHasTrustedOrigin(
-  node: MarkdownAstLinkNode | null | undefined,
-  reference: PinReferenceLookup,
-  resolvePin: PinReferenceResolver,
-): ResolvedPinReference | null {
-  if (
-    node?.properties?.['data-pin-reference'] !== reference.pinId ||
-    node.properties?.['data-pin-session'] !== reference.sessionId
-  )
-    return null;
-  try {
-    const resolved = resolvePin(reference);
-    return resolved?.sessionId === reference.sessionId && resolved.pinId === reference.pinId ? resolved : null;
-  } catch {
-    return null;
-  }
+  reference: ResolvedReference,
+  resolvers: ReferenceResolvers,
+): ResolvedReference | null {
+  if (node?.properties?.['data-kteam-reference'] !== referenceIdentity(reference)) return null;
+  return revalidateReference(reference, resolvers);
 }
 
 export interface MarkdownProps {
@@ -129,7 +69,6 @@ export interface MarkdownProps {
   onTaskOpen?: (id: string, opener?: HTMLElement | null) => void;
   onCodeReferenceOpen?: (reference: CodeReference, opener?: HTMLElement | null) => void;
   onAttentionOpen?: (id: Parameters<AttentionReferenceResolver>[0], opener?: HTMLElement | null) => void;
-  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
   /** Tests/embedders may supply an authoritative fleet resolver. The app-wide
    * provider is used otherwise; without proof, mention-shaped text stays plain. */
   agentMentionResolver?: AgentMentionResolver;
@@ -137,6 +76,10 @@ export interface MarkdownProps {
    * provider is used otherwise; syntax alone never paints a task link. */
   taskReferenceResolver?: TaskReferenceResolver;
   attentionReferenceResolver?: AttentionReferenceResolver;
+  /** @deprecated Pins are no longer references. Retained only while excluded
+   * SidePane owners remove their compatibility props. */
+  onPinOpen?: (reference: PinReferenceLookup, opener?: HTMLElement | null) => void;
+  /** @deprecated Pins are no longer references. */
   pinReferenceResolver?: PinReferenceResolver;
 }
 
@@ -148,11 +91,9 @@ export const Markdown = memo(function Markdown({
   onTaskOpen,
   onCodeReferenceOpen,
   onAttentionOpen,
-  onPinOpen,
   agentMentionResolver,
   taskReferenceResolver,
   attentionReferenceResolver,
-  pinReferenceResolver,
 }: MarkdownProps) {
   const fleetAgentMentionResolver = useAgentMentionResolver();
   const resolveAgentMention = agentMentionResolver ?? fleetAgentMentionResolver;
@@ -168,17 +109,12 @@ export const Markdown = memo(function Markdown({
     return id => ids.has(id);
   }, [attentionSnapshot]);
   const resolveAttentionReference = attentionReferenceResolver ?? sessionAttentionResolver;
-  const fleetPinReferenceResolver = usePinReferenceResolver();
-  // A side-pane opener belongs to one session. A cached pin from a different
-  // session must not paint as live here and then click into a host that cannot
-  // honestly deliver it.
-  const sessionPinReferenceResolver = useMemo<PinReferenceResolver>(
-    () => lookup => (sessionId && lookup.sessionId === sessionId ? fleetPinReferenceResolver(lookup) : null),
-    [fleetPinReferenceResolver, sessionId],
-  );
-  const resolvePinReference = pinReferenceResolver ?? sessionPinReferenceResolver;
   const codeReferenceCandidates = useMemo(
-    () => [...new Set(findCodeReferences(text).map(match => match.reference.path))],
+    () => [
+      ...new Set(
+        findReferences(text).flatMap(match => (match.reference.kind === 'file' ? [match.reference.path] : [])),
+      ),
+    ],
     [text],
   );
   const resolutionKey = JSON.stringify([sessionId ?? null, cwd ?? null, codeReferenceCandidates]);
@@ -204,6 +140,16 @@ export const Markdown = memo(function Markdown({
   const resolvedPaths =
     resolvedCodeReferences?.key === resolutionKey ? resolvedCodeReferences.paths : EMPTY_RESOLVED_PATHS;
   const resolvedCanonicalPaths = useMemo(() => new Set(resolvedPaths.values()), [resolvedPaths]);
+  const transformResolvers: ReferenceResolvers = {
+    agent: resolveAgentMention,
+    file: path => resolvedPaths.get(path) ?? null,
+    task: resolveTaskReference,
+    attention: resolveAttentionReference,
+  };
+  const trustedResolvers: ReferenceResolvers = {
+    ...transformResolvers,
+    file: path => (resolvedCanonicalPaths.has(path) ? path : null),
+  };
 
   return (
     <div className={`md min-w-0 max-w-full ${className ?? ''}`}>
@@ -211,166 +157,32 @@ export const Markdown = memo(function Markdown({
         // remarkTableLabels stamps each body cell with its column header as
         // `data-label`, which the mobile stacked-card layout prints. It must run
         // after remark-gfm has produced the table nodes.
-        remarkPlugins={[
-          remarkGfm,
-          remarkTableLabels,
-          [remarkTaskReferences, { resolveTask: resolveTaskReference }],
-          [remarkSessionReferences, { resolveAttention: resolveAttentionReference, resolvePin: resolvePinReference }],
-          [remarkAgentMentions, { resolveMention: resolveAgentMention }],
-          [remarkCodeReferences, { resolvePath: (path: string) => resolvedPaths.get(path) ?? null }],
-        ]}
+        remarkPlugins={[remarkGfm, remarkTableLabels, [remarkReferences, { resolvers: transformResolvers }]]}
         components={{
           a: ({ node, href, onClick, children, ...rest }) => {
-            const taskId = parseTaskReferenceHref(href);
-            const attentionId = parseAttentionReferenceHref(href);
-            const pinReference = parsePinReferenceHref(href);
-            const agentSessionId = parseAgentMentionHref(href);
-            const codeReference = parseCodeReferenceHref(href);
-            if (pinReference !== null) {
-              const target = pinReferenceHasTrustedOrigin(node, pinReference, resolvePinReference);
-              if (!onPinOpen || !target) return <>{children}</>;
-              return (
-                <a
-                  href={pinReferenceHref(target)}
-                  data-pin-reference={target.pinId}
-                  data-pin-session={target.sessionId}
-                  title={`Open pin: ${target.label}`}
-                  onClick={(event: MouseEvent<HTMLAnchorElement>) => {
-                    onClick?.(event);
-                    if (
-                      !onPinOpen ||
-                      event.defaultPrevented ||
-                      event.button !== 0 ||
-                      event.metaKey ||
-                      event.ctrlKey ||
-                      event.shiftKey ||
-                      event.altKey
-                    )
-                      return;
-                    event.preventDefault();
-                    onPinOpen(target, event.currentTarget);
-                  }}
-                  {...rest}
-                >
-                  {`pin: ${target.label}`}
-                </a>
-              );
-            }
-            if (codeReference !== null) {
-              // A reserved fragment is not proof that its file exists. Only a
-              // link created by our remark transform for a path confirmed in
-              // THIS render may become live. Authored reserved hrefs cannot
-              // forge the transform-origin marker, even when another mention
-              // of the same file warmed the resolution set.
-              if (!onCodeReferenceOpen || !codeReferenceHasTrustedOrigin(node, codeReference, resolvedCanonicalPaths))
-                return <>{children}</>;
-              return (
-                <a
-                  href={href}
-                  data-code-reference={codeReference.path}
-                  onClick={(event: MouseEvent<HTMLAnchorElement>) => {
-                    onClick?.(event);
-                    if (
-                      !onCodeReferenceOpen ||
-                      event.defaultPrevented ||
-                      event.button !== 0 ||
-                      event.metaKey ||
-                      event.ctrlKey ||
-                      event.shiftKey ||
-                      event.altKey
-                    )
-                      return;
-                    event.preventDefault();
-                    onCodeReferenceOpen(codeReference, event.currentTarget);
-                  }}
-                  {...rest}
-                >
-                  {children}
-                </a>
-              );
-            }
-            if (agentSessionId !== null) {
-              let target: ResolvedAgentMention | null | undefined;
-              let destination = '';
-              try {
-                target = resolveAgentMention({ sessionId: agentSessionId });
-                destination = target ? agentSessionHref(target.sessionId) : '';
-              } catch {
-                target = null;
-                destination = '';
-              }
-              // A reserved-looking href is syntax, not existence proof. If the
-              // live fleet cannot resolve it, remove the dead destination and
-              // leave the authored @name readable as plain text.
-              if (!target) return <>{children}</>;
-              return (
-                <a
-                  href={destination}
-                  data-agent-mention={target.sessionId}
-                  title={`Open @${target.name}'s session`}
-                  onClick={(event: MouseEvent<HTMLAnchorElement>) => {
-                    onClick?.(event);
-                    if (
-                      event.defaultPrevented ||
-                      event.button !== 0 ||
-                      event.metaKey ||
-                      event.ctrlKey ||
-                      event.shiftKey ||
-                      event.altKey
-                    )
-                      return;
-                    event.preventDefault();
-                    navigate(destination);
-                  }}
-                  {...rest}
-                >
-                  @{target.name}
-                </a>
-              );
-            }
-            if (attentionId !== null) {
-              if (!onAttentionOpen || !attentionReferenceHasTrustedOrigin(node, attentionId, resolveAttentionReference))
-                return <>{children}</>;
-              return (
-                <a
-                  href={href}
-                  data-attention-reference={attentionId}
-                  onClick={(event: MouseEvent<HTMLAnchorElement>) => {
-                    onClick?.(event);
-                    if (
-                      event.defaultPrevented ||
-                      event.button !== 0 ||
-                      event.metaKey ||
-                      event.ctrlKey ||
-                      event.shiftKey ||
-                      event.altKey
-                    )
-                      return;
-                    event.preventDefault();
-                    onAttentionOpen(attentionId, event.currentTarget);
-                  }}
-                  {...rest}
-                >
-                  {children}
-                </a>
-              );
-            }
-            if (taskId === null)
+            const parsed = parseReferenceHref(href);
+            if (parsed === null) {
+              // Old reserved destinations, including pin links, are readable
+              // migration text rather than dead links.
+              if (href?.startsWith('#kteam-') || href?.includes('#kteam-agent-mention')) return <>{children}</>;
               return (
                 <InAppBrowserLink href={href} onClick={onClick} {...rest}>
                   {children}
                 </InAppBrowserLink>
               );
-            // The reserved task href is an in-app delivery request, not a real
-            // browser destination. A hostless renderer (including the legacy
-            // Pins sheet) must keep the reference readable without navigating
-            // to a route that cannot open the task surface.
-            if (!onTaskOpen || !taskReferenceHasTrustedOrigin(node, taskId, resolveTaskReference))
-              return <>{children}</>;
+            }
+            const target = referenceHasTrustedOrigin(node, parsed, trustedResolvers);
+            const hasOpener =
+              target?.kind === 'agent' ||
+              (target?.kind === 'file' && onCodeReferenceOpen !== undefined) ||
+              (target?.kind === 'task' && onTaskOpen !== undefined) ||
+              (target?.kind === 'attention' && onAttentionOpen !== undefined);
+            if (!target || !hasOpener) return <>{children}</>;
+            const destination = target.kind === 'agent' ? agentSessionHref(target.sessionId) : referenceHref(target);
             return (
               <a
-                href={href}
-                data-task-reference={taskId}
+                href={destination}
+                data-kteam-reference={referenceIdentity(target)}
                 onClick={(event: MouseEvent<HTMLAnchorElement>) => {
                   onClick?.(event);
                   if (
@@ -383,7 +195,27 @@ export const Markdown = memo(function Markdown({
                   )
                     return;
                   event.preventDefault();
-                  onTaskOpen(taskId, event.currentTarget);
+                  switch (target.kind) {
+                    case 'agent':
+                      navigate(agentSessionHref(target.sessionId));
+                      break;
+                    case 'file':
+                      onCodeReferenceOpen?.(
+                        {
+                          path: target.path,
+                          ...(target.line === undefined ? {} : { line: target.line }),
+                          ...(target.endLine === undefined ? {} : { endLine: target.endLine }),
+                        },
+                        event.currentTarget,
+                      );
+                      break;
+                    case 'task':
+                      onTaskOpen?.(target.id, event.currentTarget);
+                      break;
+                    case 'attention':
+                      onAttentionOpen?.(target.id, event.currentTarget);
+                      break;
+                  }
                 }}
                 {...rest}
               >

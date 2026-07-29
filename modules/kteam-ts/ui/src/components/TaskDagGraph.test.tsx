@@ -78,7 +78,7 @@ describe('layered task DAG graph', () => {
     expect(html).toContain('href="/session/ms4v5fu2-f2a89500"');
     expect(html).toContain('>ottis</text>');
     expect(html).toContain('data-task-conflicts="1"');
-    expect(html).toContain('shares files with #F9');
+    expect(html).toContain('shares files with &amp;F9');
     expect(html).toContain('>⚠ 1</text>');
     expect(html).toContain('aria-label="Zoom out"');
     expect(html).toContain('aria-label="Fit graph"');
@@ -128,10 +128,10 @@ describe('layered task DAG graph', () => {
     expect(dag.matchCount).toBe(1);
     const html = renderToStaticMarkup(<TaskDagGraph dag={dag} onOpen={() => undefined} />);
     expect(html).toContain('data-task-status="blocked"');
-    expect(html).toContain('#F3: Wait for dependency — Blocked');
-    expect(html).toContain('#F3 · BLOCKED');
+    expect(html).toContain('&amp;F3: Wait for dependency — Blocked');
+    expect(html).toContain('&amp;F3 · BLOCKED');
     expect(html).toContain('--task-node-color:var(--err)');
-    expect(html).not.toContain('#F3 · IN PROGRESS');
+    expect(html).not.toContain('&amp;F3 · IN PROGRESS');
   });
 
   test('uses SPA navigation only for an unmodified primary click', () => {

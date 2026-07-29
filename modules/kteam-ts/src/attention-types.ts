@@ -59,20 +59,20 @@ export function taskIdFromReopenedAttentionSourceRef(value: unknown): string | n
 }
 
 /** Canonical ids stay sigil-free in storage and on the wire. Human-facing
- * references add `?`, so item A3 is written as `?A3` in messages. */
+ * references add `!`, so item A3 is written as `!A3` in messages. */
 export type AttentionId = `A${number}`;
 const ATTENTION_ID = /^A([1-9][0-9]*)$/u;
 
 export function parseAttentionId(value: unknown): AttentionId | null {
   if (typeof value !== 'string') return null;
-  const raw = value.trim().replace(/^\?/u, '');
+  const raw = value.trim().replace(/^[?!]/u, '');
   const match = raw.match(ATTENTION_ID);
   if (!match || !Number.isSafeInteger(Number(match[1]))) return null;
   return raw as AttentionId;
 }
 
-export function attentionReference(id: AttentionId): `?${AttentionId}` {
-  return `?${id}`;
+export function attentionReference(id: AttentionId): `!${AttentionId}` {
+  return `!${id}`;
 }
 
 /** Provenance is always derived from the resolved actor. */

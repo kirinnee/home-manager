@@ -523,7 +523,7 @@ describe('task actions', () => {
     expect(
       parseTaskCli([
         'reopen',
-        '#F21',
+        '&F21',
         '--reason',
         'The deployed browser still returns 404.',
         '--ask',
@@ -652,9 +652,9 @@ describe('terminal rendering', () => {
     expect(text).toContain('🚧 needs an API key from you');
     expect(text).toContain('needs an API key from you');
     expect(text).toContain('⚠ assignee-dead');
-    expect(text).toContain('#B2');
-    expect(text).toMatch(/#B2\s+BLOCKED/);
-    expect(text.indexOf('#F3')).toBeLessThan(text.indexOf('#F1'));
+    expect(text).toContain('&B2');
+    expect(text).toMatch(/&B2\s+BLOCKED/);
+    expect(text.indexOf('&F3')).toBeLessThan(text.indexOf('&F1'));
   });
 
   test('unreadable records are reported, never silently missing', () => {
@@ -684,7 +684,7 @@ describe('terminal rendering', () => {
       ],
       activityParseErrors: 1,
     });
-    expect(text).toContain('#F21  File browser');
+    expect(text).toContain('&F21  File browser');
     expect(text).toContain('phase     build');
     expect(text).toContain('status    in_progress');
     expect(text).toContain('files     src/api-server.ts, src/tasks.ts (advisory)');
@@ -697,13 +697,13 @@ describe('terminal rendering', () => {
 
   test('create prints only the new id, so it can be captured in a shell variable', () => {
     expect(renderTaskCli({ command: 'create', body: { kind: 'feature', title: 'x' } }, view({ id: 'F30' }))).toBe(
-      '#F30\n',
+      '&F30\n',
     );
   });
 
   test('an action prints the resulting declared status plus any derived warning', () => {
     const command: TaskCliCommand = { command: 'act', id: 'F21', body: { action: 'note', text: 'x' } };
-    expect(renderTaskCli(command, view({ status: 'built', phase: 'built' }))).toBe('#F21  built\n');
+    expect(renderTaskCli(command, view({ status: 'built', phase: 'built' }))).toBe('&F21  built\n');
     const flagged = {
       ...view({ status: 'in_progress' }),
       live: { ...view().live, staleness: 'maybe-finished' as const },
@@ -721,7 +721,7 @@ describe('terminal rendering', () => {
       { command: 'show', id: 'F21', afterSeq: 0, md: true },
       { task: view(), activity: [] },
     );
-    expect(detailMd).toContain('# #F21 · File browser');
+    expect(detailMd).toContain('# &F21 · File browser');
   });
 
   test('kanban render folds research, design, and build into the in-progress board lane', () => {
@@ -739,11 +739,11 @@ describe('terminal rendering', () => {
     expect(text).not.toContain('DESIGN (');
     expect(text).not.toContain('RESEARCH (');
     expect(text).not.toContain('BUILD (');
-    expect(text).toContain('#B2');
-    expect(text).toContain('#B2 BLOCKED');
+    expect(text).toContain('&B2');
+    expect(text).toContain('&B2 BLOCKED');
     expect(text).toContain('🚧 needs input');
-    expect(text).toContain('#F3');
-    expect(text).toContain('#F4');
+    expect(text).toContain('&F3');
+    expect(text).toContain('&F4');
   });
 
   test('dag render shows dependency edges', () => {
@@ -755,9 +755,9 @@ describe('terminal rendering', () => {
       ],
       parseErrors: 0,
     });
-    expect(text).toContain('#F1 → #F2, #B3');
-    expect(text).toContain('#F2 → ∅');
-    expect(text).toContain('#B3');
+    expect(text).toContain('&F1 → &F2, &B3');
+    expect(text).toContain('&F2 → ∅');
+    expect(text).toContain('&B3');
     expect(text).toContain('🚧 waiting');
   });
 

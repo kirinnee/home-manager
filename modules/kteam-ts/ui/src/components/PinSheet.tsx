@@ -51,9 +51,9 @@ import { useSessionPins, usePinsSession } from '../hooks/usePins';
 import { requestJump, type JumpOutcome } from '../lib/pin-bridge';
 import { useInputModality } from '../hooks/useInputModality';
 import { cn, fmtClock } from '../lib/utils';
-import type { CodeReference } from '../lib/code-references';
+import type { CodeReference } from '../lib/references';
 import type { AttentionId } from '../lib/attention';
-import type { PinReferenceLookup } from '../lib/remark-session-references';
+import type { PinReferenceLookup } from '../lib/pin-links';
 import { Markdown } from './Markdown';
 
 const UNDO_MS = 5_000;

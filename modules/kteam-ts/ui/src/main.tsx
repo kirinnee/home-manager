@@ -9,7 +9,6 @@ import { App } from './App';
 import { StoreProvider } from './lib/store';
 import { AgentMentionProvider } from './lib/agent-mention-context';
 import { TaskReferenceProvider } from './lib/task-reference-context';
-import { PinReferenceProvider } from './lib/pin-reference-context';
 import { installPortraitLock } from './lib/orientation-lock';
 import './index.css';
 import './highlight.css';
@@ -23,9 +22,7 @@ createRoot(root).render(
     <StoreProvider>
       <AgentMentionProvider>
         <TaskReferenceProvider>
-          <PinReferenceProvider>
-            <App />
-          </PinReferenceProvider>
+          <App />
         </TaskReferenceProvider>
       </AgentMentionProvider>
     </StoreProvider>

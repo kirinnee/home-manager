@@ -524,7 +524,7 @@ describe('markdown renders (a VIEW, never storage)', () => {
         },
       ],
     });
-    expect(md).toContain('# #F21 · File browser + diff');
+    expect(md).toContain('# &F21 · File browser + diff');
     expect(md).toContain('🔵 IN PROGRESS');
     expect(md).toContain(TASK_STALENESS_COPY['maybe-finished']);
     expect(md).toContain('declared status unchanged');
@@ -534,7 +534,7 @@ describe('markdown renders (a VIEW, never storage)', () => {
     expect(md).toContain('PR https://github.com/o/r/pull/1');
   });
 
-  test('the detail render shows workflow, dependencies and clarifications as human references (#F12)', () => {
+  test('the detail render shows workflow, dependencies and clarifications as human references (&F12)', () => {
     const md = renderTaskMd({
       task: task({
         dependsOn: ['F5', 'B2'],
@@ -546,13 +546,13 @@ describe('markdown renders (a VIEW, never storage)', () => {
       activity: [],
     });
     expect(md).toContain('workflow: quick');
-    expect(md).toContain('depends on: #F5, #B2');
+    expect(md).toContain('depends on: &F5, &B2');
     expect(md).toContain('files (advisory): `src/api-server.ts`, `src/tasks.ts`');
     expect(md).toContain('## Clarifications');
     expect(md).toContain('also handle diffs — session:lead#30');
   });
 
-  test('a blocked task shows since/reason/blocking ids, all as #-references', () => {
+  test('a blocked task shows since/reason/blocking ids, all as &-references', () => {
     const md = renderTaskMd({
       task: task({
         blocked: true,
@@ -562,7 +562,7 @@ describe('markdown renders (a VIEW, never storage)', () => {
       }),
       activity: [],
     });
-    expect(md).toContain('🚧 blocked since 2026-07-27T05:00:00.000Z: waiting on #F5 (#F5)');
+    expect(md).toContain('🚧 blocked since 2026-07-27T05:00:00.000Z: waiting on #F5 (&F5)');
   });
 
   test('a legacy record missing every v2 addition renders instead of throwing', () => {
@@ -623,8 +623,8 @@ describe('markdown renders (a VIEW, never storage)', () => {
     expect(summariseActivity(entry('clarification', { text: 'also handle diffs', source: 'session:lead#30' }))).toBe(
       'also handle diffs (session:lead#30)',
     );
-    expect(summariseActivity(entry('dependency', { operation: 'add', taskId: 'F5' }))).toBe('add #F5');
-    expect(summariseActivity(entry('dependency', { operation: 'remove', taskId: 'F6' }))).toBe('remove #F6');
+    expect(summariseActivity(entry('dependency', { operation: 'add', taskId: 'F5' }))).toBe('add &F5');
+    expect(summariseActivity(entry('dependency', { operation: 'remove', taskId: 'F6' }))).toBe('remove &F6');
     expect(summariseActivity(entry('file', { operation: 'add', path: 'src/api.ts' }))).toBe('add `src/api.ts`');
     expect(summariseActivity(entry('file', { operation: 'remove', path: 'src/api.ts' }))).toBe('remove `src/api.ts`');
     expect(summariseActivity(entry('file', { operation: 'add', path: 'src/api.ts', reason: 'owns it' }))).toBe(

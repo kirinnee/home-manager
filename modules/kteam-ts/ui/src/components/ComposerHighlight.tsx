@@ -6,7 +6,8 @@
 // remain visible because this is syntax highlighting, not WYSIWYG rendering.
 
 import { useMemo, type RefObject } from 'react';
-import { tokenizeMarkdown, type MdTokenType } from '../lib/composer-markdown';
+import { tokenizeMarkdown, type MdToken, type MdTokenType } from '../lib/composer-markdown';
+import { findReferences } from '../lib/references';
 
 /**
  * The metric contract shared VERBATIM by the textarea and its mirror. A colour
@@ -39,7 +40,29 @@ export const MARKDOWN_TOKEN_CLASS: Readonly<Record<MdTokenType, string>> = {
   linkUrl: '[color:var(--syn-comment)]',
   listMarker: '[color:var(--syn-number)]',
   quoteMarker: '[color:var(--syn-comment)]',
+  reference: '[color:var(--accent)]',
 };
+
+const REFERENCE_ELIGIBLE = new Set<MdTokenType>(['text', 'bold', 'italic', 'boldItalic', 'heading']);
+
+/** Split eligible Markdown paint tokens with the same parser used by preview
+ * rendering. The concatenated bytes remain identical, preserving caret metrics. */
+export function highlightReferenceTokens(tokens: readonly MdToken[]): MdToken[] {
+  return tokens.flatMap(token => {
+    if (!REFERENCE_ELIGIBLE.has(token.type)) return [token];
+    const matches = findReferences(token.text);
+    if (matches.length === 0) return [token];
+    const output: MdToken[] = [];
+    let cursor = 0;
+    for (const match of matches) {
+      if (match.start > cursor) output.push({ type: token.type, text: token.text.slice(cursor, match.start) });
+      output.push({ type: 'reference', text: match.raw });
+      cursor = match.end;
+    }
+    if (cursor < token.text.length) output.push({ type: token.type, text: token.text.slice(cursor) });
+    return output;
+  });
+}
 
 type ScrollPort = Pick<HTMLElement, 'scrollTop' | 'scrollLeft'> & {
   style: Pick<CSSStyleDeclaration, 'overflowX' | 'overflowY'>;
@@ -70,7 +93,7 @@ export function ComposerHighlight({
   // The element itself is ALWAYS mounted so enabling the setting cannot shift
   // the sibling textarea's reconciliation slot and remount the real input.
   const paintedText = enabled ? text : '';
-  const tokens = useMemo(() => tokenizeMarkdown(paintedText), [paintedText]);
+  const tokens = useMemo(() => highlightReferenceTokens(tokenizeMarkdown(paintedText)), [paintedText]);
   let offset = 0;
 
   return (

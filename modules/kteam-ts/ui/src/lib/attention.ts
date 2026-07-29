@@ -11,8 +11,8 @@ export type AttentionId = `A${number}`;
 
 const ATTENTION_ID = /^A[1-9][0-9]*$/u;
 
-export function attentionReference(id: AttentionId): `?${AttentionId}` {
-  return `?${id}`;
+export function attentionReference(id: AttentionId): `!${AttentionId}` {
+  return `!${id}`;
 }
 
 export interface AttentionItem {

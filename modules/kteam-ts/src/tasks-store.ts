@@ -115,7 +115,7 @@ export const isTaskId = (value: unknown): value is string => typeof value === 's
  *  Returns null when it is not an id at all — never a guess. */
 export function normalizeTaskId(value: unknown): string | null {
   if (typeof value !== 'string') return null;
-  const upper = value.trim().replace(/^#/u, '').toUpperCase();
+  const upper = value.trim().replace(/^[#&]/u, '').toUpperCase();
   return TASK_ID.test(upper) ? upper : null;
 }
 
@@ -490,7 +490,7 @@ export function validateTaskDependencies(value: unknown): string[] {
   const dependencies: string[] = [];
   for (const item of value) {
     const id = normalizeTaskId(item);
-    if (id === null) throw new TaskError('invalid', `dependency must look like #F12, got ${String(item)}`);
+    if (id === null) throw new TaskError('invalid', `dependency must look like &F12, got ${String(item)}`);
     if (!dependencies.includes(id)) dependencies.push(id);
   }
   return dependencies;

@@ -40,10 +40,10 @@ export const TASK_ID_PREFIX: Record<TaskKind, string> = {
   chore: 'C',
 };
 
-/** Stored ids stay sigil-free; every human-facing reference carries `#`. */
-export type TaskReference = `#${string}`;
+/** Stored ids stay sigil-free; every human-facing reference carries `&`. */
+export type TaskReference = `&${string}`;
 
-export const taskReference = (id: string): TaskReference => `#${id}`;
+export const taskReference = (id: string): TaskReference => `&${id.replace(/^[#&]/u, '')}`;
 
 /** DECLARED status — intent, asserted, stored. Mirrors the live board's seven
  *  states plus `blocked` ("What I need from you"). Deliberately NOT derivable:

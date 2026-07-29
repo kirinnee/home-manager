@@ -92,14 +92,14 @@ describe('session task empty states', () => {
 test('the list and kanban read only the selected session, with files and advisory conflicts shown', () => {
   const conflicts = computeFileConflicts(fleet);
   const list = renderToStaticMarkup(<SessionTaskList tasks={mine} conflicts={conflicts} onOpen={() => undefined} />);
-  for (const id of ['#F1', '#B2', '#I3']) expect(list).toContain(id);
+  for (const id of ['&amp;F1', '&amp;B2', '&amp;I3']) expect(list).toContain(id);
   // Another session's task is not a row here (its id may still appear as a dep/conflict reference).
   expect(list).not.toContain('Visible X7');
-  expect(list).not.toContain('Open #X7');
+  expect(list).not.toContain('Open &amp;X7');
   expect(list).not.toContain('Visible N9');
   expect(list).toContain('src/shared.ts'); // claimed files are shown
-  expect(list).toContain('Shares files with #X7'); // advisory cross-session overlap
-  expect(list.indexOf('#B2')).toBeLessThan(list.indexOf('#F1')); // oldest blocked first
+  expect(list).toContain('Shares files with &amp;X7'); // advisory cross-session overlap
+  expect(list.indexOf('&amp;B2')).toBeLessThan(list.indexOf('&amp;F1')); // oldest blocked first
   expect(list.match(/data-task-status-badge/g)).toHaveLength(3); // mixed list rows still name their state
   expect(list).not.toContain('data-task-assignee'); // one repeated assignee carries no row-level signal
   const kanban = renderToStaticMarkup(
@@ -143,8 +143,8 @@ test('compact kanban stacks every count and task at full width without a horizon
   for (const lane of ['todo', 'in_progress', 'built', 'live', 'done', 'dropped']) {
     expect(html).toContain(`data-task-lane="${lane}"`);
   }
-  for (const id of ['#F1', '#B2', '#I3']) expect(html).toContain(id);
-  expect(html.match(/aria-label="Open #B2: Visible B2"/g)).toHaveLength(1);
+  for (const id of ['&amp;F1', '&amp;B2', '&amp;I3']) expect(html).toContain(id);
+  expect(html.match(/aria-label="Open &amp;B2: Visible B2"/g)).toHaveLength(1);
   expect(html).toContain('No tasks.');
 });
 
@@ -240,7 +240,7 @@ test('the DAG closes recursively across sessions, links owning sessions, and mar
   const dag = renderToStaticMarkup(
     <SessionTaskDag dag={filtered} conflicts={computeFileConflicts(fleet)} onOpen={() => undefined} />,
   );
-  for (const id of ['#F1', '#B2', '#I3', '#X7']) expect(dag).toContain(id);
+  for (const id of ['&amp;F1', '&amp;B2', '&amp;I3', '&amp;X7']) expect(dag).toContain(id);
   expect(dag).not.toContain('#N9'); // an unrelated session is never pulled into the closure
   expect(dag).toContain('<svg');
   expect(dag).toContain('<marker');
@@ -262,8 +262,8 @@ test('the DAG closes recursively across sessions, links owning sessions, and mar
 test('exact status filters retain dependency PATH nodes and prune unrelated DAG branches', () => {
   const filtered = filterTaskDag(buildTaskDag(fleet, 'ms-a'), new Set<TaskStatus>(['live']));
   const dag = renderToStaticMarkup(<SessionTaskDag dag={filtered} onOpen={() => undefined} />);
-  for (const id of ['#I3', '#B2', '#X7']) expect(dag).toContain(id);
-  for (const id of ['#F1', '#N9', '#GONE']) expect(dag).not.toContain(id);
+  for (const id of ['&amp;I3', '&amp;B2', '&amp;X7']) expect(dag).toContain(id);
+  for (const id of ['&amp;F1', '&amp;N9', '&amp;GONE']) expect(dag).not.toContain(id);
   expect(dag).toContain('PATH nodes keep matching tasks attached');
   expect(dag).toContain('data-task-filter="context"');
   expect(dag).toContain('>PATH<');

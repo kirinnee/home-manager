@@ -46,7 +46,9 @@ export type MdTokenType =
   /** A list bullet/number and its indentation + trailing space. */
   | 'listMarker'
   /** Leading `>` run of a blockquote line, trailing space included. */
-  | 'quoteMarker';
+  | 'quoteMarker'
+  /** A canonical sigil token identified by the shared reference parser. */
+  | 'reference';
 
 export interface MdToken {
   type: MdTokenType;
