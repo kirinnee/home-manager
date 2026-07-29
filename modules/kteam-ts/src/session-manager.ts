@@ -2733,7 +2733,7 @@ export class SessionManager implements KTeamService {
     };
   }
 
-  /** Native `/model`, `/effort`, `/clear`, or `/compact` control that
+  /** Native `/model`, `/effort`, or `/compact` control that
    * deliberately bypasses send(): it never queues behind active work, does not
    * relaunch the harness, and never optimistically rewrites observed settings.
    * Targeted Codex switches succeed only after a post-input raw
@@ -2764,8 +2764,7 @@ export class SessionManager implements KTeamService {
         if (!pane.promptReady)
           throw new Error('an in-session command is available only while the harness is waiting at an idle prompt');
 
-        if (request.action === 'clear' || request.action === 'compact')
-          return await this.runSessionCommand(id, view, request.action);
+        if (request.action === 'compact') return await this.runSessionCommand(id, view);
 
         const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
         let command: string;
@@ -2967,23 +2966,20 @@ export class SessionManager implements KTeamService {
     );
   }
 
-  /** `/clear` and `/compact` — harness-native context commands delivered
-   * through the same exactly-once `inject()` as `/model`. Preconditions were
-   * already checked by `runtime()`.
+  /** `/compact` — the harness-native context command, delivered through the
+   * same exactly-once `inject()` as `/model`. Preconditions were already
+   * checked by `runtime()`.
    *
-   * `/clear` is purely local and must never start a model turn. `/compact` may
-   * start a summarisation turn on Claude or complete locally on Codex. Neither
-   * path advances `config.turn`; the normal watcher observes any real turn.
-   * Clearing affects only the harness's memory: kteam keeps its transcript. */
-  private async runSessionCommand(id: string, view: SessionView, action: 'clear' | 'compact'): Promise<SessionView> {
-    const command = action === 'clear' ? '/clear' : '/compact';
-    const outcome = await this.tmux.inject(view.config.tmuxSession, command);
-    if (action === 'clear' && outcome !== 'handled-local')
-      throw new Error(`the harness consumed ${command} as a model turn instead of a local clear`);
+   * `/compact` may start a summarisation turn on Claude or complete locally on
+   * Codex. It does not advance `config.turn`; the normal watcher observes any
+   * real turn. Compacting affects only the harness's memory: kteam keeps its
+   * transcript. */
+  private async runSessionCommand(id: string, view: SessionView): Promise<SessionView> {
+    const outcome = await this.tmux.inject(view.config.tmuxSession, '/compact');
     await this.emit(
       id,
       'control.session_command',
-      { harness: view.config.harness, command: action, disposition: outcome },
+      { harness: view.config.harness, command: 'compact', disposition: outcome },
       'client',
       view.config.turn,
     );

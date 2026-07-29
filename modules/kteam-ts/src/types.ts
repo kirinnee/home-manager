@@ -68,14 +68,11 @@ export interface RuntimeModelOption {
  *    its own account-aware model/reasoning picker.
  *  - `effort`: Claude accepts an allowlisted effort level; Codex configures
  *    reasoning inside its native model picker.
- *  - `clear`: the harness-native `/clear` — wipes the running model's
- *    conversation context. Local and destructive; it must be handled locally
- *    (never a model turn), and the UI gates it behind a confirmation.
  *  - `compact`: the harness-native `/compact` — summarises context. On Claude
  *    it runs the model; on Codex it completes locally. Either disposition is
  *    success. */
 export interface RuntimeControlRequest {
-  action: 'model' | 'effort' | 'clear' | 'compact';
+  action: 'model' | 'effort' | 'compact';
   model?: string;
   effort?: string;
 }

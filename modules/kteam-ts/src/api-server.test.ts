@@ -1242,7 +1242,7 @@ describe('request-id idempotency for retried mutations', () => {
     expect(controls).toBe(1);
   });
 
-  test('runtime endpoint dispatches the clear and compact session commands', async () => {
+  test('runtime endpoint dispatches the compact session command', async () => {
     const service = new FakeService();
     const seen: string[] = [];
     service.runtime = async (_id, input) => {
@@ -1258,9 +1258,8 @@ describe('request-id idempotency for retried mutations', () => {
         body: JSON.stringify({ action }),
       });
 
-    expect((await post('clear', 'rt-clear')).status).toBe(200);
     expect((await post('compact', 'rt-compact')).status).toBe(200);
-    expect(seen).toEqual(['clear', 'compact']);
+    expect(seen).toEqual(['compact']);
   });
 
   test('runtime endpoint rejects arbitrary native-command actions', async () => {

@@ -35,7 +35,7 @@ export interface SystemBlockInfo {
   tone?: 'ok' | 'warn' | 'err';
   /** A context boundary gets full-width divider treatment while retaining the
    *  same collapsed disclosure contract as every other system row. */
-  divider?: 'compaction' | 'clear';
+  divider?: 'compaction';
   /** ALWAYS the full original text, untouched — the disclosure body. */
   raw: string;
 }

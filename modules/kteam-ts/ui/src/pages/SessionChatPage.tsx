@@ -56,16 +56,6 @@ import {
   visibleUserRows,
 } from '../lib/sends';
 import {
-  applyTranscriptBoundaries,
-  deriveJournalClearBoundaries,
-  deriveLedgerClearBoundaries,
-  deriveTranscriptClearBoundaries,
-  mergeTranscriptBoundaries,
-  rememberTranscriptBoundaries,
-  revealTranscriptHistory,
-  useTranscriptBoundarySession,
-} from '../lib/transcript-boundaries';
-import {
   attachmentErrorCopy,
   attachmentErrorMessage,
   attachmentFromView,
@@ -564,34 +554,6 @@ export function SessionChatPage({
   // nothing about a specific message; an unproven send is now a ledger row that
   // can honestly say "unconfirmed" instead of a transcript row that lies.
   const blocks = useMemo(() => buildTranscript(records, sendIndex, sessionId), [records, sendIndex, sessionId]);
-  // `/clear` is a VIEW boundary, never a mutation of the audit transcript.
-  // Journal + ledger evidence covers Composer/runtime sends; a real harness
-  // marker wins placement by exact block id when one reaches the stream.
-  const observedClearBoundaries = useMemo(
-    () =>
-      mergeTranscriptBoundaries(
-        deriveJournalClearBoundaries(journalEvents, sessionId),
-        deriveLedgerClearBoundaries(ledger),
-        deriveTranscriptClearBoundaries(blocks),
-      ),
-    [blocks, journalEvents, ledger, sessionId],
-  );
-  const storedClearBoundaries = useTranscriptBoundarySession(sessionId);
-  useEffect(() => {
-    rememberTranscriptBoundaries(sessionId, observedClearBoundaries);
-  }, [observedClearBoundaries, sessionId]);
-  // HOTFIX 2026-07-28: boundary detection was hiding agent rows, leaving a
-  // transcript of only the human's own messages. Observation and storage above
-  // are left intact so no evidence is lost, but NOTHING is filtered out of the
-  // view until the false-positive source is identified. Passing an empty
-  // boundary list keeps the real return shape rather than faking it.
-  const transcriptView = useMemo(
-    () => applyTranscriptBoundaries(blocks, [], storedClearBoundaries.revealedBoundaryId),
-    [blocks, storedClearBoundaries.revealedBoundaryId],
-  );
-  // Only this array is filtered. Ledger-chip retirement, pins, questions, and
-  // every other state consumer below continue to read the complete `blocks`.
-  const visibleBlocks = transcriptView.blocks;
   const pendingQ = useMemo(
     () =>
       view?.state.pendingQuestion
@@ -858,8 +820,8 @@ export function SessionChatPage({
   // even a fresh durable acceptance in the footer makes the conversation jump
   // later and lets a minutes-old peer message bury the tail for up to an hour.
   const displayedBlocks = useMemo(
-    () => placeLedgerBlocks(visibleBlocks, ledgerChips, ledgerNow),
-    [visibleBlocks, ledgerChips, ledgerNow],
+    () => placeLedgerBlocks(blocks, ledgerChips, ledgerNow),
+    [blocks, ledgerChips, ledgerNow],
   );
 
   // ---- what a screen reader is told -----------------------------------------
@@ -1188,25 +1150,7 @@ export function SessionChatPage({
   const transcriptHeader = (
     <>
       {loadingOlder && <div className="py-1 text-center text-[11.5px] text-muted">loading older messages…</div>}
-      {transcriptView.hidden > 0 && transcriptView.activeBoundary && (
-        <div className="py-1 text-center text-[11.5px] text-muted">
-          <button
-            type="button"
-            aria-expanded={false}
-            className="rounded-control px-2 py-px hover:bg-surface-2 hover:text-fg"
-            onClick={() => {
-              revealTranscriptHistory(sessionId, transcriptView.activeBoundary!.id);
-              setAnnouncement(
-                `Showing ${transcriptView.hidden} earlier transcript ${transcriptView.hidden === 1 ? 'row' : 'rows'} from before context was cleared.`,
-              );
-            }}
-          >
-            {transcriptView.hidden} earlier transcript {transcriptView.hidden === 1 ? 'row' : 'rows'} hidden · context
-            cleared {fmtAbsolute(transcriptView.activeBoundary.at)} · show
-          </button>
-        </div>
-      )}
-      {transcriptView.hidden === 0 && atStart && records.length > 0 && (
+      {atStart && records.length > 0 && (
         <div className="py-1 text-center text-[11px] text-faint">start of conversation · {total} records</div>
       )}
       {view && WAITING_STATUSES.has(view.state.status) && (
@@ -1331,7 +1275,7 @@ export function SessionChatPage({
                 <Transcript
                   blocks={displayedBlocks}
                   live={busy}
-                  hasOlder={transcriptView.hidden > 0 ? false : nextBefore != null}
+                  hasOlder={nextBefore != null}
                   loadingOlder={loadingOlder}
                   onLoadOlder={() => void loadOlder()}
                   pinSignal={pinSignal}

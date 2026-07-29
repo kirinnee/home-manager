@@ -168,11 +168,11 @@ describe('ComposerAutocompletePopover', () => {
     const rows: ComposerAutocompleteCandidate[] = [
       { id: 'command:compact', kind: 'command', label: 'compact', group: 'Commands', replacement: '/compact' },
       { id: 'skill:summary', kind: 'skill', label: 'summary', group: 'Skills', replacement: '/summary' },
-      { id: 'command:clear', kind: 'command', label: 'clear', group: 'Commands', replacement: '/clear' },
+      { id: 'file:src/a.ts', kind: 'file', label: 'a.ts', group: 'Files', replacement: '@src/a.ts' },
     ];
 
     const grouped = groupAutocompleteCandidates(rows);
-    expect(grouped.map(group => group.label)).toEqual(['Commands', 'Skills', 'Commands']);
+    expect(grouped.map(group => group.label)).toEqual(['Commands', 'Skills', 'Files']);
     expect(grouped.flatMap(group => group.rows.map(row => row.index))).toEqual([0, 1, 2]);
   });
 

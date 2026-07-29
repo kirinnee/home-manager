@@ -60,9 +60,9 @@ export interface MigrateSessionTarget {
  * runtime commands must never queue, revive a terminal session, or become a
  * user-chat record. */
 export interface RuntimeSessionAction {
-  /** `model` switches in place; `effort` updates Claude reasoning; `clear`
-   * wipes model context after confirmation; `compact` summarises context. */
-  action: 'model' | 'effort' | 'clear' | 'compact';
+  /** `model` switches in place; `effort` updates Claude reasoning; `compact`
+   * summarises context. */
+  action: 'model' | 'effort' | 'compact';
   /** Claude's account-validated value. Omit for Codex so its native picker
    * opens and combines the model with supported reasoning effort. */
   model?: string;
