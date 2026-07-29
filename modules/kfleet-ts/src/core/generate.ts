@@ -1,7 +1,7 @@
 // The generator: turn resolved agents into wrapper scripts (~/.kfleet/bin) and
 // materialized config dirs (~/.claude-<n>, …). Idempotent: only managed wrappers
-// and the symlinks/files kfleet owns are touched — sessions, auth, sqlite, etc.
-// inside a config dir are never removed.
+// and the symlinks/files kfleet owns are touched — sessions, auth, legacy sqlite,
+// etc. inside a config dir are never removed.
 import {
   chmodSync,
   copyFileSync,
@@ -10,15 +10,17 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { binDir, home, resolveAsset } from '../deps';
+import { binDir, codexSharedSqliteDir, home, resolveAsset } from '../deps';
 import { KIND_SPECS } from './kinds';
 import { type SettingsOutput, readRuntimeLayer, resolveSettings } from './settings';
-import { type SharedResult, materializeSharedHistory } from './shared-history';
+import { ensureCodexSharedSqliteDir, type SharedResult, materializeSharedHistory } from './shared-history';
 import type {
   AliasMap,
   CommandDef,
@@ -31,6 +33,19 @@ import type {
 
 /** Marker line so prune can tell kfleet-owned wrappers from anything else. */
 const MARKER = '# kfleet-managed — do not edit (regenerate with `kfleet apply`)';
+const CODEX_SQLITE_MARKER = '.kfleet-sqlite-home.json';
+
+interface CodexSqliteMarker {
+  version: 1;
+  sqliteHome: string;
+  createdConfig: boolean;
+  original: { present: false } | { present: true; value: string };
+}
+
+export interface MaterializeAgentHooks {
+  beforeCodexMarkerWrite?: (markerPath: string) => void;
+  beforeSettingsWrite?: (dest: string) => void;
+}
 
 const homeForm = (abs: string): string =>
   abs === home || abs.startsWith(`${home}${path.sep}`) ? `$HOME${abs.slice(home.length)}` : abs;
@@ -43,6 +58,47 @@ const lexists = (p: string): boolean => {
   } catch {
     return false;
   }
+};
+
+const readCodexSqliteMarker = (markerPath: string): CodexSqliteMarker | null => {
+  if (!lexists(markerPath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(markerPath, 'utf8')) as Partial<CodexSqliteMarker>;
+    const original = parsed.original as CodexSqliteMarker['original'] | undefined;
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.sqliteHome !== 'string' ||
+      typeof parsed.createdConfig !== 'boolean' ||
+      !original ||
+      typeof original.present !== 'boolean' ||
+      (original.present && typeof original.value !== 'string')
+    ) {
+      throw new Error('invalid marker fields');
+    }
+    return parsed as CodexSqliteMarker;
+  } catch (error) {
+    throw new Error(
+      `cannot safely reconcile kfleet's Codex SQLite override: ${markerPath}: ${(error as Error).message}`,
+    );
+  }
+};
+
+const writeCodexSqliteMarker = (markerPath: string, marker: CodexSqliteMarker): void => {
+  const tempPath = `${markerPath}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    writeFileSync(tempPath, `${JSON.stringify(marker)}\n`, { flag: 'wx', mode: 0o600 });
+    renameSync(tempPath, markerPath);
+  } finally {
+    rmSync(tempPath, { force: true });
+  }
+};
+
+const sqliteHomeState = (settings: Record<string, unknown>, agentName: string): CodexSqliteMarker['original'] => {
+  if (!Object.prototype.hasOwnProperty.call(settings, 'sqlite_home')) return { present: false };
+  if (typeof settings.sqlite_home !== 'string') {
+    throw new Error(`agent "${agentName}": existing sqlite_home must be a string`);
+  }
+  return { present: true, value: settings.sqlite_home };
 };
 
 // Quote for a double-quoted shell string. We escape \ and " only — `$` is left
@@ -105,10 +161,14 @@ if [ "\${CLAUDE_AUTOTRUST:-1}" = "1" ] && [ -n "\${ANTHROPIC_API_KEY:-}" ] && co
 fi`;
 
 /** Render the wrapper shell script for one resolved agent. */
-export function renderWrapper(r: ResolvedAgent): string {
+export function renderWrapper(r: ResolvedAgent, sharedHistory: Partial<SharedHistoryMap> = {}): string {
   const spec = KIND_SPECS[r.kind];
   const dir = spec.configDir(r.name);
   const env = { ...spec.wrapperEnv(r.name, homeForm(dir)), ...(r.env ?? {}) };
+  // Config can override this environment variable, so materializeAgent also
+  // forces the matching sqlite_home settings layer while sharing is enabled.
+  // Keep the generated value itself absolute (do not rewrite it as $HOME/...).
+  if (r.kind === 'codex' && sharedHistory.codex) env.CODEX_SQLITE_HOME = codexSharedSqliteDir;
 
   const lines = ['#!/bin/sh', MARKER];
   for (const [k, v] of Object.entries(env)) lines.push(`export ${k}=${shQuote(v)}`);
@@ -125,20 +185,89 @@ function replaceWith(dest: string, make: () => void): void {
 }
 
 /** Materialize one agent's config dir assets. Returns the dest paths written. */
-function materializeAgent(r: ResolvedAgent, dirOverride?: string): string[] {
+export function materializeAgent(
+  r: ResolvedAgent,
+  dirOverride?: string,
+  sharedHistory: Partial<SharedHistoryMap> = {},
+  hooks: MaterializeAgentHooks = {},
+): string[] {
   const spec = KIND_SPECS[r.kind];
   const dir = dirOverride ?? spec.configDir(r.name);
   mkdirSync(dir, { recursive: true });
 
   const written: string[] = [];
   for (const asset of spec.assets) {
-    const ref = r[asset.field];
+    let ref = r[asset.field];
+    let codexMarkerBeforeWrite: CodexSqliteMarker | null = null;
+    let removeCodexMarkerAfterWrite = false;
+    if (asset.field === 'settings' && r.kind === 'codex') {
+      const dest = path.join(dir, asset.dest[0]);
+      const markerPath = path.join(dir, CODEX_SQLITE_MARKER);
+      const marker = readCodexSqliteMarker(markerPath);
+
+      if (sharedHistory.codex) {
+        let layers = ref === undefined ? [] : Array.isArray(ref) ? ref : [ref];
+        let original = marker?.original ?? ({ present: false } as const);
+        // With no configured settings source, config.toml is unmanaged. Fold its
+        // current contents in as the base instead of replacing the user's file.
+        if (ref === undefined && lexists(dest)) {
+          const existing = readRuntimeLayer(dest, 'toml');
+          if (!existing) {
+            throw new Error(`agent "${r.name}": cannot parse existing unmanaged Codex config: ${dest}`);
+          }
+          layers = [existing];
+          const currentState = sqliteHomeState(existing, r.name);
+          if (!marker || !currentState.present || currentState.value !== marker.sqliteHome) original = currentState;
+        }
+        // sqlite_home takes precedence over CODEX_SQLITE_HOME. Append the owned
+        // override last and mark it so a later disable can remove only this key.
+        ref = [...layers, { sqlite_home: codexSharedSqliteDir }];
+        codexMarkerBeforeWrite = {
+          version: 1,
+          sqliteHome: codexSharedSqliteDir,
+          createdConfig: marker?.createdConfig ?? !lexists(dest),
+          original,
+        };
+      } else if (marker && ref === undefined) {
+        // No settings source owns this file. Reconcile only the exact value
+        // recorded by our sidecar; a user-changed sqlite_home is left untouched.
+        if (lexists(dest)) {
+          const current = readRuntimeLayer(dest, 'toml');
+          if (!current) {
+            throw new Error(`agent "${r.name}": cannot parse Codex config while removing kfleet override: ${dest}`);
+          }
+          if (current.sqlite_home === marker.sqliteHome) {
+            if (marker.original.present) current.sqlite_home = marker.original.value;
+            else delete current.sqlite_home;
+            if (marker.createdConfig && Object.keys(current).length === 0) {
+              rmSync(dest, { force: true });
+            } else {
+              const out = resolveSettings([current], 'toml', 'copy');
+              if (out.kind !== 'write') throw new Error('internal error: expected serialized Codex settings');
+              replaceWith(dest, () => writeFileSync(dest, out.content));
+            }
+            written.push(dest);
+          }
+        }
+        rmSync(markerPath, { force: true });
+        continue;
+      } else if (marker) {
+        // A configured settings source will replace the injected layer below.
+        // Remove the ownership marker only after that materialization succeeds.
+        removeCodexMarkerAfterWrite = true;
+      }
+    }
     if (ref === undefined) continue; // asset not provided by this agent
 
     // Structured-config assets (settings) are a layered list: deep-merge + emit.
     if (asset.format) {
       let layers = (Array.isArray(ref) ? ref : [ref]) as SettingsLayer[];
       const dest = path.join(dir, asset.dest[0]);
+      if (codexMarkerBeforeWrite) {
+        const markerPath = path.join(dir, CODEX_SQLITE_MARKER);
+        hooks.beforeCodexMarkerWrite?.(markerPath);
+        writeCodexSqliteMarker(markerPath, codexMarkerBeforeWrite);
+      }
       // Runtime-mutated config (e.g. Claude's settings.json): prepend the existing
       // on-disk file as the base layer so a re-apply preserves keys the harness
       // wrote at runtime. Read BEFORE replaceWith deletes the dest below.
@@ -152,6 +281,7 @@ function materializeAgent(r: ResolvedAgent, dirOverride?: string): string[] {
       } catch (e) {
         throw new Error(`agent "${r.name}": ${(e as Error).message}`);
       }
+      hooks.beforeSettingsWrite?.(dest);
       if (out.kind === 'write') replaceWith(dest, () => writeFileSync(dest, out.content));
       else if (out.kind === 'copy')
         // copyFileSync preserves the source mode; a template linked out of the
@@ -163,6 +293,7 @@ function materializeAgent(r: ResolvedAgent, dirOverride?: string): string[] {
         });
       else replaceWith(dest, () => symlinkSync(out.src, dest));
       written.push(dest);
+      if (removeCodexMarkerAfterWrite) rmSync(path.join(dir, CODEX_SQLITE_MARKER), { force: true });
       continue;
     }
 
@@ -204,10 +335,10 @@ export function resolveDefaultHomeTargets(defaultHomes: DefaultHomeMap, agents: 
 }
 
 /** Write one agent's wrapper script (executable). */
-function writeWrapper(r: ResolvedAgent): string {
+function writeWrapper(r: ResolvedAgent, sharedHistory: Partial<SharedHistoryMap>): string {
   mkdirSync(binDir, { recursive: true });
   const p = wrapperPath(r);
-  writeFileSync(p, renderWrapper(r), { mode: 0o755 });
+  writeFileSync(p, renderWrapper(r, sharedHistory), { mode: 0o755 });
   return p;
 }
 
@@ -285,6 +416,9 @@ export function apply(
     seen.add(c.name);
   }
   const defaultHomeTargets = resolveDefaultHomeTargets(defaultHomes, agents);
+  // This is the migration boundary: create a fresh shared database directory,
+  // but never inspect, merge, move, or delete legacy per-home databases.
+  if (sharedHistory.codex) ensureCodexSharedSqliteDir();
   const shared: SharedResult = { migrated: 0, conflicts: 0 };
   const shareInto = (kind: Kind, dir: string): void => {
     if (!sharedHistory[kind]) return;
@@ -293,12 +427,12 @@ export function apply(
     shared.conflicts += r.conflicts;
   };
   for (const r of agents) {
-    materializeAgent(r);
-    writeWrapper(r);
+    materializeAgent(r, undefined, sharedHistory);
+    writeWrapper(r, sharedHistory);
     shareInto(r.kind, KIND_SPECS[r.kind].configDir(r.name));
   }
   for (const d of defaultHomeTargets) {
-    materializeAgent(d.agent, d.dir);
+    materializeAgent(d.agent, d.dir, sharedHistory);
     shareInto(d.kind, d.dir); // the bare CLI's home joins the pool too
   }
   for (const c of commands) writeCommand(c);

@@ -7,6 +7,7 @@ import { createApplyCommand, createListCommand, createPruneCommand } from './cli
 import { createHealthCommand } from './cli/health';
 import { createInitCommand } from './cli/init';
 import { createLoginCommand } from './cli/login';
+import { createPrewarmCommand } from './cli/prewarm';
 import { createServeCommand } from './cli/serve';
 import { createServiceCommand } from './cli/service';
 import { createUsageCommand } from './cli/usage';
@@ -23,6 +24,7 @@ program
   .addCommand(createDoctorCommand())
   .addCommand(createHealthCommand())
   .addCommand(createUsageCommand())
+  .addCommand(createPrewarmCommand())
   .addCommand(createServeCommand())
   .addCommand(createServiceCommand());
 
