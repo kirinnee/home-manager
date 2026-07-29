@@ -6,10 +6,32 @@
 export interface AvailableSkill {
   name: string;
   description: string;
+  /** User-level fleet catalog or a repository-local skill directory. */
+  scope: SkillScope;
+  /** Harness(es) that the skill's actual source directory ships for. */
+  origin: SkillOrigin;
+}
+
+interface SkillManifest {
+  name: string;
+  description: string;
+}
+
+export type SkillScope = 'global' | 'project';
+export type SkillOrigin = 'claude' | 'codex' | 'both' | 'unknown';
+
+export interface SkillListingOptions {
+  /** The session harness determines which project directory is callable. */
+  harness?: 'claude' | 'codex';
+  /** Session working directory, used only for its explicit skill roots. */
+  projectRoot?: string;
+  /** Injectable fleet roots make provenance testable without trusting a label. */
+  globalRoots?: Partial<Record<'claude' | 'codex', string>>;
 }
 
 import { constants, type Dirent } from 'node:fs';
 import { lstat, open, readdir, realpath } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import path from 'node:path';
 
 type FrontmatterValue =
@@ -35,7 +57,7 @@ export const MAX_SKILL_MANIFEST_BYTES = 256 * 1024;
  * YAML parser: manifests only need name and description, and accepting a small
  * subset keeps malformed or surprising metadata from affecting the API.
  */
-export function parseSkillFrontmatter(markdown: string): AvailableSkill | undefined {
+export function parseSkillFrontmatter(markdown: string): SkillManifest | undefined {
   const lines = markdown.replace(/^\uFEFF/, '').split(/\r?\n/);
   if (!FRONTMATTER_DELIMITER.test(lines[0] ?? '')) return undefined;
 
@@ -155,23 +177,119 @@ function parseScalar(raw: string): string | undefined {
  * one-level anchor. The manifest itself must be a regular file inside that
  * resolved anchor; there is no recursion or arbitrary-path API here.
  */
-export async function listSkills(harnessHome: string | undefined): Promise<AvailableSkill[]> {
+export async function listSkills(
+  harnessHome: string | undefined,
+  options: SkillListingOptions = {},
+): Promise<AvailableSkill[]> {
   if (!harnessHome?.trim()) return [];
   const skillsRoot = path.join(harnessHome, 'skills');
   const skills = new Map<string, AvailableSkill>();
 
+  const globalRoots = {
+    claude: path.join(homedir(), '.kfleet', 'skills'),
+    codex: path.join(homedir(), '.kfleet', 'skills-codex'),
+    ...options.globalRoots,
+  };
+  const resolvedGlobalRoots = await resolveRoots(globalRoots);
+  const resolvedSkillsRoot = await resolveDirectory(skillsRoot);
+  const globalCatalogs = await catalogsForRoots(resolvedGlobalRoots);
+
   // Built-ins first means direct account skills have the documented precedence.
-  for (const [directory, system] of [
-    [path.join(skillsRoot, '.system'), true],
-    [skillsRoot, false],
-  ] as const) {
-    for (const skill of await listSkillDirectory(directory, system)) skills.set(skill.name, skill);
+  for (const skill of await listSkillDirectory(path.join(skillsRoot, '.system'), true)) {
+    skills.set(skill.name, { ...skill, scope: 'global', origin: 'unknown' });
+  }
+  for (const skill of await listSkillDirectory(skillsRoot, false)) {
+    skills.set(skill.name, {
+      ...skill,
+      scope: 'global',
+      origin: originForSkill(skill.name, resolvedSkillsRoot, resolvedGlobalRoots, globalCatalogs),
+    });
+  }
+
+  const projectDirectories = projectSkillDirectories(options.harness, options.projectRoot);
+  const projectRoots = await resolveRoots(projectDirectories);
+  const projectCatalogs = await catalogsForRoots(projectRoots);
+  const activeProjectDirectory = options.harness ? projectDirectories[options.harness] : undefined;
+  if (activeProjectDirectory) {
+    const activeProjectRoot = await resolveDirectory(activeProjectDirectory);
+    // A project skill intentionally overrides a user-level skill of the same
+    // name for this session, mirroring the harness's local-first behaviour.
+    for (const skill of await listSkillDirectory(activeProjectDirectory, false)) {
+      skills.set(skill.name, {
+        ...skill,
+        scope: 'project',
+        origin: originForSkill(skill.name, activeProjectRoot, projectRoots, projectCatalogs),
+      });
+    }
   }
 
   return [...skills.values()].sort(compareSkills);
 }
 
-async function listSkillDirectory(directory: string, system: boolean): Promise<AvailableSkill[]> {
+function projectSkillDirectories(
+  harness: SkillListingOptions['harness'],
+  projectRoot: string | undefined,
+): Partial<Record<'claude' | 'codex', string>> {
+  if (!projectRoot?.trim() || !harness) return {};
+  return {
+    claude: path.join(projectRoot, '.claude', 'skills'),
+    codex: path.join(projectRoot, '.agents', 'skills'),
+  };
+}
+
+async function resolveDirectory(directory: string | undefined): Promise<string | undefined> {
+  if (!directory) return undefined;
+  try {
+    const resolved = await realpath(directory);
+    return (await lstat(resolved)).isDirectory() ? resolved : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveRoots(
+  roots: Partial<Record<'claude' | 'codex', string>>,
+): Promise<Partial<Record<'claude' | 'codex', string>>> {
+  const entries = await Promise.all(
+    (Object.entries(roots) as Array<['claude' | 'codex', string | undefined]>).map(
+      async ([harness, directory]) => [harness, await resolveDirectory(directory)] as const,
+    ),
+  );
+  return Object.fromEntries(entries.filter((entry): entry is ['claude' | 'codex', string] => Boolean(entry[1])));
+}
+
+async function catalogsForRoots(
+  roots: Partial<Record<'claude' | 'codex', string>>,
+): Promise<Partial<Record<'claude' | 'codex', SkillManifest[]>>> {
+  const entries = await Promise.all(
+    (Object.entries(roots) as Array<['claude' | 'codex', string | undefined]>).map(
+      async ([harness, directory]) =>
+        [harness, directory ? await listSkillDirectory(directory, false) : undefined] as const,
+    ),
+  );
+  return Object.fromEntries(
+    entries.filter((entry): entry is ['claude' | 'codex', SkillManifest[]] => Boolean(entry[1])),
+  );
+}
+
+function originForSkill(
+  name: string,
+  root: string | undefined,
+  roots: Partial<Record<'claude' | 'codex', string>>,
+  catalogs: Partial<Record<'claude' | 'codex', SkillManifest[]>>,
+): SkillOrigin {
+  if (!root) return 'unknown';
+  const claude = roots.claude === root && catalogs.claude?.some(skill => skill.name === name);
+  const codex = roots.codex === root && catalogs.codex?.some(skill => skill.name === name);
+  const counterpartClaude = claude && catalogs.codex?.some(skill => skill.name === name);
+  const counterpartCodex = codex && catalogs.claude?.some(skill => skill.name === name);
+  if (counterpartClaude || counterpartCodex) return 'both';
+  if (claude) return 'claude';
+  if (codex) return 'codex';
+  return 'unknown';
+}
+
+async function listSkillDirectory(directory: string, system: boolean): Promise<SkillManifest[]> {
   let entries: Dirent[];
   let resolvedDirectory: string;
   try {
@@ -183,7 +301,7 @@ async function listSkillDirectory(directory: string, system: boolean): Promise<A
     return [];
   }
 
-  const skills: AvailableSkill[] = [];
+  const skills: SkillManifest[] = [];
   for (const entry of entries) {
     if (system && INTERNAL_CODEX_SYSTEM_SKILLS.has(entry.name)) continue;
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
@@ -202,7 +320,7 @@ async function listSkillDirectory(directory: string, system: boolean): Promise<A
   return skills;
 }
 
-async function readSkillManifest(manifest: string): Promise<AvailableSkill | undefined> {
+async function readSkillManifest(manifest: string): Promise<SkillManifest | undefined> {
   try {
     const metadata = await lstat(manifest);
     if (!metadata.isFile() || metadata.isSymbolicLink()) return undefined;

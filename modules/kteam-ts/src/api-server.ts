@@ -930,7 +930,10 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             const view = await options.service.get(id);
             return json({
               harness: view.config.harness,
-              skills: await listSkills(view.config.harnessHome),
+              skills: await listSkills(view.config.harnessHome, {
+                harness: view.config.harness,
+                projectRoot: view.config.cwd,
+              }),
             });
           }
           if (!action && request.method === 'DELETE') {
