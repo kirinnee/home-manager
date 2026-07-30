@@ -508,12 +508,21 @@ describe('actor attribution (never authorization)', () => {
   });
 
   test('a human at the CLI or the browser is user/user', async () => {
-    expect(await resolveTaskActor(lookup, { actorSource: 'admin-cli' })).toEqual({ actor: 'user', actorName: 'user' });
-    expect(await resolveTaskActor(lookup, { actorSource: 'admin-ui' })).toEqual({ actor: 'user', actorName: 'user' });
-    expect(await resolveTaskActor(lookup, {})).toEqual({ actor: 'user', actorName: 'user' });
+    expect(await resolveTaskActor(lookup, { actorSource: 'admin-cli' })).toEqual({
+      actor: 'user',
+      actorName: 'user',
+      humanAdmin: true,
+    });
+    expect(await resolveTaskActor(lookup, { actorSource: 'admin-ui' })).toEqual({
+      actor: 'user',
+      actorName: 'user',
+      humanAdmin: true,
+    });
+    expect(await resolveTaskActor(lookup, {})).toEqual({ actor: 'user', actorName: 'user', humanAdmin: true });
     expect(await resolveTaskActor(lookup, { sessionId: '   ', actorSource: null })).toEqual({
       actor: 'user',
       actorName: 'user',
+      humanAdmin: true,
     });
   });
 

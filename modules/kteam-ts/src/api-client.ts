@@ -18,6 +18,7 @@ import { loadDaemonConfig } from './daemon-config';
 import { displayName } from './names';
 import { KTEAM_VERSION } from './version';
 import type { AnalyticsResponse } from './analytics-types';
+import { TASK_BOARD_CAPABILITY_HEADER } from './task-boards-api';
 
 /** Compare two dotted numeric versions. >0 when `a` is newer, <0 when older,
  *  0 when equal or either is unparseable (treat unknown as "no skew"). */
@@ -289,22 +290,52 @@ export class ApiClient {
    *  arrived still created the session (2026-07-23: two such calls produced
    *  live controllers a caller believed had failed) — reporting failure there
    *  is what makes a retrying responder duplicate teammates. */
-  async start(input: StartSessionRequest, requestId = process.env.KTEAM_REQUEST_ID || crypto.randomUUID()) {
+  async start(
+    input: StartSessionRequest,
+    requestId = process.env.KTEAM_REQUEST_ID || crypto.randomUUID(),
+    boardCapability?: string,
+  ) {
     // Clock-skew grace on the "created after I called" window below.
     const calledAt = Date.now() - 5_000;
     const body = JSON.stringify(input);
     const payload = Bun.hash(body).toString(16);
+    const requestedBoardAccess = input.boardAccess ?? 'none';
+    const capability = boardCapability?.trim() ?? '';
+    if (requestedBoardAccess !== 'none' && !capability) {
+      throw new Error('a non-none board-access start requires the calling session board capability');
+    }
+    const startHeaders = {
+      'content-type': 'application/json',
+      'x-kteam-request-id': requestId,
+      ...(capability ? { [TASK_BOARD_CAPABILITY_HEADER]: capability } : {}),
+    };
     try {
       return await this.request<SessionView>('/v1/sessions', {
         method: 'POST',
         body,
-        headers: { 'content-type': 'application/json', 'x-kteam-request-id': requestId },
+        headers: startHeaders,
       });
     } catch (error) {
       // Only a TRANSPORT failure leaves the outcome unknown; a daemon that
       // answered (bad wrapper, missing prompt) rejected the start outright and
       // there is nothing to recover.
       if (!(error instanceof Error) || !/did not answer|is unavailable/.test(error.message)) throw error;
+      // Retry the SAME start once before falling back to a read. The daemon's
+      // create ledger shares the in-flight attempt and, for board-access
+      // starts, also retries the exact durable grant intent. A read-only
+      // recovery could otherwise return the child after session persistence
+      // but before the grant request committed.
+      try {
+        return await this.request<SessionView>(
+          '/v1/sessions',
+          { method: 'POST', body, headers: startHeaders },
+          RECOVERY_TIMEOUT_MS,
+        );
+      } catch (recoveryError) {
+        if (!(recoveryError instanceof Error) || !/did not answer|is unavailable/.test(recoveryError.message)) {
+          throw recoveryError;
+        }
+      }
       // The recovery lookups get their own SHORT deadline: three full-length
       // requests against an unresponsive daemon would take longer than the
       // caller timeouts this whole change exists to stay under.
@@ -313,7 +344,10 @@ export class ApiClient {
         {},
         RECOVERY_TIMEOUT_MS,
       ).catch(() => undefined);
-      if (created) return created;
+      if (created) {
+        await this.ensureStartedBoardAccess(created, requestedBoardAccess, requestId, payload, capability);
+        return created;
+      }
       // Last resort, and the one that works against a daemon too busy (or too
       // old) to answer the lookup: the session row is persisted BEFORE the TUI
       // launch, so a start that "failed" is usually visible in the list. One
@@ -321,10 +355,36 @@ export class ApiClient {
       for (const delay of [0, 1_000]) {
         if (delay) await Bun.sleep(delay);
         const found = await this.findCreatedSession(input, calledAt);
-        if (found) return found;
+        if (found) {
+          await this.ensureStartedBoardAccess(found, requestedBoardAccess, requestId, payload, capability);
+          return found;
+        }
       }
       throw error;
     }
+  }
+
+  private async ensureStartedBoardAccess(
+    view: SessionView,
+    requestedBoardAccess: NonNullable<StartSessionRequest['boardAccess']>,
+    requestId: string,
+    payloadHash: string,
+    capability: string,
+  ): Promise<void> {
+    if (requestedBoardAccess === 'none') return;
+    await this.request(
+      '/v1/task-board/child-grants/request',
+      {
+        method: 'POST',
+        body: JSON.stringify({ targetSessionId: view.config.id, role: requestedBoardAccess }),
+        headers: {
+          'content-type': 'application/json',
+          'x-kteam-request-id': `${requestId}:board-access:${payloadHash}`,
+          [TASK_BOARD_CAPABILITY_HEADER]: capability,
+        },
+      },
+      RECOVERY_TIMEOUT_MS,
+    );
   }
 
   /** The session THIS start call created: same agent, same derived NAME, same

@@ -110,8 +110,20 @@ export interface PendingQuestion {
   missingSince?: string;
 }
 
+/** Explicit board access selected when a parent creates a child. `none` and an
+ * absent value preserve legacy isolation; every other value creates only a
+ * pending two-key grant request and never grants access by itself. */
+export type TaskBoardAccess = 'none' | 'read' | 'worker' | 'coordinator';
+
 export interface SessionConfig {
   id: string;
+  /** Stable identity of this logical session record. Unlike the runtime
+   * generation it never changes across resume/account migration. */
+  incarnation?: string;
+  /** Active harness generation. Board grants bind writes to this exact value;
+   * a successful runtime migration increments it only after old-runtime fence
+   * and target readiness proof. Legacy configs read as generation 1. */
+  runtimeGeneration?: number;
   name: string;
   /** Auto-assigned human callsign (e.g. "mordecai") — accepted anywhere an id
    *  is; unique only among sessions created in the last 5 days. */
@@ -122,6 +134,9 @@ export interface SessionConfig {
   /** The kteam session that STARTED this one (auto-captured from the caller's
    *  KTEAM_SESSION_ID pane env) — teammates spawning teammates form a tree. */
   parent?: string;
+  /** Creation-time board request, retained as auditable session intent. It is
+   * not authority; only the central grant plus binding capability authorizes. */
+  boardAccess?: TaskBoardAccess;
   binary: string;
   harness: Harness;
   modelHint: string;
@@ -434,6 +449,9 @@ export interface StartSessionRequest {
   /** Parent kteam session id — auto-filled by the CLI from KTEAM_SESSION_ID
    *  when a teammate starts a teammate. */
   parent?: string;
+  /** Explicit access requested for this child. Non-`none` choices require the
+   * live interactive parent binding plus separate current-coordinator approval. */
+  boardAccess?: TaskBoardAccess;
   cwd?: string;
   mode?: InteractionMode;
   /** Launch with Remote Control (claude only). Omitted => the daemon default
