@@ -16,6 +16,16 @@ import { listSkills } from './skills';
 import type { SttService } from './stt-service';
 import type { TaskApi } from './tasks-api';
 import { resolveTaskActor, taskApiRequestFrom } from './tasks-api';
+import type { TaskBoardApi } from './task-boards-api';
+import {
+  isTaskBoardPath,
+  TASK_BOARD_ADMIN_CAPABILITY_HEADER,
+  TASK_BOARD_CAPABILITY_HEADER,
+  TASK_BOARD_SESSION_CAPABILITY_HEADER,
+  taskBoardErrorStatus,
+  taskBoardWardenDenial,
+} from './task-boards-api';
+import { isTaskBoardError } from './task-boards-types';
 import type { PinApi } from './pins-api';
 import { isPinPath, pinWardenDenial } from './pins-api';
 import type { AttentionApi } from './attention-api';
@@ -114,6 +124,8 @@ export interface ApiServerOptions {
   stt?: SttService;
   /** Optional for older tests; daemon-entry supplies the singleton in production. */
   tasks?: TaskApi;
+  /** Shared-board membership/ACL transport and task-actor hydration. */
+  taskBoards?: TaskBoardApi;
   /** Daemon-owned per-session pins. Omitted in tests that don't exercise pins. */
   pins?: PinApi;
   /** Admin-only independent shell terminals, including their WebSocket stream. */
@@ -182,6 +194,8 @@ async function wardenScopeDenial(
   if (/^\/v1\/sessions\/[^/]+\/fs(?:\/|$)/.test(pathname)) return forbidden('browse session files');
   const taskDenial = taskWardenDenial(method, pathname);
   if (taskDenial) return forbidden(taskDenial);
+  const taskBoardDenial = taskBoardWardenDenial(method, pathname);
+  if (taskBoardDenial) return forbidden(taskBoardDenial);
   const pinDenial = pinWardenDenial(method, pathname);
   if (pinDenial) return forbidden(pinDenial);
   const terminalDenial = terminalWardenDenial(method, pathname);
@@ -724,20 +738,49 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             // 2026-07-23. Keyed under a reserved ref (no session id exists yet).
             const createId = request.headers.get('x-kteam-request-id') ?? undefined;
             const input = await body<StartSessionRequest>(request);
+            const createPayloadHash = Bun.hash(JSON.stringify(input)).toString(16);
+            const boardAccess = input.boardAccess ?? 'none';
+            const boardStartActor = {
+              sessionId: request.headers.get('x-kteam-session-id')?.trim() || null,
+              humanAdmin: isHumanAdminActor(actor),
+            };
+            const boardCapability = request.headers.get(TASK_BOARD_CAPABILITY_HEADER) ?? undefined;
+            if (boardAccess !== 'none') {
+              if (!options.taskBoards) throw new HttpError(503, 'task-board service is unavailable');
+              if (!createId) throw new HttpError(400, 'a board-access start requires x-kteam-request-id');
+              await options.taskBoards.preflightChildStart({
+                actor: boardStartActor,
+                boardCapability,
+                parentSessionId: input.parent,
+                mode: input.mode,
+                requestedRole: boardAccess,
+              });
+            }
+            const finishBoardAccess = async (view: SessionView): Promise<SessionView> => {
+              if (boardAccess === 'none') return view;
+              await options.taskBoards!.requestStartedChildGrant({
+                actor: boardStartActor,
+                boardCapability,
+                targetSessionId: view.config.id,
+                requestedRole: boardAccess,
+                requestId: `${createId}:board-access:${createPayloadHash}`,
+              });
+              return view;
+            };
             if (createId === undefined) return json(await options.service.start(input), 201);
             // The key binds the id to the PAYLOAD. A caller that exports one
             // KTEAM_REQUEST_ID for a whole shell would otherwise have its
             // second and third `kteam start` answered with the first
             // session — different tasks silently never launched, exit 0.
-            const key = `${CREATE_REF}\n${createId}\n${Bun.hash(JSON.stringify(input)).toString(16)}`;
+            const key = `${CREATE_REF}\n${createId}\n${createPayloadHash}`;
             const pending = createRequests.get(key);
             if (pending) return json(await pending, 201);
             const previous = createdSessions.get(key);
-            if (previous !== undefined) return json(await options.service.get(previous), 201);
+            if (previous !== undefined) return json(await finishBoardAccess(await options.service.get(previous)), 201);
             const attempt = (async () => {
               const view = (await options.service.start(input)) as SessionView;
               createdSessions.set(key, view.config.id);
-              return view;
+              return await finishBoardAccess(view);
             })();
             createRequests.set(key, attempt);
             try {
@@ -755,22 +798,49 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
             // itself: a caller that reuses one id across DIFFERENT starts must
             // never be handed the earlier task's session as its own.
             const key = `${CREATE_REF}\n${decodeURIComponent(byRequest[1]!)}\n${url.searchParams.get('payload') ?? ''}`;
-            const created = createdSessions.get(key);
-            if (created !== undefined) return json(await options.service.get(created));
             // The caller usually asks precisely because its own request is
             // still running (the CLI's deadline is shorter than a queued
             // bootstrap), so wait for the in-flight create rather than
-            // answering 404 and inviting a duplicate launch.
+            // returning a merely-persisted child before its requested board
+            // grant intent commits.
             const pending = createRequests.get(key);
             if (pending) return json(await pending);
+            const created = createdSessions.get(key);
+            if (created !== undefined) return json(await options.service.get(created));
             return json({ error: 'no session was created for that request id' }, 404);
           }
 
+          if (options.taskBoards && isTaskBoardPath(url.pathname)) {
+            const sessionId = request.headers.get('x-kteam-session-id');
+            const boardResponse = await options.taskBoards.handle({
+              method: request.method,
+              url,
+              body: request.method === 'POST' ? await body<unknown>(request) : undefined,
+              actor: {
+                sessionId: sessionId?.trim() || null,
+                humanAdmin: isHumanAdminActor(actor),
+              },
+              boardCapability: request.headers.get(TASK_BOARD_CAPABILITY_HEADER) ?? undefined,
+              boardAdminCapability: request.headers.get(TASK_BOARD_ADMIN_CAPABILITY_HEADER) ?? undefined,
+              sessionCapability: request.headers.get(TASK_BOARD_SESSION_CAPABILITY_HEADER) ?? undefined,
+              requestId: request.headers.get('x-kteam-request-id') ?? undefined,
+            });
+            if (boardResponse) return json(boardResponse.body, boardResponse.status);
+            return json(unknownRoute(request.method, url.pathname), 404);
+          }
           if (options.tasks && isTaskPath(url.pathname)) {
-            const actorForTask = await resolveTaskActor(options.service, {
+            const resolvedTaskActor = await resolveTaskActor(options.service, {
               sessionId: request.headers.get('x-kteam-session-id'),
               actorSource: actor,
             });
+            const actorForTask = options.taskBoards
+              ? await options.taskBoards.hydrateTaskActor(
+                  resolvedTaskActor,
+                  isHumanAdminActor(actor),
+                  request.headers.get(TASK_BOARD_CAPABILITY_HEADER) ?? undefined,
+                  request.headers.get(TASK_BOARD_ADMIN_CAPABILITY_HEADER) ?? undefined,
+                )
+              : resolvedTaskActor;
             const taskResponse = await options.tasks.handle(
               taskApiRequestFrom(
                 request,
@@ -1165,6 +1235,9 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
         } catch (error) {
           if (error instanceof AttachmentError) {
             return json({ error: attachmentErrorMessage(error), code: error.code }, attachmentErrorStatus(error.code));
+          }
+          if (isTaskBoardError(error)) {
+            return json({ error: error.message, code: error.code }, taskBoardErrorStatus(error));
           }
           if (isBrowserError(error)) {
             return json({ error: error.message, code: error.code }, error.status);

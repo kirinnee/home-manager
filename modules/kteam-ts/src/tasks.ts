@@ -43,6 +43,14 @@ import {
 } from './session-tasks-store';
 import { migrateLegacyTasks, type TaskMigrationReport } from './tasks-migration';
 import {
+  TaskBoardService,
+  exactWorkerAssignee,
+  type ResolvedTaskScope,
+  type TaskBoardSessionDeps,
+} from './task-boards';
+import { TaskBoardStore, hashTaskBoardPayload, legacyTaskBoardSessionIncarnation } from './task-boards-store';
+import { TaskBoardError, taskBoardActionForTaskAction, type TaskBoardAction } from './task-boards-types';
+import {
   annotateTasks,
   hasCurrentDoneMarker,
   resolveAssignee,
@@ -133,17 +141,25 @@ export * from './tasks-contract';
 /** Narrow session-world dependency. `SessionManager.list()` satisfies it. */
 export interface TaskDeps {
   list(): Promise<TaskAssigneeView[]>;
+  get?(ref: string): Promise<unknown>;
+  recordBoardNotice?(
+    sessionId: string,
+    notice: { noticeId: string; type: string; data: Record<string, unknown> },
+  ): Promise<void>;
   subscribe?(listener: (event: KTeamEvent) => void): () => void;
 }
 
 export interface TaskServiceOptions extends SessionTaskStoreOptions {
   quietAfterMs?: number;
+  /** Test seam. Production constructs the service from SessionManager. */
+  boardService?: TaskBoardService | null;
 }
 
 interface Provenance {
   actor: string;
   actorName: string | null;
   session: string | null;
+  human: boolean;
 }
 
 interface ShippedReopen {
@@ -158,6 +174,8 @@ interface ShippedReopen {
 
 export class TaskService {
   private readonly store: SessionTaskStore;
+  private readonly boardStore: TaskBoardStore | undefined;
+  private readonly boards: TaskBoardService | undefined;
   private readonly legacy: TaskStore;
   private readonly graphQueue = new SerialQueue();
   private readonly listeners = new Set<(event: KTeamEvent) => void>();
@@ -170,6 +188,31 @@ export class TaskService {
     private readonly options: TaskServiceOptions = {},
   ) {
     this.store = new SessionTaskStore(paths, { role: options.role ?? 'daemon' });
+    if (options.boardService !== undefined) {
+      this.boards = options.boardService ?? undefined;
+      this.boardStore = this.boards?.store;
+    } else if (typeof deps.get === 'function') {
+      this.boardStore = new TaskBoardStore(paths, {
+        role: options.role ?? 'daemon',
+        allocateId: kind => this.store.allocateId(kind),
+        resolveAssignedSessionId: async task =>
+          exactWorkerAssignee(
+            task,
+            (await this.deps.list()) as unknown as Awaited<ReturnType<TaskBoardSessionDeps['list']>>,
+          ),
+        resolveSessionIdentity: async sessionId => {
+          const lookup = (this.deps as unknown as TaskBoardSessionDeps).get;
+          const view = await lookup?.(sessionId).catch(() => undefined);
+          if (!view) return null;
+          return {
+            sessionIncarnation:
+              view.config.incarnation ?? legacyTaskBoardSessionIncarnation(view.config.id, view.config.createdAt),
+            runtimeGeneration: view.config.runtimeGeneration ?? 1,
+          };
+        },
+      });
+      this.boards = new TaskBoardService(paths, this.boardStore, deps as unknown as TaskBoardSessionDeps);
+    }
     // Intentionally reader-only: live code cannot mutate the retained source.
     this.legacy = new TaskStore(paths);
   }
@@ -182,12 +225,17 @@ export class TaskService {
     return this.legacy;
   }
 
+  get taskBoards(): TaskBoardService | undefined {
+    return this.boards;
+  }
+
   /** Copy-only, idempotent startup migration. Safe to call more than once in a
    *  process; every route also awaits it so wiring cannot accidentally serve a
    *  half-migrated view. */
   initialize(): Promise<TaskMigrationReport> {
     if (this.initialization === undefined) {
       const attempt = (async () => {
+        await this.boards?.initialize();
         const views = await this.deps.list().catch(() => [] as TaskAssigneeView[]);
         const report = await migrateLegacyTasks(this.paths, this.legacy, this.store, views);
         this.attachLifecycle();
@@ -208,10 +256,15 @@ export class TaskService {
 
   // ---- session reads -----------------------------------------------------
 
-  async sessionTaskList(sessionId: string, filter: TaskFilter = {}): Promise<SessionTaskListResponse> {
+  async sessionTaskList(
+    sessionId: string,
+    filter: TaskFilter = {},
+    actor: TaskActor = { humanAdmin: true },
+  ): Promise<SessionTaskListResponse> {
     await this.initialize();
     this.assertSessionId(sessionId);
-    const read = await this.store.list(sessionId, filter);
+    const scope = await this.resolveScope(sessionId, actor, 'read');
+    const read = await this.listScope(scope, filter);
     const views = await this.annotateEntries(read.tasks, await this.graphTasks());
     return {
       v: SESSION_TASK_FILE_VERSION,
@@ -220,13 +273,20 @@ export class TaskService {
       parseErrors: read.parseErrors,
       ...(read.parseErrorIds.length > 0 ? { parseErrorIds: read.parseErrorIds } : {}),
       updatedAt: read.file.updatedAt,
+      ...(scope.kind === 'board' ? { authorization: this.authorizationProvenance(scope, 'read') } : {}),
     };
   }
 
-  async sessionTaskDetail(sessionId: string, id: string, afterSeq = 0): Promise<ScopedTaskDetailResponse | undefined> {
+  async sessionTaskDetail(
+    sessionId: string,
+    id: string,
+    afterSeq = 0,
+    actor: TaskActor = { humanAdmin: true },
+  ): Promise<ScopedTaskDetailResponse | undefined> {
     await this.initialize();
     this.assertSessionId(sessionId);
-    const { entry, read } = await this.store.detail(sessionId, id);
+    const scope = await this.resolveScope(sessionId, actor, 'read');
+    const { entry, read } = await this.detailScope(scope, id);
     if (entry === undefined) return undefined;
     const [view] = await this.annotateEntries([entry], await this.graphTasks());
     if (view === undefined) return undefined;
@@ -237,6 +297,7 @@ export class TaskService {
       task: { ...view, sessionId },
       activity,
       ...(activityParseErrors > 0 ? { activityParseErrors } : {}),
+      ...(scope.kind === 'board' ? { authorization: this.authorizationProvenance(scope, 'read') } : {}),
     };
   }
 
@@ -256,7 +317,8 @@ export class TaskService {
   }> {
     await this.initialize();
     this.assertSessionId(sessionId);
-    const read = await this.store.read(sessionId);
+    const scope = await this.resolveScope(sessionId, { humanAdmin: true }, 'read');
+    const read = await this.readScope(scope);
     return {
       tasks: read.file.tasks.map(entry => ({
         id: entry.task.id,
@@ -277,8 +339,9 @@ export class TaskService {
    *  the sequential double walk this replaces cost ~14s against a busy daemon
    *  (each awaited read paying the loop's lag) when the underlying I/O is
    *  ~70ms in parallel. */
-  async taskList(filter: TaskFilter = {}): Promise<FleetTaskListResponse> {
+  async taskList(filter: TaskFilter = {}, actor: TaskActor = { humanAdmin: true }): Promise<FleetTaskListResponse> {
     await this.initialize();
+    if (actor.humanAdmin !== true) return this.authorizedAggregateList(filter, actor);
     const { reads, migrated } = await this.fleetReads();
     const scoped: Array<{ sessionId: string | null; entry: StoredSessionTask }> = [];
     const parseErrorIds: string[] = [];
@@ -328,8 +391,13 @@ export class TaskService {
   /** Compatibility detail for the existing fleet board. IDs are allocated
    *  globally, but migration conflicts or hand-edited data can still duplicate
    *  one; that case receives a 409 instead of an arbitrary record. */
-  async taskDetail(id: string, afterSeq = 0): Promise<ScopedTaskDetailResponse | undefined> {
+  async taskDetail(
+    id: string,
+    afterSeq = 0,
+    actor: TaskActor = { humanAdmin: true },
+  ): Promise<ScopedTaskDetailResponse | undefined> {
     await this.initialize();
+    if (actor.humanAdmin !== true) return this.authorizedAggregateDetail(id, afterSeq, actor);
     const canonical = canonicalTaskId(id);
     const { reads, migrated } = await this.fleetReads();
     const hits: Array<{ sessionId: string | null; entry: StoredSessionTask; activityParseErrors: number }> = [];
@@ -383,7 +451,9 @@ export class TaskService {
 
   async sessionTaskCreate(sessionId: string, input: TaskCreateInput, actor: TaskActor = {}): Promise<ScopedTaskView> {
     await this.initialize();
-    const provenance = await this.authorize(sessionId, actor);
+    const scope = await this.resolveScope(sessionId, actor, 'create');
+    const provenance =
+      scope.kind === 'board' ? provenanceFromBoard(scope.authorization) : await this.authorize(sessionId, actor);
     const kind = validateTaskKind(input.kind);
     const title = validateTaskTitle(input.title);
     const description = validateTaskDescription(input.description);
@@ -413,7 +483,7 @@ export class TaskService {
 
     const outcome = await this.graphQueue.run('__task_graph__', async () => {
       const allTasks = await this.graphTasks();
-      const write = await this.store.create(sessionId, kind, id => {
+      const build = (id: string): StoredSessionTask => {
         const task: Task = {
           v: TASK_SCHEMA_VERSION,
           id,
@@ -463,11 +533,32 @@ export class TaskService {
           },
         };
         return { task, activity: [created] };
-      });
+      };
+      const write =
+        scope.kind === 'board'
+          ? await this.boardStore!.createTask(
+              scope.board.boardId,
+              kind,
+              {
+                authorization: scope.authorization,
+                action: 'create',
+                payloadHash: hashTaskBoardPayload({ operation: 'task.create', input }),
+              },
+              build,
+            )
+          : await this.store.create(sessionId, kind, build);
       return { write, graph: [...allTasks, write.value.task] };
     });
-    const view = await this.view(outcome.write.value, sessionId, outcome.graph);
-    await this.emit(sessionId, provenance);
+    const baseView = await this.view(outcome.write.value, sessionId, outcome.graph);
+    const view =
+      scope.kind === 'board' ? { ...baseView, authorization: this.authorizationProvenance(scope, 'create') } : baseView;
+    if (scope.kind === 'board') {
+      const board = await this.boardStore!.require(scope.board.boardId);
+      for (const grant of board.grants.filter(candidate => candidate.active))
+        await this.emit(grant.sessionId, provenance);
+    } else {
+      await this.emit(sessionId, provenance);
+    }
     return view;
   }
 
@@ -478,12 +569,36 @@ export class TaskService {
     actor: TaskActor = {},
   ): Promise<ScopedTaskView> {
     await this.initialize();
-    const provenance = await this.authorize(sessionId, actor);
+    const readScope = await this.resolveScope(sessionId, actor, 'read');
+    let scope = readScope;
+    let boardAction: TaskBoardAction | null = null;
+    if (readScope.kind === 'board') {
+      const current = await this.boardStore!.detailTask(readScope.board.boardId, id);
+      if (!current) throw new TaskError('not-found', `unknown task ${canonicalTaskId(id)} in session ${sessionId}`);
+      boardAction = taskBoardActionForMutation(current.task, input);
+      const sessionViews = await this.deps.list().catch(() => [] as TaskAssigneeView[]);
+      const assignedSessionId = exactWorkerAssignee(
+        current.task,
+        sessionViews as unknown as Awaited<ReturnType<TaskBoardSessionDeps['list']>>,
+      );
+      scope = await this.resolveScope(sessionId, actor, boardAction, { assignedSessionId });
+    }
+    const provenance =
+      scope.kind === 'board' ? provenanceFromBoard(scope.authorization) : await this.authorize(sessionId, actor);
     const outcome = await this.graphQueue.run('__task_graph__', async () => {
       const allTasks = await this.graphTasks();
       let satisfactionChanged = false;
       let shippedReopen: ShippedReopen | null = null;
-      const write = await this.store.transact(sessionId, id, current => {
+      const transform = (current: StoredSessionTask): StoredSessionTask => {
+        if (scope.kind === 'board') {
+          const currentAction = taskBoardActionForMutation(current.task, input);
+          if (currentAction !== boardAction) {
+            throw new TaskBoardError(
+              'conflict',
+              `task ${current.task.id} changed authorization class before the serialized write`,
+            );
+          }
+        }
         const at = now();
         let next: Task = {
           ...current.task,
@@ -523,7 +638,12 @@ export class TaskService {
           const transitionNote = note === undefined ? null : validateTaskNote(note, 'note');
           const clearingManualBlock = current.task.status === 'blocked' && to === current.task.phase;
           if (!clearingManualBlock) {
-            assertTaskPhaseTransition(current.task, to, provenance.session === null);
+            assertTaskPhaseTransition(
+              current.task,
+              to,
+              provenance.human,
+              scope.kind === 'board' && boardAction === 'mark_done',
+            );
           }
           const backward = !clearingManualBlock && taskPhaseMovesBackward(current.task, to);
           const reopeningShipped = backward && (current.task.phase === 'live' || current.task.phase === 'done');
@@ -547,11 +667,12 @@ export class TaskService {
             ...(reopeningShipped ? { reopened: true } : {}),
             ...(!backward &&
             (current.task.phase === 'research' || current.task.phase === 'design' || current.task.phase === 'live') &&
-            provenance.session === null
+            provenance.human
               ? { approvedByHuman: true }
               : {}),
-            ...(current.task.phase === 'live' && to === 'done' && provenance.session === null
-              ? { verifiedByHuman: true }
+            ...(current.task.phase === 'live' && to === 'done' && provenance.human ? { verifiedByHuman: true } : {}),
+            ...(current.task.phase === 'live' && to === 'done' && scope.kind === 'board' && boardAction === 'mark_done'
+              ? { verifiedByTopAgent: true }
               : {}),
           };
         };
@@ -686,6 +807,15 @@ export class TaskService {
           }
         }
 
+        if (scope.kind === 'board') {
+          data = {
+            ...data,
+            authorization: this.authorizationProvenance(
+              scope,
+              boardAction ?? taskBoardActionForTaskAction(input.action),
+            ),
+          };
+        }
         const highest = current.activity.reduce((value, item) => Math.max(value, item.seq), 0);
         const activities: TaskActivity[] = [...activityBefore, { type: activityType, data }].map(
           (inputActivity, index) => ({
@@ -717,12 +847,39 @@ export class TaskService {
         }
         satisfactionChanged = dependencySatisfied(current.task) !== dependencySatisfied(next);
         return { task: { ...next, updatedAt: at }, activity: [...current.activity, ...activities] };
-      });
+      };
+      const write =
+        scope.kind === 'board'
+          ? await this.boardStore!.transactTask(
+              scope.board.boardId,
+              id,
+              {
+                authorization: scope.authorization,
+                action: boardAction ?? taskBoardActionForTaskAction(input.action),
+                payloadHash: hashTaskBoardPayload({ operation: 'task.action', id: canonicalTaskId(id), input }),
+              },
+              transform,
+            )
+          : await this.store.transact(sessionId, id, transform);
       const graph = replaceGraphTask(allTasks, write.value.task);
       return { write, graph, satisfactionChanged, shippedReopen };
     });
-    const view = await this.view(outcome.write.value, sessionId, outcome.graph);
+    const baseView = await this.view(outcome.write.value, sessionId, outcome.graph);
+    const view =
+      scope.kind === 'board'
+        ? {
+            ...baseView,
+            authorization: this.authorizationProvenance(
+              scope,
+              boardAction ?? taskBoardActionForTaskAction(input.action),
+            ),
+          }
+        : baseView;
     const emitSessions = new Set([sessionId]);
+    if (scope.kind === 'board') {
+      const board = await this.boardStore!.require(scope.board.boardId);
+      for (const grant of board.grants.filter(candidate => candidate.active)) emitSessions.add(grant.sessionId);
+    }
     if (outcome.satisfactionChanged) {
       for (const dependentSession of await this.dependentSessionIds([outcome.write.value.task.id])) {
         emitSessions.add(dependentSession);
@@ -754,49 +911,109 @@ export class TaskService {
     if (!Number.isSafeInteger(seq) || seq < 1) {
       throw new TaskError('invalid', 'reopen acknowledgement seq must be a safe integer of at least 1');
     }
-    const provenance = provenanceOf(actor);
-    try {
-      await this.store.transact(sessionId, canonical, current => {
-        const highest = current.activity.reduce((value, item) => Math.max(value, item.seq), 0);
-        if (seq > highest) {
-          throw new TaskError(
-            'invalid',
-            `cannot acknowledge reopen generation ${seq} for ${canonical}; highest recorded activity is ${highest}`,
-          );
-        }
-        const generation = current.activity.find(item => item.seq === seq);
-        if (!isValidShippedReopenActivity(current.task.workflow, generation)) {
-          throw new TaskError(
-            'invalid',
-            `cannot acknowledge reopen generation ${seq} for ${canonical}; it is not a valid shipped-reopen activity`,
-          );
-        }
-        if (seq <= (current.task.reopenAckSeq ?? 0)) return current;
-        const at = now();
-        const acknowledgement: TaskActivity = {
-          v: TASK_SCHEMA_VERSION,
-          seq: highest + 1,
-          time: at,
-          actor: provenance.actor,
-          actorName: provenance.actorName,
-          type: 'session',
-          data: {
-            reopenAck: seq,
-            resolvedBy: provenance.actor,
-            resolvedByName: provenance.actorName,
-            ...(note === undefined ? {} : { note }),
-          },
+    const rawActor = typeof actor.actor === 'string' ? actor.actor.trim() : '';
+    const humanAdmin = rawActor === 'user';
+    const daemonAdmin = rawActor === 'daemon';
+    const requestId =
+      typeof actor.requestId === 'string' && actor.requestId.trim()
+        ? actor.requestId.trim()
+        : `attention-reopen-ack:${canonical}:${seq}:${hashTaskBoardPayload({ note: note ?? null, actor: rawActor })}`;
+    let scopedActor: TaskActor = {
+      ...actor,
+      requestId,
+      ...(humanAdmin ? { humanAdmin: true } : {}),
+      ...(daemonAdmin ? { daemonAdmin: true } : {}),
+    };
+    // This method is reachable only from the daemon's already-authorized
+    // Attention callback. Hydrate an agent's current credential here so an
+    // Attention body can never supply or forge board authority.
+    const targetBinding = await this.boardStore?.readBinding(sessionId);
+    if (targetBinding && rawActor && !humanAdmin && !daemonAdmin) {
+      const actorBinding = await this.boardStore!.readBinding(rawActor);
+      if (actorBinding && actorBinding.boardId === targetBinding.boardId) {
+        scopedActor = {
+          ...scopedActor,
+          boardCapability: actorBinding.capability,
+          runtimeGeneration: actorBinding.runtimeGeneration,
         };
-        return {
-          task: { ...current.task, reopenAckSeq: seq, updatedAt: at },
-          activity: [...current.activity, acknowledgement],
-        };
+      }
+    }
+    const readScope = await this.resolveScope(sessionId, scopedActor, 'read');
+    let scope = readScope;
+    if (readScope.kind === 'board') {
+      const current = await this.boardStore!.detailTask(readScope.board.boardId, canonical);
+      if (!current) return;
+      const views = await this.deps.list().catch(() => [] as TaskAssigneeView[]);
+      scope = await this.resolveScope(sessionId, scopedActor, 'status', {
+        assignedSessionId: exactWorkerAssignee(
+          current.task,
+          views as unknown as Awaited<ReturnType<TaskBoardSessionDeps['list']>>,
+        ),
       });
+    }
+    const provenance = scope.kind === 'board' ? provenanceFromBoard(scope.authorization) : provenanceOf(actor);
+    const transform = (current: StoredSessionTask): StoredSessionTask => {
+      const highest = current.activity.reduce((value, item) => Math.max(value, item.seq), 0);
+      if (seq > highest) {
+        throw new TaskError(
+          'invalid',
+          `cannot acknowledge reopen generation ${seq} for ${canonical}; highest recorded activity is ${highest}`,
+        );
+      }
+      const generation = current.activity.find(item => item.seq === seq);
+      if (!isValidShippedReopenActivity(current.task.workflow, generation)) {
+        throw new TaskError(
+          'invalid',
+          `cannot acknowledge reopen generation ${seq} for ${canonical}; it is not a valid shipped-reopen activity`,
+        );
+      }
+      if (seq <= (current.task.reopenAckSeq ?? 0)) return current;
+      const at = now();
+      const acknowledgement: TaskActivity = {
+        v: TASK_SCHEMA_VERSION,
+        seq: highest + 1,
+        time: at,
+        actor: provenance.actor,
+        actorName: provenance.actorName,
+        type: 'session',
+        data: {
+          reopenAck: seq,
+          resolvedBy: provenance.actor,
+          resolvedByName: provenance.actorName,
+          ...(note === undefined ? {} : { note }),
+          ...(scope.kind === 'board' ? { authorization: this.authorizationProvenance(scope, 'status') } : {}),
+        },
+      };
+      return {
+        task: { ...current.task, reopenAckSeq: seq, updatedAt: at },
+        activity: [...current.activity, acknowledgement],
+      };
+    };
+    try {
+      if (scope.kind === 'board') {
+        await this.boardStore!.transactTask(
+          scope.board.boardId,
+          canonical,
+          {
+            authorization: scope.authorization,
+            action: 'status',
+            payloadHash: hashTaskBoardPayload({ operation: 'attention.reopen_ack', id: canonical, seq, note }),
+          },
+          transform,
+        );
+        const board = await this.boardStore!.require(scope.board.boardId);
+        for (const grant of board.grants.filter(candidate => candidate.active)) {
+          await this.emit(grant.sessionId, provenance);
+        }
+      } else {
+        await this.store.transact(sessionId, canonical, transform);
+      }
     } catch (error) {
       if (error instanceof TaskError && error.code === 'not-found') {
         console.error(`kteam tasks: reopen acknowledgement skipped; ${canonical} is absent from ${sessionId}`);
         return;
       }
+      if (error instanceof TaskBoardError && error.code === 'not-found') return;
       throw error;
     }
   }
@@ -838,6 +1055,100 @@ export class TaskService {
   }
 
   // ---- internals ---------------------------------------------------------
+
+  private async resolveScope(
+    sessionId: string,
+    actor: TaskActor,
+    action: TaskBoardAction,
+    options: { assignedSessionId?: string | null } = {},
+  ): Promise<ResolvedTaskScope> {
+    if (!this.boards) return { kind: 'legacy', sessionId };
+    try {
+      return await this.boards.resolveTaskScope(sessionId, actor, action, options);
+    } catch (error) {
+      if (error instanceof TaskBoardError) {
+        const code =
+          error.code === 'not-found'
+            ? 'not-found'
+            : error.code === 'invalid'
+              ? 'invalid'
+              : error.code === 'conflict'
+                ? 'ambiguous'
+                : error.code === 'read-only'
+                  ? 'read-only'
+                  : 'forbidden';
+        throw new TaskError(code, error.message);
+      }
+      throw error;
+    }
+  }
+
+  private authorizationProvenance(scope: Extract<ResolvedTaskScope, { kind: 'board' }>, action: TaskBoardAction) {
+    return this.boards!.provenance(scope.authorization, action);
+  }
+
+  private async authorizedAggregateList(filter: TaskFilter, actor: TaskActor): Promise<FleetTaskListResponse> {
+    const actorSessionId = peerSessionId(actor);
+    const scope = await this.resolveScope(actorSessionId, actor, 'read');
+    const read = await this.listScope(scope, filter);
+    const views = await this.annotateEntries(read.tasks, await this.graphTasks());
+    const sessionId = scope.kind === 'board' ? scope.board.canonicalSessionId : actorSessionId;
+    return {
+      v: SESSION_TASK_FILE_VERSION,
+      sessionId: null,
+      tasks: views.map(view => ({ ...toTaskSummary(view), sessionId })),
+      parseErrors: read.parseErrors,
+      ...(read.parseErrorIds.length > 0 ? { parseErrorIds: read.parseErrorIds } : {}),
+      updatedAt: read.file.updatedAt,
+      ...(scope.kind === 'board' ? { authorization: this.authorizationProvenance(scope, 'read') } : {}),
+    };
+  }
+
+  private async authorizedAggregateDetail(
+    id: string,
+    afterSeq: number,
+    actor: TaskActor,
+  ): Promise<ScopedTaskDetailResponse | undefined> {
+    const actorSessionId = peerSessionId(actor);
+    const scope = await this.resolveScope(actorSessionId, actor, 'read');
+    const { entry, read } = await this.detailScope(scope, id);
+    if (!entry) return undefined;
+    const [view] = await this.annotateEntries([entry], await this.graphTasks());
+    if (!view) return undefined;
+    const sessionId = scope.kind === 'board' ? scope.board.canonicalSessionId : actorSessionId;
+    const activityParseErrors = read.activityParseErrors.get(entry.task.id) ?? 0;
+    return {
+      sessionId,
+      task: { ...view, sessionId },
+      activity: afterSeq > 0 ? entry.activity.filter(item => item.seq > afterSeq) : entry.activity,
+      ...(activityParseErrors > 0 ? { activityParseErrors } : {}),
+      ...(scope.kind === 'board' ? { authorization: this.authorizationProvenance(scope, 'read') } : {}),
+    };
+  }
+
+  private async readScope(scope: ResolvedTaskScope): Promise<SessionTaskRead> {
+    if (scope.kind === 'legacy') return this.store.read(scope.sessionId);
+    const read = await this.boardStore!.listTasks(scope.board.boardId);
+    return read;
+  }
+
+  private async listScope(
+    scope: ResolvedTaskScope,
+    filter: TaskFilter,
+  ): Promise<SessionTaskRead & { tasks: StoredSessionTask[] }> {
+    return scope.kind === 'legacy'
+      ? this.store.list(scope.sessionId, filter)
+      : this.boardStore!.listTasks(scope.board.boardId, filter);
+  }
+
+  private async detailScope(
+    scope: ResolvedTaskScope,
+    id: string,
+  ): Promise<{ entry?: StoredSessionTask; read: SessionTaskRead }> {
+    if (scope.kind === 'legacy') return this.store.detail(scope.sessionId, id);
+    const read = await this.boardStore!.listTasks(scope.board.boardId);
+    return { entry: await this.boardStore!.detailTask(scope.board.boardId, id), read };
+  }
 
   private assertSessionId(sessionId: string): void {
     if (!isSafeTaskSessionId(sessionId)) {
@@ -896,12 +1207,42 @@ export class TaskService {
    *  daemon's event-loop lag. Reads are safe to run concurrently — writes stay
    *  serialised per session in the store, and each file is an atomic
    *  temp+rename snapshot. */
-  private async readSessions(): Promise<Array<{ sessionId: string; read: SessionTaskRead }>> {
+  private async readSessions(): Promise<Array<{ sessionId: string; boardId: string | null; read: SessionTaskRead }>> {
     const sessionIds = await this.store.listSessionIds();
-    return mapPooled(sessionIds, FLEET_READ_CONCURRENCY, async sessionId => ({
-      sessionId,
-      read: await this.store.read(sessionId),
-    }));
+    const legacyReads = await mapPooled(sessionIds, FLEET_READ_CONCURRENCY, async sessionId => {
+      const binding = await this.boardStore?.readBinding(sessionId);
+      return binding === null || binding === undefined
+        ? { sessionId, boardId: null, read: await this.store.read(sessionId) }
+        : null;
+    });
+    if (!this.boardStore) {
+      return legacyReads.filter(
+        (entry): entry is { sessionId: string; boardId: null; read: SessionTaskRead } => !!entry,
+      );
+    }
+    const boardReads = await mapPooled(await this.boardStore.listBoardIds(), FLEET_READ_CONCURRENCY, async boardId => {
+      const board = await this.boardStore!.require(boardId);
+      const binding = await this.boardStore!.readBinding(board.canonicalSessionId);
+      // A cutover target is deliberately invisible before the binding swap.
+      if (!binding || binding.boardId !== boardId) return null;
+      return {
+        sessionId: board.canonicalSessionId,
+        boardId,
+        read: {
+          exists: true,
+          file: board.taskState,
+          fatal: false,
+          parseErrors: 0,
+          parseErrorIds: [],
+          activityParseErrors: new Map<string, number>(),
+        } satisfies SessionTaskRead,
+      };
+    });
+    return [...legacyReads, ...boardReads].flatMap(entry =>
+      entry === null
+        ? []
+        : [{ sessionId: entry.sessionId, boardId: entry.boardId, read: entry.read as SessionTaskRead }],
+    );
   }
 
   /** One fleet snapshot shared by rows, graph, and migration suppression, so no
@@ -909,7 +1250,7 @@ export class TaskService {
    *  the corresponding record is still readable; if it is damaged, the retained
    *  source becomes visible. */
   private async fleetReads(): Promise<{
-    reads: Array<{ sessionId: string; read: SessionTaskRead }>;
+    reads: Array<{ sessionId: string; boardId: string | null; read: SessionTaskRead }>;
     migrated: Set<string>;
   }> {
     const reads = await this.readSessions();
@@ -932,9 +1273,13 @@ export class TaskService {
     return tasks;
   }
 
-  private async scopedEntries(): Promise<Array<{ sessionId: string; entry: StoredSessionTask }>> {
+  private async scopedEntries(): Promise<
+    Array<{ sessionId: string; boardId: string | null; entry: StoredSessionTask }>
+  > {
     const reads = await this.readSessions();
-    return reads.flatMap(({ sessionId, read }) => read.file.tasks.map(entry => ({ sessionId, entry })));
+    return reads.flatMap(({ sessionId, boardId, read }) =>
+      read.file.tasks.map(entry => ({ sessionId, boardId, entry })),
+    );
   }
 
   /** Session boards whose derived blocker state can change when one of these
@@ -943,8 +1288,14 @@ export class TaskService {
     if (taskIds.length === 0) return [];
     const changed = new Set(taskIds);
     const sessions = new Set<string>();
-    for (const { sessionId, entry } of await this.scopedEntries()) {
-      if (entry.task.dependsOn.some(id => changed.has(id))) sessions.add(sessionId);
+    for (const { sessionId, boardId, entry } of await this.scopedEntries()) {
+      if (!entry.task.dependsOn.some(id => changed.has(id))) continue;
+      if (boardId === null) {
+        sessions.add(sessionId);
+      } else {
+        const board = await this.boardStore!.require(boardId);
+        for (const grant of board.grants.filter(candidate => candidate.active)) sessions.add(grant.sessionId);
+      }
     }
     return [...sessions];
   }
@@ -979,7 +1330,7 @@ export class TaskService {
       const changed = new Set<string>();
       const newlySatisfied = new Set<string>();
 
-      for (const { sessionId, entry } of affected) {
+      for (const { sessionId, boardId, entry } of affected) {
         const alreadyRecorded = entry.activity.some(
           item =>
             item.type === 'session' &&
@@ -990,7 +1341,45 @@ export class TaskService {
         if (alreadyRecorded) continue;
         let wroteClaim = false;
         let advanced = false;
-        await this.store.transact(sessionId, entry.task.id, current => {
+        let scope: ResolvedTaskScope = { kind: 'legacy', sessionId };
+        let boardProvenance: ReturnType<TaskService['authorizationProvenance']> | undefined;
+        if (boardId !== null) {
+          const completionData =
+            event.data && typeof event.data === 'object' && !Array.isArray(event.data)
+              ? (event.data as Record<string, unknown>)
+              : {};
+          const eventIncarnation = completionData['sessionIncarnation'];
+          const eventRuntimeGeneration = completionData['runtimeGeneration'];
+          const binding = await this.boardStore!.readBinding(event.sessionId);
+          if (
+            !binding ||
+            binding.boardId !== boardId ||
+            eventIncarnation !== binding.sessionIncarnation ||
+            eventRuntimeGeneration !== binding.runtimeGeneration
+          ) {
+            throw new TaskError(
+              'forbidden',
+              `completion event generation does not match the active grant for ${entry.task.id}`,
+            );
+          }
+          scope = await this.resolveScope(
+            event.sessionId,
+            {
+              actor: event.sessionId,
+              actorName,
+              boardCapability: binding.capability,
+              runtimeGeneration: eventRuntimeGeneration as number,
+              requestId: `session-completion:${event.sessionId}:${eventIncarnation}:${eventRuntimeGeneration}:${event.turn}:${entry.task.id}`,
+            },
+            'status',
+            { assignedSessionId: event.sessionId },
+          );
+          if (scope.kind !== 'board' || scope.board.boardId !== boardId) {
+            throw new TaskError('forbidden', `completion claim resolved outside task board for ${entry.task.id}`);
+          }
+          boardProvenance = this.authorizationProvenance(scope, 'status');
+        }
+        const transform = (current: StoredSessionTask): StoredSessionTask => {
           const duplicate = current.activity.some(
             item =>
               item.type === 'session' &&
@@ -1019,6 +1408,7 @@ export class TaskService {
               phase: current.task.phase,
               claimedAt: at,
               ...(target !== null ? { advancesTo: target } : {}),
+              ...(boardProvenance ? { authorization: boardProvenance } : {}),
             },
           };
           if (target === null) {
@@ -1042,6 +1432,7 @@ export class TaskService {
               phaseTo: target,
               reason,
               completionClaim: true,
+              ...(boardProvenance ? { authorization: boardProvenance } : {}),
             },
           };
           return {
@@ -1054,15 +1445,45 @@ export class TaskService {
             },
             activity: [...current.activity, claim, phaseChange],
           };
-        });
+        };
+        if (scope.kind === 'board') {
+          await this.boardStore!.transactTask(
+            scope.board.boardId,
+            entry.task.id,
+            {
+              authorization: scope.authorization,
+              action: 'status',
+              payloadHash: hashTaskBoardPayload({
+                operation: 'session.completion',
+                taskId: entry.task.id,
+                sessionId: event.sessionId,
+                turn: event.turn,
+                time: event.time,
+              }),
+            },
+            transform,
+          );
+        } else {
+          await this.store.transact(sessionId, entry.task.id, transform);
+        }
         if (wroteClaim) {
-          changed.add(sessionId);
+          if (boardId === null) {
+            changed.add(sessionId);
+          } else {
+            const board = await this.boardStore!.require(boardId);
+            for (const grant of board.grants.filter(candidate => candidate.active)) changed.add(grant.sessionId);
+          }
           if (advanced) newlySatisfied.add(entry.task.id);
         }
       }
       return { sessions: [...changed], newlySatisfied: [...newlySatisfied] };
     });
-    const provenance: Provenance = { actor: event.sessionId, actorName: null, session: event.sessionId };
+    const provenance: Provenance = {
+      actor: event.sessionId,
+      actorName: null,
+      session: event.sessionId,
+      human: false,
+    };
     const emitSessions = new Set(touched.sessions);
     for (const dependentSession of await this.dependentSessionIds(touched.newlySatisfied)) {
       emitSessions.add(dependentSession);
@@ -1166,11 +1587,40 @@ function canonicalTaskId(id: string): string {
   return canonical;
 }
 
+function taskBoardActionForMutation(task: Task, input: TaskActionInput): TaskBoardAction {
+  const requestedPhase =
+    input.action === 'status' && input.status !== 'blocked'
+      ? taskPhaseFromStatus(validateTaskStatus(input.status))
+      : input.action === 'phase'
+        ? validateTaskPhase(input.phase)
+        : null;
+  return task.phase === 'live' && requestedPhase === 'done' ? 'mark_done' : taskBoardActionForTaskAction(input.action);
+}
+
+function peerSessionId(actor: TaskActor): string {
+  const value = typeof actor.actor === 'string' ? actor.actor.trim() : '';
+  if (!value || value === 'user' || !isSafeTaskSessionId(value)) {
+    throw new TaskError('forbidden', 'peer aggregate reads require an authenticated session identity');
+  }
+  return value;
+}
+
 function provenanceOf(actor: TaskActor): Provenance {
   const raw = typeof actor.actor === 'string' ? actor.actor.trim() : '';
-  if (raw === '' || raw === 'user') return { actor: 'user', actorName: 'user', session: null };
+  if (raw === '' || raw === 'user') return { actor: 'user', actorName: 'user', session: null, human: true };
   const actorName = typeof actor.actorName === 'string' && actor.actorName.trim() ? actor.actorName.trim() : null;
-  return { actor: raw, actorName, session: raw };
+  return { actor: raw, actorName, session: raw, human: false };
+}
+
+function provenanceFromBoard(authorization: import('./task-boards-types').TaskBoardAuthorization): Provenance {
+  const daemon = authorization.role === 'daemon';
+  const human = authorization.role === 'human_admin';
+  return {
+    actor: authorization.actorSessionId ?? (daemon ? 'daemon' : 'user'),
+    actorName: authorization.actorSessionId === null ? (daemon ? 'daemon' : 'user') : authorization.actorName,
+    session: authorization.actorSessionId,
+    human,
+  };
 }
 
 function actorSession(actor: TaskActor): string | null {

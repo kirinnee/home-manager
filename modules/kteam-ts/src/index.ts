@@ -47,6 +47,21 @@ import { isTaskError } from './tasks';
 import { parsePinCli, pinCliRequest, renderPinCli } from './pins-cli';
 import { isPinError } from './pins-types';
 import { parseTaskCli, renderTaskCli, taskCliRequest } from './tasks-cli';
+import {
+  ownTaskBoardCapability,
+  ownTaskBoardAdminCapability,
+  ownTaskBoardInvitationCapability,
+  ownTaskBoardSessionCapability,
+  parseTaskBoardCli,
+  renderTaskBoardCli,
+  taskBoardCliRequest,
+} from './task-boards-cli';
+import {
+  TASK_BOARD_ADMIN_CAPABILITY_HEADER,
+  TASK_BOARD_CAPABILITY_HEADER,
+  TASK_BOARD_SESSION_CAPABILITY_HEADER,
+} from './task-boards-api';
+import { isTaskBoardError } from './task-boards-types';
 import { parseAttentionCli, attentionCliRequest, renderAttentionCli } from './attention-cli';
 import { isAttentionError } from './attention-types';
 import { renderAnalytics } from './analytics-cli';
@@ -342,6 +357,8 @@ program
     try {
       const command = parseTaskCli(argv);
       const requestSpec = taskCliRequest(command, process.env.KTEAM_SESSION_ID);
+      const boardCapability = await ownTaskBoardCapability(paths, process.env.KTEAM_SESSION_ID);
+      const boardAdminCapability = await ownTaskBoardAdminCapability(paths, process.env.KTEAM_SESSION_ID);
       const payload =
         command.command === 'create' && command.descriptionFile
           ? { ...command.body, description: await readFile(command.descriptionFile, 'utf8') }
@@ -350,16 +367,58 @@ program
         await client()
       ).request<unknown>(requestSpec.path, {
         method: requestSpec.method,
-        ...(payload === undefined
-          ? {}
-          : {
-              body: JSON.stringify(payload),
-              headers: { 'content-type': 'application/json' },
-            }),
+        ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+        headers: {
+          ...(payload === undefined ? {} : { 'content-type': 'application/json' }),
+          ...(boardCapability ? { [TASK_BOARD_CAPABILITY_HEADER]: boardCapability } : {}),
+          ...(boardAdminCapability ? { [TASK_BOARD_ADMIN_CAPABILITY_HEADER]: boardAdminCapability } : {}),
+        },
       });
       process.stdout.write(renderTaskCli(command, response));
     } catch (error) {
       if (isTaskError(error)) {
+        process.stderr.write(`${error.message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
+  });
+
+program
+  .command('task-board')
+  .description('create and administer stable shared task-board membership')
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .argument('[args...]')
+  .action(async (argv: string[]) => {
+    try {
+      const command = parseTaskBoardCli(argv);
+      const requestSpec = taskBoardCliRequest(command);
+      const ownCapability = await ownTaskBoardCapability(paths, process.env.KTEAM_SESSION_ID);
+      const adminCapability = await ownTaskBoardAdminCapability(paths, process.env.KTEAM_SESSION_ID);
+      const sessionCapability = requestSpec.requiresSessionCapability
+        ? await ownTaskBoardSessionCapability(paths, process.env.KTEAM_SESSION_ID)
+        : undefined;
+      const invitationCapability = requestSpec.requiresInvitationCapability
+        ? await ownTaskBoardInvitationCapability(paths, process.env.KTEAM_SESSION_ID)
+        : undefined;
+      const boardCapability = invitationCapability ?? ownCapability;
+      const response = await (
+        await client()
+      ).request<unknown>(requestSpec.path, {
+        method: requestSpec.method,
+        ...(requestSpec.body === undefined ? {} : { body: JSON.stringify(requestSpec.body) }),
+        headers: {
+          ...(requestSpec.body === undefined ? {} : { 'content-type': 'application/json' }),
+          ...(boardCapability ? { [TASK_BOARD_CAPABILITY_HEADER]: boardCapability } : {}),
+          ...(adminCapability ? { [TASK_BOARD_ADMIN_CAPABILITY_HEADER]: adminCapability } : {}),
+          ...(sessionCapability ? { [TASK_BOARD_SESSION_CAPABILITY_HEADER]: sessionCapability } : {}),
+        },
+      });
+      process.stdout.write(renderTaskBoardCli(response));
+    } catch (error) {
+      if (isTaskBoardError(error)) {
         process.stderr.write(`${error.message}\n`);
         process.exitCode = 1;
         return;
@@ -481,6 +540,12 @@ program
     '--parent <id>',
     "parent session. An AUTO teammate started from inside a pane defaults to KTEAM_SESSION_ID (teammate trees); an INTERACTIVE session does NOT auto-inherit (it is the human's own terminal) — pass this to force a parent anyway",
   )
+  .addOption(
+    new Option(
+      '--board-access <access>',
+      'explicit child task-board access; every non-none grant still needs current-coordinator approval',
+    ).choices(['none', 'read', 'worker', 'coordinator']),
+  )
   .option('--prompt-file <file>', 'read the task prompt from a file instead of the command line (use for long prompts)')
   .option('--model <model>', 'override the model (alias or full id); defaults to the wrapper KTEAM_MODEL')
   .option(
@@ -578,6 +643,7 @@ program
           envSessionId: process.env.KTEAM_SESSION_ID,
           mode: options.mode as 'auto' | 'interactive',
         }),
+        boardAccess: options.boardAccess as 'none' | 'read' | 'worker' | 'coordinator' | undefined,
         model: options.model as string | undefined,
         // Only send an explicit RC decision when the user gave --rc/--no-rc;
         // otherwise leave it unset so the daemon applies the mode-dependent
@@ -597,6 +663,9 @@ program
         initialAttachments,
       },
       options.requestId as string | undefined,
+      options.boardAccess && options.boardAccess !== 'none'
+        ? await ownTaskBoardCapability(paths, process.env.KTEAM_SESSION_ID)
+        : undefined,
     );
     if (options.json) console.log(JSON.stringify(view, null, 2));
     else printView(view);

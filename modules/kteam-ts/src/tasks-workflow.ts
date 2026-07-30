@@ -91,7 +91,7 @@ export function taskPhaseMovesBackward(task: Task, to: TaskPhase): boolean {
  * Research/design may be backed out of, but only a human can approve forward
  * progress beyond them. Likewise, only a human can verify live → done or reopen
  * work that the human already verified as done. */
-export function assertTaskPhaseTransition(task: Task, to: TaskPhase, human: boolean): void {
+export function assertTaskPhaseTransition(task: Task, to: TaskPhase, human: boolean, markDone = false): void {
   const from = task.phase;
   if (from === to) throw new TaskError('transition', `${taskReference(task.id)} is already in ${to}`);
   if (from === 'dropped') {
@@ -139,7 +139,7 @@ export function assertTaskPhaseTransition(task: Task, to: TaskPhase, human: bool
       `${taskReference(task.id)} cannot skip forward ${from} → ${to} in ${task.workflow}; move it to ${expectedCopy} first.${rewindCopy}`,
     );
   }
-  if (from === 'live' && !human) {
+  if (from === 'live' && !human && !markDone) {
     throw new TaskError(
       'approval-required',
       `${taskReference(task.id)} cannot move live → done until the human verifies the deployed work; leave it live for human verification`,

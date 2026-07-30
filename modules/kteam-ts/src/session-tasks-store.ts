@@ -300,7 +300,7 @@ function serializeActivity(entry: TaskActivity): TaskActivity {
   };
 }
 
-function serializeStoredTask(entry: StoredSessionTask): StoredSessionTask {
+export function serializeStoredSessionTask(entry: StoredSessionTask): StoredSessionTask {
   return {
     task: serializeSessionTask(entry.task),
     activity: entry.activity.map(serializeActivity),
@@ -311,7 +311,7 @@ export function serializeSessionTaskFile(file: SessionTaskFile): SessionTaskFile
   return {
     v: SESSION_TASK_FILE_VERSION,
     sessionId: file.sessionId,
-    tasks: file.tasks.map(serializeStoredTask),
+    tasks: file.tasks.map(serializeStoredSessionTask),
     migratedGlobalIds: [
       ...new Set(file.migratedGlobalIds.map(normalizeTaskId).filter((id): id is string => id !== null)),
     ],
@@ -319,7 +319,7 @@ export function serializeSessionTaskFile(file: SessionTaskFile): SessionTaskFile
   };
 }
 
-function validateStoredEntry(entry: StoredSessionTask, expectedId?: string): StoredSessionTask {
+export function validateStoredSessionTask(entry: StoredSessionTask, expectedId?: string): StoredSessionTask {
   const task = parseSessionTaskRecord(serializeSessionTask(entry.task));
   if (task === null) throw new TaskError('invalid', `refusing to write an invalid task ${entry.task.id}`);
   if (expectedId !== undefined && task.id !== expectedId) {
@@ -472,6 +472,46 @@ export class SessionTaskStore {
           const read = await this.read(sessionId);
           for (const entry of read.file.tasks) observe(entry.task.id);
         }
+
+        // New shared boards use the same daemon-global allocator as legacy
+        // session task files. If the counter cache disappears, every readable
+        // board contributes its observed floor; an unreadable board fails the
+        // allocator closed because it may contain a larger live id.
+        const boardDirectories = await readdir(this.paths.taskBoardsDir, { withFileTypes: true }).catch(error => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+          throw new TaskError(
+            'invalid',
+            `cannot prove the global task-id floor: central board directory is unreadable (${String(error)})`,
+          );
+        });
+        for (const directory of boardDirectories) {
+          if (!directory.isDirectory()) continue;
+          const filename = path.join(this.paths.taskBoardsDir, directory.name, 'board.json');
+          const raw = await readFile(filename, 'utf8').catch(() => null);
+          if (raw === null) {
+            throw new TaskError(
+              'invalid',
+              `cannot prove the global task-id floor: central board ${directory.name} has no readable board.json`,
+            );
+          }
+          try {
+            const envelope = JSON.parse(raw) as { boardId?: unknown; taskState?: unknown };
+            if (envelope.boardId !== directory.name) throw new Error('board identity mismatch');
+            const parsed = parseSessionTaskFile(JSON.stringify(envelope.taskState ?? null), directory.name);
+            const activityErrors = [...parsed.activityParseErrors.values()].reduce((sum, count) => sum + count, 0);
+            if (parsed.fatal || parsed.parseErrors > 0 || activityErrors > 0) {
+              throw new Error(`${parsed.parseErrors} task parse error(s), ${activityErrors} activity parse error(s)`);
+            }
+            for (const entry of parsed.file.tasks) observe(entry.task.id);
+          } catch (error) {
+            throw new TaskError(
+              'invalid',
+              `cannot prove the global task-id floor from central board ${directory.name}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
       })();
     }
     await this.counterSeed;
@@ -507,7 +547,7 @@ export class SessionTaskStore {
       if (read.file.tasks.some(entry => entry.task.id === id)) {
         throw new TaskError('ambiguous', `global task id ${id} already exists in session ${sessionId}`);
       }
-      const entry = validateStoredEntry(await build(id), id);
+      const entry = validateStoredSessionTask(await build(id), id);
       const file = await this.write(sessionId, { ...read.file, tasks: [...read.file.tasks, entry] });
       return { value: entry, file };
     });
@@ -527,7 +567,7 @@ export class SessionTaskStore {
       const read = await this.readForWrite(sessionId);
       const index = read.file.tasks.findIndex(entry => entry.task.id === canonical);
       if (index === -1) throw new TaskError('not-found', `unknown task ${canonical} in session ${sessionId}`);
-      const entry = validateStoredEntry(await transform(read.file.tasks[index]!), canonical);
+      const entry = validateStoredSessionTask(await transform(read.file.tasks[index]!), canonical);
       const tasks = [...read.file.tasks];
       tasks[index] = entry;
       const file = await this.write(sessionId, { ...read.file, tasks });
@@ -551,7 +591,7 @@ export class SessionTaskStore {
       let changed = false;
 
       for (const raw of incoming) {
-        const candidate = validateStoredEntry(raw, raw.task.id);
+        const candidate = validateStoredSessionTask(raw, raw.task.id);
         if (migrated.has(candidate.task.id)) {
           // The ledger proves a copy only while the record is still present.
           // A clean-but-incomplete hand edit must not make migration report
@@ -565,7 +605,10 @@ export class SessionTaskStore {
         }
         const existing = tasks.find(entry => entry.task.id === candidate.task.id);
         if (existing !== undefined) {
-          if (JSON.stringify(serializeStoredTask(existing)) === JSON.stringify(serializeStoredTask(candidate))) {
+          if (
+            JSON.stringify(serializeStoredSessionTask(existing)) ===
+            JSON.stringify(serializeStoredSessionTask(candidate))
+          ) {
             migrated.add(candidate.task.id);
             alreadyImported.push(candidate.task.id);
             changed = true;

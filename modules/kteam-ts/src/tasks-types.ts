@@ -348,6 +348,21 @@ export interface TaskView extends Task {
  *  route/storage path and is never persisted inside the task record itself. */
 export interface ScopedTaskView extends TaskView {
   sessionId: string;
+  /** Stable-board authorization provenance. Ordinary renderers intentionally
+   * omit boardId; authorized JSON/diagnostics retain it for audit. */
+  authorization?: TaskAuthorizationProvenance;
+}
+
+export interface TaskAuthorizationProvenance {
+  /** Present only on an explicitly authorized diagnostic response. Ordinary
+   * list/detail/CLI rendering never exposes stable board identity. */
+  boardId?: string;
+  role: 'read' | 'worker' | 'coordinator' | 'top_agent' | 'human_admin' | 'daemon';
+  boardEpoch: number;
+  coordinatorEpoch: number;
+  runtimeGeneration: number | null;
+  action: string;
+  requestId: string;
 }
 
 /** List rows: no `description` (a 40-row board must not ship 40 briefs), but the
@@ -398,6 +413,7 @@ export interface SessionTaskListResponse extends Omit<TaskListResponse, 'tasks'>
   tasks: ScopedTaskSummary[];
   /** ISO timestamp of the underlying tasks.json snapshot. */
   updatedAt: string;
+  authorization?: TaskAuthorizationProvenance;
 }
 
 /** Fleet-wide compatibility/read view. Writes never target this scope. */
@@ -406,11 +422,13 @@ export interface FleetTaskListResponse extends Omit<TaskListResponse, 'tasks'> {
   sessionId: null;
   tasks: ScopedTaskSummary[];
   updatedAt: string;
+  authorization?: TaskAuthorizationProvenance;
 }
 
 export interface ScopedTaskDetailResponse extends Omit<TaskDetailResponse, 'task'> {
   sessionId: string | null;
   task: TaskView & { sessionId: string | null };
+  authorization?: TaskAuthorizationProvenance;
 }
 
 /** The store's own list result, before it is shaped into a response. */
@@ -428,6 +446,17 @@ export interface TaskListResult {
 export interface TaskActor {
   actor?: string | null;
   actorName?: string | null;
+  /** Server-derived from actor-context, never parsed from a task body. */
+  humanAdmin?: boolean;
+  /** Daemon-trusted internal lifecycle/Attention path, never parsed from a
+   * request body or accepted from a transport header. */
+  daemonAdmin?: boolean;
+  /** Board grant credential supplied out-of-band by the CLI/header. */
+  boardCapability?: string | null;
+  /** Runtime proof paired with boardCapability. */
+  runtimeGeneration?: number | null;
+  /** Transport idempotency identity. */
+  requestId?: string | null;
 }
 
 export interface TaskCreateInput {
