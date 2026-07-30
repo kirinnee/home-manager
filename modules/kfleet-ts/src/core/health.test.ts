@@ -115,6 +115,7 @@ describe('probeAgent', () => {
       { name: 'literal-key', kind: 'claude', env: { ANTHROPIC_API_KEY: apiKey } },
       1_000,
       {
+        cachePath: false,
         configDir: () => configDir,
         resolveWrapper: () => ({ binary: 'claude-literal-key', resolved: wrapper }),
       },

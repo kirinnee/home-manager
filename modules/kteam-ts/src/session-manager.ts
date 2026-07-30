@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
 import path from 'path';
+import { prepareHarnessProbeEnv, probeHarness as runHarnessProbe } from '../../kfleet-ts/src/core/harness-probe';
 import { AttachmentError, AttachmentStore, type StoredAttachment } from './attachments';
 import { listDirectory, readChanges, readDiff, readFileView } from './fs';
 import {
@@ -968,6 +969,9 @@ export class SessionManager implements KTeamService {
   private bootstrapChain: Promise<void> = Promise.resolve();
   /** One daemon-wide cache over kfleet's 300-second usage feed. */
   private readonly usageFeed: UsageFeed;
+  /** Shared with `kfleet health`; kept as a field so start-preflight tests can
+   * prove the daemon gates auto mode without launching a real model. */
+  private readonly probeHarness = runHarnessProbe;
   private readonly quotaWaiters = new Map<string, QuotaWaiter>();
   private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Counter for TRANSIENT (never-journalled) events only — WS-only frames
@@ -1061,6 +1065,31 @@ export class SessionManager implements KTeamService {
 
   private get pwaConfig(): PwaConfig {
     return this.pwaConfigOverride ?? this.options.pwa ?? defaultPwaConfig();
+  }
+
+  private async assertAutoHarnessHealthy(
+    binary: string,
+    harness: Harness,
+    mode: InteractionMode,
+    resolvedWrapper?: string,
+  ): Promise<void> {
+    if (mode !== 'auto') return;
+    const wrapperBinary = path.basename(binary);
+    const wrapper =
+      resolvedWrapper ?? resolveBinary(binary, [this.paths.kfleetBin, process.env.PATH ?? ''].join(path.delimiter));
+    if (!wrapper) throw new Error(`wrapper not found: ${binary}; run kfleet apply`);
+    const probe = await this.probeHarness({
+      binary: wrapperBinary,
+      wrapper,
+      kind: harness,
+      env: await prepareHarnessProbeEnv(wrapper, process.env),
+    });
+    if (!probe.up) {
+      throw new Error(
+        `wrapper ${wrapperBinary} is unavailable for autonomous work: harness probe failed ` +
+          `(${probe.failureKind ?? 'unknown'}): ${probe.error ?? 'no exact sentinel reply'}; harness process was not spawned`,
+      );
+    }
   }
 
   private constructor(
@@ -2195,6 +2224,7 @@ export class SessionManager implements KTeamService {
       throw new Error(
         `could not determine ${harness === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME'} from ${wrapper}`,
       );
+    await this.assertAutoHarnessHealthy(binary, harness, mode, wrapper);
     const harnessSessionBaseline = harness === 'codex' ? await codexSessionIds(harnessHome) : undefined;
     // Parent capture: teammates starting teammates form a tree. Resolve the
     // caller-supplied parent ref (id or teammate name) to a real session; a
@@ -7641,6 +7671,7 @@ export class SessionManager implements KTeamService {
    *  fails on a boot hiccup. Only the startup-timeout shape retries; a dead
    *  pane or tmux error stays fatal on the first attempt. */
   private async launchWithRetry(config: SessionConfig): Promise<void> {
+    await this.assertAutoHarnessHealthy(config.binary, config.harness, config.mode);
     try {
       await this.tmux.launch(config);
     } catch (error) {
