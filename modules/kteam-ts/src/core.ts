@@ -368,6 +368,12 @@ const ACCOUNTS: AccountSpec[] = [
     ],
   },
   {
+    // Direct first-party Anthropic OAuth accounts: native aliases work here.
+    // Fable is deliberately unavailable across this pool (see ecc2ba1).
+    match: /^claude-auto-loge[1-6]$/,
+    options: [{ model: 'opus5' }, { model: 'sonnet5', flag: 'sonnet' }, { model: 'haiku', flag: 'haiku' }],
+  },
+  {
     match: /^claude-auto-atomi$/,
     options: [
       { model: 'opus5' },

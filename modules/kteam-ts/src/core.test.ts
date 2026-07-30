@@ -283,6 +283,12 @@ const FLEET = [
   'claude-auto-atomi',
   'claude-auto-liftoff',
   'claude-auto-loge',
+  'claude-auto-loge1',
+  'claude-auto-loge2',
+  'claude-auto-loge3',
+  'claude-auto-loge4',
+  'claude-auto-loge5',
+  'claude-auto-loge6',
   'claude-auto-glm52a',
   'claude-auto-glm52b',
   'claude-auto-mm3',
@@ -482,6 +488,31 @@ describe('recommendTeam: account rules', () => {
     });
     expect(everyone(team).some(option => option.binary === 'claude-auto-loge')).toBe(false);
     expect(team.exclusions.find(item => item.binary === 'claude-auto-loge')?.reason).toContain('monthly spend limit');
+  });
+
+  test('direct loge accounts use Anthropic aliases without inheriting proxy or Fable semantics', () => {
+    for (let n = 1; n <= 6; n += 1) {
+      const binary = `claude-auto-loge${n}`;
+      const team = recommendTeam('Research how the API pagination works', [binary], { roles: ['researcher'] });
+      const options = everyone(team);
+      expect(team.exclusions).toEqual([]);
+      expect(options.every(option => option.binary === binary)).toBe(true);
+      expect(options.some(option => option.model === 'fable5')).toBe(false);
+      expect(options.find(option => option.model === 'opus5')?.modelFlag).toBeUndefined();
+      expect(options.find(option => option.model === 'sonnet5')?.modelFlag).toBe('sonnet');
+      expect(options.every(option => !option.command.includes('claude-opus-5'))).toBe(true);
+    }
+
+    const fanOut = recommendTeam('Rename one helper across 40 files, one file per agent', ['claude-auto-loge1'], {
+      roles: ['fan-out'],
+    });
+    expect(everyone(fanOut).find(option => option.model === 'haiku')?.modelFlag).toBe('haiku');
+
+    const proxy = recommendTeam('Research how the API pagination works', ['claude-auto-loge'], {
+      roles: ['researcher'],
+    });
+    expect(everyone(proxy).find(option => option.model === 'opus5')?.modelFlag).toBe('claude-opus-5');
+    expect(everyone(proxy).some(option => option.model === 'fable5')).toBe(true);
   });
 
   test('loge-first: same tier, the loge account wins', () => {

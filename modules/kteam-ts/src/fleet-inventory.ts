@@ -39,6 +39,11 @@ const ANTHROPIC_RUNTIME_MODELS: RuntimeModelOption[] = [
   { value: 'haiku', label: 'Haiku 4.5' },
 ];
 
+// Direct Anthropic OAuth just like the other first-party accounts, but Fable is
+// deliberately unavailable across this pool (see ecc2ba1). Keep the native
+// aliases; unlike the bare loge proxy below, these wrappers do not need real IDs.
+const LOGE_DIRECT_RUNTIME_MODELS = ANTHROPIC_RUNTIME_MODELS.filter(model => model.value !== 'fable');
+
 const LOGE_RUNTIME_MODELS: RuntimeModelOption[] = [
   { value: 'claude-fable-5[1m]', label: 'Fable 5 · 1M' },
   { value: 'claude-opus-5[1m]', label: 'Opus 5 · 1M' },
@@ -63,8 +68,9 @@ const DEEPSEEK_RUNTIME_MODELS: RuntimeModelOption[] = [
 export function runtimeModelsForWrapper(binary: string): RuntimeModelOption[] {
   const name = path.basename(binary);
   let models: RuntimeModelOption[] | undefined;
-  if (/^claude-auto-(kirin|liftoff|atomi)$/.test(name)) models = ANTHROPIC_RUNTIME_MODELS;
-  else if (name === 'claude-auto-loge') models = LOGE_RUNTIME_MODELS;
+  if (/^claude-auto-(kirin|liftoff|atomi|loge[1-6])$/.test(name)) {
+    models = /^claude-auto-loge[1-6]$/.test(name) ? LOGE_DIRECT_RUNTIME_MODELS : ANTHROPIC_RUNTIME_MODELS;
+  } else if (name === 'claude-auto-loge') models = LOGE_RUNTIME_MODELS;
   else if (/^claude-auto-glm52[ab]$/.test(name)) models = GLM_RUNTIME_MODELS;
   else if (name === 'claude-auto-mm3') models = [{ value: 'MiniMax-M3', label: 'MiniMax M3' }];
   else if (/^claude-auto-dsv4[fp]$/.test(name)) models = DEEPSEEK_RUNTIME_MODELS;

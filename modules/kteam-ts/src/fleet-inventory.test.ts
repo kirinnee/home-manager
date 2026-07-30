@@ -62,6 +62,22 @@ test('runtime model choices are account-aware and never leak Anthropic ids to pr
     'deepseek-v4-flash',
     'deepseek-v4-pro',
   ]);
+
+  const directLogeAliases = ['opus', 'sonnet', 'haiku'];
+  for (let n = 1; n <= 6; n += 1) {
+    const choices = runtimeModelsForWrapper(`/fleet/bin/claude-auto-loge${n}`).map(model => model.value);
+    expect(choices).toEqual(directLogeAliases);
+    expect(choices).not.toContain('fable');
+  }
+  // The bare proxy remains a separate real-ID account; widening its branch
+  // would send unsupported aliases through raw CLIProxyAPI.
+  expect(runtimeModelsForWrapper('claude-auto-loge').map(model => model.value)).toEqual([
+    'claude-fable-5[1m]',
+    'claude-opus-5[1m]',
+    'claude-sonnet-5',
+    'claude-haiku-4-5-20251001',
+  ]);
+  expect(runtimeModelsForWrapper('claude-auto-loge7')).toEqual([]);
   expect(runtimeModelsForWrapper('claude-auto-unknown')).toEqual([]);
   expect(runtimeModelsForWrapper('codex-auto-loge')).toEqual([]);
 });
