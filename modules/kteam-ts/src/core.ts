@@ -187,6 +187,11 @@ export const LOGE_SELECTION_WEIGHT = 9;
 export const NON_LOGE_SELECTION_WEIGHT = 1;
 export const LOGE_WEEKLY_REMAINING_FLOOR_PERCENT = 15;
 export const LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT = 100 - LOGE_WEEKLY_REMAINING_FLOOR_PERCENT;
+/** Fable is the most expensive model in the fleet, so it is only affordable while an
+ *  account still has plenty of its weekly allowance left. Past this much weekly
+ *  utilization Fable stops being an option at all — pick a cheaper model instead,
+ *  even for work the doctrine would otherwise send to Fable. */
+export const FABLE_MAX_WEEKLY_UTILIZATION_PERCENT = 50;
 
 export const PRODUCT_FACING_MODEL_GUARD = {
   rule: 'Never route product-facing work to MiniMax M3 or DeepSeek V4.',
@@ -215,6 +220,7 @@ export const ACCOUNT_SELECTION_POLICY = {
   },
   logeWeeklyRemainingFloorPercent: LOGE_WEEKLY_REMAINING_FLOOR_PERCENT,
   logeWeeklyUtilizationCutoffPercent: LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
+  fableMaxWeeklyUtilizationPercent: FABLE_MAX_WEEKLY_UTILIZATION_PERCENT,
   ownAccountFallbacks: ['atomi', 'liftoff'],
   rules: [
     `Prefer loge accounts at roughly ${LOGE_SELECTION_WEIGHT}:${NON_LOGE_SELECTION_WEIGHT} over non-loge accounts ` +
@@ -222,6 +228,9 @@ export const ACCOUNT_SELECTION_POLICY = {
     `When a loge account reaches ${LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT}% weekly utilization ` +
       `(about ${LOGE_WEEKLY_REMAINING_FLOOR_PERCENT}% weekly quota remaining), stop preferring it.`,
     'After that cutoff, move to the own-account fallbacks atomi and liftoff; kirin remains a hard never-route daily driver.',
+    `Fable is NOT applicable once an account is above ${FABLE_MAX_WEEKLY_UTILIZATION_PERCENT}% weekly utilization — ` +
+      'it is the most expensive model in the fleet, so past that point choose a cheaper model even for work this ' +
+      'doctrine would otherwise send to Fable.',
     'Unknown quota is unknown: do not invent utilization or silently treat it as zero.',
   ],
 } as const;
@@ -245,6 +254,11 @@ export interface RecommendationAccountState {
   weeklyResetAtIso: string | null;
   /** null means the threshold cannot be evaluated from real weekly quota. */
   logePreferenceEligible: boolean | null;
+  /** Whether Fable may be selected on this account at all: it is the priciest model
+   *  in the fleet, so it is off the table above
+   *  FABLE_MAX_WEEKLY_UTILIZATION_PERCENT weekly utilization. null means unknown
+   *  weekly quota, so the caller must not assume either way. */
+  fableEligible: boolean | null;
   probeError: string | null;
 }
 
@@ -371,6 +385,7 @@ export function recommendDecisionGuide(
       weeklyResetAtIso: weeklyResetAt === null ? null : new Date(weeklyResetAt).toISOString(),
       logePreferenceEligible:
         pool !== 'loge' || weeklyPercent === null ? null : weeklyPercent < LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
+      fableEligible: weeklyPercent === null ? null : weeklyPercent <= FABLE_MAX_WEEKLY_UTILIZATION_PERCENT,
       probeError: usageProbed ? (feed?.error ?? null) : null,
     };
   });

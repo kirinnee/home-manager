@@ -369,6 +369,13 @@ describe('recommendDecisionGuide: teaches the decision without making it', () =>
       weeklyRemainingPercent: 15,
       logePreferenceEligible: false,
     });
+    // Fable is the priciest model, so it drops out long before the loge-preference
+    // cutoff does: 84% weekly still prefers loge, but is far past the 50% Fable gate.
+    expect(guide.accountSelection.fableMaxWeeklyUtilizationPercent).toBe(50);
+    expect(byBinary.get('claude-auto-loge1')).toMatchObject({ logePreferenceEligible: true, fableEligible: false });
+    expect(byBinary.get('claude-auto-loge2')).toMatchObject({ fableEligible: false });
+    // Unknown weekly quota stays unknown — never assume Fable is affordable.
+    expect(byBinary.get('claude-auto-atomi')).toMatchObject({ fableEligible: null });
     expect(byBinary.get('claude-auto-atomi')).toMatchObject({
       pool: 'own-fallback',
       usable: 'unknown',
