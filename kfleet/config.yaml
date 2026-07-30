@@ -56,19 +56,24 @@ profiles:
     env:
       ANTHROPIC_API_KEY: loge-internal
       ANTHROPIC_BASE_URL: http://127.0.0.1:8317
-      # Fable + Opus run with the 1M-token context beta (the `[1m]` model
-      # suffix; verified end-to-end through CLIProxyAPI on 2026-07-22).
+      # Opus runs with the 1M-token context beta (the `[1m]` model suffix;
+      # verified end-to-end through CLIProxyAPI on 2026-07-22).
       # Sonnet/Haiku stay at their native windows.
       # opus -> Opus 5: the loge pool accounts gained access 2026-07-25 (verified
       # against Anthropic directly AND through the gateway after a container restart
       # so CLIProxyAPI re-advertises it).
+      #
+      # FABLE IS DOWN on the loge pool (2026-07-30): every one of the 6 claude
+      # credentials returns HTTP 429 for claude-fable-5, so the alias is removed
+      # rather than left pointing at capacity that cannot serve. The default
+      # model falls back to Opus 5. Re-add ANTHROPIC_DEFAULT_FABLE_MODEL when the
+      # pool's weekly limits recover (see kloge quota headers for reset times).
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
       ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5-20251001
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
-      KTEAM_MODEL: claude-fable-5[1m] # real ID: raw CLIProxyAPI has no aliases
+      KTEAM_MODEL: claude-opus-5[1m] # real ID: raw CLIProxyAPI has no aliases
     settings:
-      model: claude-fable-5[1m]
+      model: claude-opus-5[1m]
   loge-codex:
     env:
       OPENAI_API_KEY: loge-internal
