@@ -96,6 +96,7 @@ import { atomicJson, now, readJson, run, writeTextAtomic } from './io';
 import { NAME_WINDOW_MS, displayName, normalizeTeammateName, pickTeammateName } from './names';
 import type { KTeamPaths } from './paths';
 import { configFile, markerFile, sessionDir, stateFile, turnLog, turnPrompt } from './paths';
+import { legacyTaskBoardSessionIncarnation } from './task-boards-store';
 import type {
   AttachmentView,
   CgroupConfigPatch,
@@ -2140,6 +2141,13 @@ export class SessionManager implements KTeamService {
     // malformed request is rejected on the same terms whatever the environment.
     const mode = request.mode ?? 'auto';
     if (mode !== 'auto' && mode !== 'interactive') throw new Error('mode must be auto or interactive');
+    const boardAccess = request.boardAccess ?? 'none';
+    if (!(['none', 'read', 'worker', 'coordinator'] as const).includes(boardAccess)) {
+      throw new Error('boardAccess must be none, read, worker, or coordinator');
+    }
+    if (boardAccess !== 'none' && mode !== 'auto') {
+      throw new Error('board access may be requested only for an auto-mode child');
+    }
     // An automode teammate with no task cannot do anything but violate the
     // protocol, so the prompt stays mandatory there. INTERACTIVE mode is a plain
     // TUI a human drives: a bare start is the normal case, and injecting an
@@ -2178,6 +2186,9 @@ export class SessionManager implements KTeamService {
     // parent's label when none is given, so whole trees group in ps/UI.
     const parentRef = request.parent?.trim();
     const parentView = parentRef ? await this.get(parentRef).catch(() => undefined) : undefined;
+    if (boardAccess !== 'none' && !parentView) {
+      throw new Error('board access requires an existing parent session');
+    }
     // Recursion guard: a session anywhere below a warden in the parent tree is
     // FORCE-labelled kteam-warden regardless of the requested/inherited label, so
     // the detector's lineage exclusion covers it and a warden can never spawn an
@@ -2259,6 +2270,8 @@ export class SessionManager implements KTeamService {
     const createdAt = now();
     const config: SessionConfig = {
       id,
+      incarnation: crypto.randomUUID(),
+      runtimeGeneration: 1,
       // The human task title, shown verbatim in ps/the dashboard — the
       // `[Teammate] Task Title` convention is preserved, only control chars and
       // length are normalised (see displayName). A bare interactive session has
@@ -2268,6 +2281,7 @@ export class SessionManager implements KTeamService {
       teammate,
       label,
       parent: parentView?.config.id,
+      ...(request.boardAccess !== undefined ? { boardAccess } : {}),
       binary,
       harness,
       modelHint: modelHint(binary),
@@ -6878,13 +6892,16 @@ export class SessionManager implements KTeamService {
     // `emit` meant "the agent is running" waited on a disk write. Subscribers
     // still get the event the moment its append lands (per-session, so no
     // other session can delay it), and close() drains what is in flight.
-    this.emitDeferred(
-      id,
-      eventType,
-      { status: state.status, health: state.health, ...eventData },
-      options.source ?? 'daemon',
-      state.turn,
-    );
+    const transitionData: Record<string, unknown> = { status: state.status, health: state.health, ...eventData };
+    if (eventType === 'session.completed') {
+      const config = this.store.getSession(id)?.config as SessionConfig | undefined;
+      if (config) {
+        transitionData['sessionIncarnation'] =
+          config.incarnation ?? legacyTaskBoardSessionIncarnation(config.id, config.createdAt);
+        transitionData['runtimeGeneration'] = config.runtimeGeneration ?? 1;
+      }
+    }
+    this.emitDeferred(id, eventType, transitionData, options.source ?? 'daemon', state.turn);
     // Fate is finalized only after the harness adapter has drained to EOF.
     // Scheduling outside the current session-lock holder avoids flush callback
     // deadlock; the finalizer then serializes proof and terminal classification.

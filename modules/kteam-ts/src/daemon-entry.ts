@@ -14,6 +14,7 @@ import { TaskService, type TaskActor } from './tasks';
 import { AttentionApi, AttentionService, AttentionSources } from './attention';
 import { AttentionNotifier } from './attention-notifier';
 import { TaskApi } from './tasks-api';
+import { ensureTaskBoardAdminCapability, TaskBoardApi } from './task-boards-api';
 import { AnalyticsIndex } from './analytics-index';
 import { loadDaemonSecretsEnvironment } from './daemon-secrets';
 import { PushService } from './push-service';
@@ -108,6 +109,9 @@ const learning = new LearningManager(paths, config.learning, manager);
 const taskService = new TaskService(paths, manager);
 await taskService.initialize();
 const taskApi = new TaskApi(taskService);
+const taskBoardService = taskService.taskBoards;
+if (!taskBoardService) throw new Error('task-board service requires daemon session lookup');
+const taskBoardApi = new TaskBoardApi(taskBoardService, manager, await ensureTaskBoardAdminCapability(paths));
 // One writable pin store + idempotency controller for the daemon lifetime.
 const sessionExists = {
   has: async (id: string) =>
@@ -226,6 +230,7 @@ const apiOptions = {
   learning,
   stt,
   tasks: taskApi,
+  taskBoards: taskBoardApi,
   pins: pinApi,
   terminals: terminalApi,
   browser: browserApi,

@@ -55,10 +55,26 @@ import {
  *  structurally, and a test can pass a stub. */
 export interface TaskApiService {
   /** Fleet-wide READ compatibility. */
-  taskList(filter: ReturnType<typeof parseTaskListQuery>): Promise<TaskListResponse | FleetTaskListResponse>;
-  taskDetail(id: string, afterSeq?: number): Promise<TaskDetailResponse | ScopedTaskDetailResponse | undefined>;
-  sessionTaskList?(sessionId: string, filter: ReturnType<typeof parseTaskListQuery>): Promise<SessionTaskListResponse>;
-  sessionTaskDetail?(sessionId: string, id: string, afterSeq?: number): Promise<ScopedTaskDetailResponse | undefined>;
+  taskList(
+    filter: ReturnType<typeof parseTaskListQuery>,
+    actor?: TaskActor,
+  ): Promise<TaskListResponse | FleetTaskListResponse>;
+  taskDetail(
+    id: string,
+    afterSeq?: number,
+    actor?: TaskActor,
+  ): Promise<TaskDetailResponse | ScopedTaskDetailResponse | undefined>;
+  sessionTaskList?(
+    sessionId: string,
+    filter: ReturnType<typeof parseTaskListQuery>,
+    actor?: TaskActor,
+  ): Promise<SessionTaskListResponse>;
+  sessionTaskDetail?(
+    sessionId: string,
+    id: string,
+    afterSeq?: number,
+    actor?: TaskActor,
+  ): Promise<ScopedTaskDetailResponse | undefined>;
   sessionTaskCreate?(sessionId: string, input: TaskCreateInput, actor: TaskActor): Promise<ScopedTaskView>;
   sessionTaskAct?(sessionId: string, id: string, input: TaskActionInput, actor: TaskActor): Promise<ScopedTaskView>;
   /** @deprecated Direct/global mutation ports retained only for old test doubles. */
@@ -169,10 +185,14 @@ export class TaskApi {
       switch (route.kind) {
         case 'list': {
           const filter = parseTaskListQuery(request.url.searchParams);
-          return { status: 200, body: await this.service.taskList(filter) };
+          return { status: 200, body: await this.service.taskList(filter, request.actor) };
         }
         case 'detail': {
-          const detail = await this.service.taskDetail(route.id, parseAfterSeq(request.url.searchParams));
+          const detail = await this.service.taskDetail(
+            route.id,
+            parseAfterSeq(request.url.searchParams),
+            request.actor,
+          );
           if (detail === undefined) {
             return { status: 404, body: { error: `unknown task ${route.id}`, code: 'not-found' } };
           }
@@ -183,7 +203,7 @@ export class TaskApi {
           const createMethod = this.service.taskCreate;
           if (!createMethod) throw new Error('compatibility task create service is not configured');
           const create = createMethod.bind(this.service);
-          const actor = request.actor ?? {};
+          const actor = { ...(request.actor ?? {}), requestId: request.requestId };
           const scope =
             typeof actor.actor === 'string' && actor.actor.trim() && actor.actor !== 'user'
               ? actor.actor.trim()
@@ -203,13 +223,13 @@ export class TaskApi {
           const act = actMethod.bind(this.service);
           return await this.once(dedupeKey(route.id, request.requestId, request.body), request.requestId, async () => ({
             status: 200,
-            body: await act(route.id, { ...input, ...(request.actor ?? {}) }),
+            body: await act(route.id, { ...input, ...(request.actor ?? {}), requestId: request.requestId }),
           }));
         }
         case 'session-list': {
           const filter = parseTaskListQuery(request.url.searchParams);
           if (!this.service.sessionTaskList) throw new Error('session task list service is not configured');
-          return { status: 200, body: await this.service.sessionTaskList(route.sessionId, filter) };
+          return { status: 200, body: await this.service.sessionTaskList(route.sessionId, filter, request.actor) };
         }
         case 'session-detail': {
           if (!this.service.sessionTaskDetail) throw new Error('session task detail service is not configured');
@@ -217,6 +237,7 @@ export class TaskApi {
             route.sessionId,
             route.id,
             parseAfterSeq(request.url.searchParams),
+            request.actor,
           );
           if (detail === undefined) {
             return {
@@ -240,7 +261,10 @@ export class TaskApi {
             request.requestId,
             async () => ({
               status: 201,
-              body: await create(route.sessionId, input, request.actor ?? {}),
+              body: await create(route.sessionId, input, {
+                ...(request.actor ?? {}),
+                requestId: request.requestId,
+              }),
             }),
           );
         }
@@ -251,7 +275,10 @@ export class TaskApi {
           const act = actMethod.bind(this.service);
           return await this.once(dedupeKey(route.id, request.requestId, request.body), request.requestId, async () => ({
             status: 200,
-            body: await act(route.sessionId, route.id, input, request.actor ?? {}),
+            body: await act(route.sessionId, route.id, input, {
+              ...(request.actor ?? {}),
+              requestId: request.requestId,
+            }),
           }));
         }
       }
@@ -312,6 +339,8 @@ export interface TaskActorInput {
   actorSource?: string | null;
 }
 
+export type ResolvedTaskActor = TaskActor & { actor: string; actorName: string | null };
+
 const sessionRefOf = (input: TaskActorInput): string | null => {
   const direct = typeof input.sessionId === 'string' ? input.sessionId.trim() : '';
   if (direct.length > 0) return direct;
@@ -337,9 +366,9 @@ const sessionRefOf = (input: TaskActorInput): string | null => {
 export async function resolveTaskActor(
   lookup: TaskActorLookup | undefined,
   input: TaskActorInput,
-): Promise<Required<TaskActor>> {
+): Promise<ResolvedTaskActor> {
   const ref = sessionRefOf(input);
-  if (ref === null) return { actor: 'user', actorName: 'user' };
+  if (ref === null) return { actor: 'user', actorName: 'user', humanAdmin: true };
   const view = lookup === undefined ? undefined : await lookup.get(ref).catch(() => undefined);
   if (view === undefined) return { actor: ref, actorName: null };
   const name = view.config.teammate ?? view.config.name ?? null;
