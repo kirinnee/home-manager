@@ -127,7 +127,8 @@ function renderUsageMetrics(cache: UsageCache): string {
 }
 
 /** Re-probe account usage and update the cache. Skips if a cycle is already
- *  running. Read-only HTTP per credential — does NOT consume any quota. */
+ *  running. Declared external Anthropic credentials use max_tokens:1 inference;
+ *  the other provider probes are read-only. */
 async function refreshUsage(cache: UsageCache): Promise<void> {
   if (cache.running) return;
   cache.running = true;
@@ -221,7 +222,7 @@ export function createServeCommand(): Command {
       }
       if (usage.enabled) {
         logInfo(
-          `re-probing account usage every ~${usage.interval}s (±${Math.round(usage.jitter * 100)}% jitter, read-only, no quota used)`,
+          `re-probing account usage every ~${usage.interval}s (±${Math.round(usage.jitter * 100)}% jitter; external Anthropic credentials use max_tokens:1 probes)`,
         );
         void refreshUsage(usageCache); // initial probe in the background
         scheduleJittered(() => refreshUsage(usageCache), usage.interval * 1000, usage.jitter);

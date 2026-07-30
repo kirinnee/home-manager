@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from 'fs';
 import path from 'path';
 import type { Harness, Recommendation, SessionConfig } from './types';
-import { authFailureRemedy } from './usage';
+import { authFailureRemedy, USAGE_REFRESH_MS } from './usage';
 
 export function inferHarness(binary: string): Harness {
   const base = path.basename(binary);
@@ -86,12 +86,16 @@ export type AgentUnavailableReason = 'cooldown' | 'spend_limit' | 'auth' | 'prov
 
 export interface AgentUsage {
   binary: string;
+  /** Provider account identity from kfleet (for example `loge1` or `atomi`). */
+  account?: string;
   /** The account's usage provider from the kfleet feed: `anthropic`/`codex` are
    *  OAuth logins, `zai`/`minimax` are static API keys. Drives auth-failure
    *  remedy advice (see `authFailureRemedy`) — carried through untouched from the
    *  kfleet `/usage` payload. */
   provider?: string;
   ok?: boolean;
+  /** Probe failure detail. It is decision input, never a fabricated quota. */
+  error?: string;
   usageBased?: boolean;
   /** Runtime provider/pool availability, independent of numerical quota. */
   availability?: AgentAvailability;
@@ -137,6 +141,323 @@ function unavailableAgentReason(usage: AgentUsage): string {
             : 'proxy/provider unavailable';
   const retry = typeof usage.retryAt === 'number' ? ` (retry after ${new Date(usage.retryAt).toISOString()})` : '';
   return `${reason}${retry}`;
+}
+
+// ---------------------------------------------------------------------------
+// `kteam recommend` — decision guide (the CLI-facing behavior)
+// ---------------------------------------------------------------------------
+
+export interface RoutingDoctrineModel {
+  model: string;
+  caution?: string;
+}
+
+export interface RoutingDoctrineRow {
+  work: string;
+  /** Preference order, left to right. */
+  models: RoutingDoctrineModel[];
+}
+
+/** Human-authored routing doctrine, encoded as editable data. The human
+ *  confirmed on 2026-07-30 that both earlier phrases "gpt-5.5 terra" and
+ *  "5.5 terra" meant the SINGLE model gpt-5.6-terra. GPT-5.5 is therefore not
+ *  present in this doctrine. */
+export const ROUTING_DOCTRINE: RoutingDoctrineRow[] = [
+  {
+    work: 'Mission-critical thinking/planning — where a blindspot or missed understanding causes large rework or impact',
+    models: [{ model: 'Fable 5' }],
+  },
+  { work: 'Normal planning', models: [{ model: 'Opus 5' }] },
+  {
+    work: 'Implementing',
+    models: [{ model: 'Opus 5' }, { model: 'gpt-5.6-sol' }, { model: 'glm-5.2', caution: 'only if you must' }],
+  },
+  { work: 'Review', models: [{ model: 'gpt-5.6-terra' }, { model: 'Opus 5' }] },
+  { work: 'Super-small mechanical', models: [{ model: 'MiniMax M3' }] },
+  { work: 'Internal docs/HTML', models: [{ model: 'MiniMax M3' }] },
+  { work: 'External docs/HTML', models: [{ model: 'gpt-5.6-sol' }] },
+  {
+    work: 'Small/medium mechanical',
+    models: [{ model: 'Sonnet 5' }, { model: 'glm-5.2' }, { model: 'gpt-5.6-terra' }],
+  },
+];
+
+/** Named policy constants: these numbers must never be buried in scoring code. */
+export const LOGE_SELECTION_WEIGHT = 9;
+export const NON_LOGE_SELECTION_WEIGHT = 1;
+export const LOGE_WEEKLY_REMAINING_FLOOR_PERCENT = 15;
+export const LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT = 100 - LOGE_WEEKLY_REMAINING_FLOOR_PERCENT;
+
+export const PRODUCT_FACING_MODEL_GUARD = {
+  rule: 'Never route product-facing work to MiniMax M3 or DeepSeek V4.',
+  models: ['MiniMax M3', 'DeepSeek V4'],
+} as const;
+
+export const HARD_ACCOUNT_EXCLUSIONS = [
+  {
+    binary: 'claude-auto-kirin',
+    reason: 'personal daily-driver account — never route kteam work here',
+  },
+  {
+    binary: 'codex-auto-personal',
+    reason: 'personal daily-driver account — never route kteam work here',
+  },
+  {
+    binary: 'claude-auto-dsv4p',
+    reason: 'DeepSeek V4 Pro is too expensive for its capability — routed manually only',
+  },
+] as const;
+
+export const ACCOUNT_SELECTION_POLICY = {
+  logeToNonLogeRatio: {
+    loge: LOGE_SELECTION_WEIGHT,
+    nonLoge: NON_LOGE_SELECTION_WEIGHT,
+  },
+  logeWeeklyRemainingFloorPercent: LOGE_WEEKLY_REMAINING_FLOOR_PERCENT,
+  logeWeeklyUtilizationCutoffPercent: LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
+  ownAccountFallbacks: ['atomi', 'liftoff'],
+  rules: [
+    `Prefer loge accounts at roughly ${LOGE_SELECTION_WEIGHT}:${NON_LOGE_SELECTION_WEIGHT} over non-loge accounts ` +
+      `(about ${NON_LOGE_SELECTION_WEIGHT} in ${LOGE_SELECTION_WEIGHT + NON_LOGE_SELECTION_WEIGHT} selections goes to non-loge).`,
+    `When a loge account reaches ${LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT}% weekly utilization ` +
+      `(about ${LOGE_WEEKLY_REMAINING_FLOOR_PERCENT}% weekly quota remaining), stop preferring it.`,
+    'After that cutoff, move to the own-account fallbacks atomi and liftoff; kirin remains a hard never-route daily driver.',
+    'Unknown quota is unknown: do not invent utilization or silently treat it as zero.',
+  ],
+} as const;
+
+export type RecommendationAccountPool = 'loge' | 'own-fallback' | 'other' | 'never-route';
+export type RecommendationUsability = 'usable' | 'unusable' | 'unknown';
+export type RecommendationQuotaState = 'live' | 'unknown' | 'skipped';
+
+export interface RecommendationAccountState {
+  binary: string;
+  account: string;
+  pool: RecommendationAccountPool;
+  usable: RecommendationUsability;
+  usabilityReason: string;
+  provider: string | null;
+  quotaState: RecommendationQuotaState;
+  fiveHourPercent: number | null;
+  weeklyPercent: number | null;
+  weeklyRemainingPercent: number | null;
+  weeklyResetAt: number | null;
+  weeklyResetAtIso: string | null;
+  /** null means the threshold cannot be evaluated from real weekly quota. */
+  logePreferenceEligible: boolean | null;
+  probeError: string | null;
+}
+
+export interface RecommendationDecisionGuide {
+  schemaVersion: 1;
+  kind: 'decision-guide';
+  task: string;
+  decisionOwner: 'calling-agent';
+  doctrine: {
+    rows: RoutingDoctrineRow[];
+    productFacingGuard: typeof PRODUCT_FACING_MODEL_GUARD;
+  };
+  accountSelection: typeof ACCOUNT_SELECTION_POLICY;
+  quota: {
+    probed: boolean;
+    source: 'kfleet-usage-feed' | 'skipped';
+    anyRealNumbers: boolean;
+    note: string;
+  };
+  accounts: RecommendationAccountState[];
+  hardExclusions: Array<{ binary: string; reason: string }>;
+  instructions: string[];
+  warnings: string[];
+}
+
+export interface RecommendationDecisionOptions {
+  usage?: AgentUsage[];
+  /** false is the explicit `--no-usage` path. */
+  usageProbed?: boolean;
+}
+
+const percentOrNull = (value: number | null | undefined): number | null =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? value : null;
+
+const timestampOrNull = (value: number | null | undefined): number | null => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null;
+  return Number.isNaN(new Date(value).getTime()) ? null : value;
+};
+
+const accountNameFor = (binary: string, usage?: AgentUsage): string =>
+  usage?.account ?? binary.replace(/^(claude|codex)-auto-/, '');
+
+const accountPoolFor = (binary: string, account: string): RecommendationAccountPool => {
+  if (HARD_ACCOUNT_EXCLUSIONS.some(item => item.binary === binary)) return 'never-route';
+  if (/^(claude|codex)-auto-loge(?:[1-6])?$/.test(binary)) return 'loge';
+  if ((ACCOUNT_SELECTION_POLICY.ownAccountFallbacks as readonly string[]).includes(account)) return 'own-fallback';
+  return 'other';
+};
+
+function usabilityFor(
+  binary: string,
+  usage: AgentUsage | undefined,
+  usageProbed: boolean,
+): { usable: RecommendationUsability; reason: string } {
+  const hard = HARD_ACCOUNT_EXCLUSIONS.find(item => item.binary === binary);
+  if (hard) return { usable: 'unusable', reason: hard.reason };
+  if (!usageProbed) return { usable: 'unknown', reason: 'quota/availability probe skipped by --no-usage' };
+  if (!usage) return { usable: 'unknown', reason: 'no usage record was returned for this account' };
+  if (usage.authOk === false)
+    return {
+      usable: 'unusable',
+      reason: `credentials rejected — ${
+        /^claude-auto-loge[1-6]$/.test(binary)
+          ? 'refresh the declared token with `kloge pull`, run `hms`, then re-check `kfleet usage`'
+          : authFailureRemedy(usage.provider)
+      }`,
+    };
+  if (usage.unavailable === true || usage.availability === 'unavailable')
+    return { usable: 'unusable', reason: unavailableAgentReason(usage) };
+  if (usage.atLimit === true) return { usable: 'unusable', reason: 'at its reported usage limit' };
+  if (usage.availability === 'available')
+    return { usable: 'usable', reason: 'usage/availability feed positively reports headroom' };
+  const completeQuota = percentOrNull(usage.fiveHourPercent) !== null && percentOrNull(usage.weeklyPercent) !== null;
+  if (usage.ok === true && usage.usageBased !== false && usage.atLimit === false && completeQuota)
+    return { usable: 'usable', reason: 'usage/availability feed positively reports headroom' };
+  if (usage.ok === true)
+    return {
+      usable: 'unknown',
+      reason: 'usage probe did not return both quota windows and a positive headroom verdict',
+    };
+  if (usage.ok === false)
+    return {
+      usable: 'unknown',
+      reason: `usage probe did not return a usability verdict${usage.error ? `: ${usage.error}` : ''}`,
+    };
+  return { usable: 'unknown', reason: 'usage feed did not positively confirm availability' };
+}
+
+/** Build the inputs and rules the CALLING agent needs to decide. This function
+ *  deliberately does not classify the task, rank models/accounts, choose a role,
+ *  or generate a `kteam start` command. */
+export function recommendDecisionGuide(
+  task: string,
+  agents: string[],
+  options: RecommendationDecisionOptions = {},
+): RecommendationDecisionGuide {
+  const usage = options.usage ?? [];
+  const usageProbed = options.usageProbed ?? true;
+  const usageByBinary = new Map(usage.map(item => [item.binary, item]));
+  const accounts = [...new Set(agents)].sort().map((binary): RecommendationAccountState => {
+    const feed = usageByBinary.get(binary);
+    const account = accountNameFor(binary, feed);
+    const pool = accountPoolFor(binary, account);
+    // A failed/auth-rejected probe may carry stale fields from an older
+    // producer. Only a non-failed authenticated numerical record is real.
+    const numericalQuota = usageProbed && feed?.ok !== false && feed?.authOk !== false && feed?.usageBased !== false;
+    const fiveHourPercent = numericalQuota ? percentOrNull(feed?.fiveHourPercent) : null;
+    const weeklyPercent = numericalQuota ? percentOrNull(feed?.weeklyPercent) : null;
+    const weeklyRemainingPercent = weeklyPercent === null ? null : Math.max(0, 100 - weeklyPercent);
+    const weeklyResetAt = numericalQuota ? timestampOrNull(feed?.weeklyResetAt) : null;
+    const verdict = usabilityFor(binary, feed, usageProbed);
+    return {
+      binary,
+      account,
+      pool,
+      usable: verdict.usable,
+      usabilityReason: verdict.reason,
+      provider: feed?.provider ?? null,
+      quotaState: !usageProbed ? 'skipped' : fiveHourPercent !== null || weeklyPercent !== null ? 'live' : 'unknown',
+      fiveHourPercent,
+      weeklyPercent,
+      weeklyRemainingPercent,
+      weeklyResetAt,
+      weeklyResetAtIso: weeklyResetAt === null ? null : new Date(weeklyResetAt).toISOString(),
+      logePreferenceEligible:
+        pool !== 'loge' || weeklyPercent === null ? null : weeklyPercent < LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
+      probeError: usageProbed ? (feed?.error ?? null) : null,
+    };
+  });
+
+  const anyRealNumbers = accounts.some(account => account.fiveHourPercent !== null || account.weeklyPercent !== null);
+  const warnings = !usageProbed
+    ? ['Quota inputs are missing because --no-usage skipped probing; every quota field is unknown.']
+    : anyRealNumbers
+      ? []
+      : ['The usage feed returned no real 5h/weekly values; quota fields are unknown, not zero.'];
+
+  return {
+    schemaVersion: 1,
+    kind: 'decision-guide',
+    task,
+    decisionOwner: 'calling-agent',
+    doctrine: {
+      rows: ROUTING_DOCTRINE.map(row => ({ ...row, models: row.models.map(model => ({ ...model })) })),
+      productFacingGuard: PRODUCT_FACING_MODEL_GUARD,
+    },
+    accountSelection: ACCOUNT_SELECTION_POLICY,
+    quota: {
+      probed: usageProbed,
+      source: usageProbed ? 'kfleet-usage-feed' : 'skipped',
+      anyRealNumbers,
+      note: usageProbed
+        ? `Numbers come from the cached kfleet usage feed (refreshed at most every ${Math.round(USAGE_REFRESH_MS / 1000)} seconds); failed probes stay unknown.`
+        : 'Quota probing was skipped with --no-usage; no quota inference was made.',
+    },
+    accounts,
+    hardExclusions: HARD_ACCOUNT_EXCLUSIONS.map(item => ({ ...item })),
+    instructions: [
+      'Match the work to the routing-doctrine row; use its model order as the capability preference.',
+      'Remove hard exclusions and accounts positively reported unusable.',
+      `Apply the ${LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT}% weekly-utilization cutoff to each loge account only when its real weekly value is known.`,
+      `Among eligible accounts, maintain the rough ${LOGE_SELECTION_WEIGHT}:${NON_LOGE_SELECTION_WEIGHT} loge-to-non-loge selection ratio; after the cutoff use atomi/liftoff.`,
+      'The calling agent makes the final choice. This guide does not prescribe an agent or emit a launch command.',
+    ],
+    warnings,
+  };
+}
+
+const formatQuotaPercent = (value: number | null): string => (value === null ? 'unknown' : `${value}% used`);
+
+/** Human-readable form of the same machine-readable guide returned by --json. */
+export function renderRecommendationDecisionGuide(guide: RecommendationDecisionGuide): string {
+  const lines = [
+    `Task: ${guide.task}`,
+    'Decision owner: calling agent (this command supplies doctrine and live inputs; it does not choose).',
+    '',
+    'Routing doctrine (models are in preference order):',
+    ...guide.doctrine.rows.map(
+      row =>
+        `  - ${row.work}: ${row.models.map(model => `${model.model}${model.caution ? ` (${model.caution})` : ''}`).join(', ')}`,
+    ),
+    '',
+    'Account selection:',
+    ...guide.accountSelection.rules.map(rule => `  - ${rule}`),
+    '',
+    'Account state:',
+    `  Quota inputs: ${guide.quota.note}`,
+    ...guide.accounts.map(account => {
+      const reset = account.weeklyResetAtIso ?? 'unknown';
+      const remaining = account.weeklyRemainingPercent === null ? 'unknown' : `${account.weeklyRemainingPercent}%`;
+      const preference =
+        account.pool !== 'loge'
+          ? ''
+          : account.logePreferenceEligible === null
+            ? '; loge preference unknown (weekly quota missing)'
+            : account.logePreferenceEligible
+              ? '; loge preference eligible'
+              : '; stop loge preference (weekly cutoff reached)';
+      return (
+        `  - ${account.binary} [${account.pool}]: usability ${account.usable}; ` +
+        `5h ${formatQuotaPercent(account.fiveHourPercent)}; weekly ${formatQuotaPercent(account.weeklyPercent)} ` +
+        `(remaining ${remaining}); weekly reset ${reset}${preference}; ${account.usabilityReason}`
+      );
+    }),
+    '',
+    'Hard exclusions:',
+    ...guide.hardExclusions.map(item => `  - ${item.binary}: ${item.reason}`),
+    '',
+    `Product-facing guard: ${guide.doctrine.productFacingGuard.rule}`,
+  ];
+  if (guide.warnings.length) lines.push('', 'Warnings:', ...guide.warnings.map(warning => `  - ${warning}`));
+  lines.push('', ...guide.instructions.map((instruction, index) => `${index + 1}. ${instruction}`));
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -369,9 +690,15 @@ const ACCOUNTS: AccountSpec[] = [
   },
   {
     // Direct first-party Anthropic OAuth accounts: native aliases work here.
-    // Fable is deliberately unavailable across this pool (see ecc2ba1).
+    // Fable is restored on the six direct accounts only; the pooled proxy above
+    // remains governed separately by its real-ID configuration.
     match: /^claude-auto-loge[1-6]$/,
-    options: [{ model: 'opus5' }, { model: 'sonnet5', flag: 'sonnet' }, { model: 'haiku', flag: 'haiku' }],
+    options: [
+      { model: 'opus5' },
+      { model: 'fable5', flag: 'fable' },
+      { model: 'sonnet5', flag: 'sonnet' },
+      { model: 'haiku', flag: 'haiku' },
+    ],
   },
   {
     match: /^claude-auto-atomi$/,

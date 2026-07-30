@@ -7,12 +7,11 @@ import path from 'path';
 import { ApiClient } from './api-client';
 import {
   discoverAutoAgents,
-  recommendTeam,
+  recommendDecisionGuide,
+  renderRecommendationDecisionGuide,
   resolveDisplayModel,
   resolveParent,
   type AgentUsage,
-  type Budget,
-  type TeamRole,
 } from './core';
 import { DaemonService } from './daemon-service';
 import { resolveBinary } from './harness';
@@ -265,87 +264,32 @@ program
   .command('recommend')
   .argument('[task...]')
   .option('--json')
-  .option('--no-usage', 'skip the kfleet usage probe (no exclusion or load balancing)')
+  .option('--no-usage', 'skip quota probing; the decision guide reports quota inputs as missing')
   .addOption(
-    new Option('--budget <budget>', 'bias the picks: cost-first, default, or quality-first')
-      .choices(['cheap', 'balanced', 'max'])
-      .default('balanced'),
+    new Option('--budget <budget>', 'deprecated compatibility flag; accepted but no longer makes a pick').choices([
+      'cheap',
+      'balanced',
+      'max',
+    ]),
   )
-  .option(
-    '--roles <roles>',
-    'force the team shape instead of deriving it (comma-separated: planner,implementer,researcher,reviewer,fan-out)',
-  )
-  .option('--label <label>', 'ownership label to put in the generated kteam start commands')
-  .action(
-    async (
-      parts: string[],
-      options: { json?: boolean; usage?: boolean; budget: Budget; roles?: string; label?: string },
-    ) => {
-      const task = parts.join(' ').trim();
-      if (!task) {
-        console.error('a task description is required: kteam recommend "<task>"');
-        process.exitCode = 1;
-        return;
-      }
-      const available = discoverAutoAgents(paths.kfleetBin);
-      const usage = options.usage === false ? [] : await fetchAgentUsage();
-      const roles = options.roles
-        ?.split(',')
-        .map(role => role.trim())
-        .filter(Boolean) as TeamRole[] | undefined;
-      const team = recommendTeam(task, available, {
-        usage,
-        budget: options.budget,
-        roles,
-        label: options.label,
-      });
-      if (options.json) return console.log(JSON.stringify({ available, ...team }, null, 2));
-
-      console.log(`Task: ${task}`);
-      console.log(`Read: ${team.reasoning}`);
-      console.log(`Budget: ${team.budget}`);
-      console.log('');
-      for (const role of team.roles) {
-        const heading = role.count ? `${role.role.toUpperCase()} ×${role.count}` : role.role.toUpperCase();
-        console.log(`${heading} — ${role.why}`);
-        console.log(`  ▸ PRIMARY  ${option(role.primary)}`);
-        console.log(`    ${role.primary.command}`);
-        for (const alternative of role.alternatives) {
-          console.log(`  · alt      ${option(alternative)}`);
-          console.log(`    ${alternative.command}`);
-        }
-        console.log('');
-      }
-      if (team.warnings.length) {
-        console.log('Warnings:');
-        for (const warning of team.warnings) console.log(`  ! ${warning}`);
-        console.log('');
-      }
-      if (team.exclusions.length) {
-        console.log('Excluded:');
-        for (const item of team.exclusions) console.log(`  - ${item.binary}: ${item.reason}`);
-        console.log('');
-      }
-      console.log('Review this with the user before launching — it spends account quota.');
-    },
-  );
-
-function option(item: {
-  binary: string;
-  modelLabel: string;
-  modelFlag?: string;
-  tradeoff: string;
-  caveat?: string;
-}): string {
-  const flag = item.modelFlag ? ` --model ${item.modelFlag}` : '';
-  const caveats: Record<string, string> = {
-    'below-doctrine-floor': 'below the doctrine floor for this role — deliberate override only',
-    'same-model-family': 'same model family as the implementer — a weaker independent check',
-    'not-for-product-facing': 'doctrine bars this model from product-facing work — support role only',
-  };
-  const caveat = item.caveat ? `\n             ⚠ ${caveats[item.caveat] ?? item.caveat}` : '';
-  return `${item.modelLabel.padEnd(20)} ${item.binary}${flag}\n             ${item.tradeoff}${caveat}`;
-}
+  .option('--roles <roles>', 'deprecated compatibility flag; accepted but no longer makes a team shape')
+  .option('--label <label>', 'deprecated compatibility flag; no launch command is generated')
+  .action(async (parts: string[], options: { json?: boolean; usage?: boolean }) => {
+    const task = parts.join(' ').trim();
+    if (!task) {
+      console.error('a task description is required: kteam recommend "<task>"');
+      process.exitCode = 1;
+      return;
+    }
+    const available = discoverAutoAgents(paths.kfleetBin);
+    const usage = options.usage === false ? [] : await fetchAgentUsage();
+    const guide = recommendDecisionGuide(task, available, {
+      usage,
+      usageProbed: options.usage !== false,
+    });
+    if (options.json) return console.log(JSON.stringify(guide, null, 2));
+    console.log(renderRecommendationDecisionGuide(guide));
+  });
 
 program
   .command('task')

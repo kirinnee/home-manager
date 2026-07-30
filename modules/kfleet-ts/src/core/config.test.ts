@@ -40,6 +40,38 @@ describe('loadConfig', () => {
     });
   });
 
+  test('parses a typed external secrets-file credential source', () => {
+    withTempConfig(
+      'agents:\n  - name: loge1\n    kind: claude\n    credential: { source: secrets-file, key: LOGE_CLAUDE_1_TOKEN }\n',
+      file => {
+        expect(loadConfig(file).agents[0]?.credential).toEqual({
+          source: 'secrets-file',
+          key: 'LOGE_CLAUDE_1_TOKEN',
+        });
+      },
+    );
+  });
+
+  test('rejects unknown credential sources, invalid env names, and extra fields', () => {
+    for (const credential of [
+      '{ source: env, key: LOGE_CLAUDE_1_TOKEN }',
+      '{ source: secrets-file, key: $LOGE_CLAUDE_1_TOKEN }',
+      '{ source: secrets-file, key: LOGE_CLAUDE_1_TOKEN, file: /tmp/secrets }',
+      '{ source: secrets-file, key: LOGE_CLAUDE_1_TOKEN, token: secret }',
+    ]) {
+      withTempConfig(`agents:\n  - name: loge1\n    kind: claude\n    credential: ${credential}\n`, file => {
+        expect(() => loadConfig(file)).toThrow(/invalid config/);
+      });
+    }
+  });
+
+  test('rejects a secrets-file declaration on an unsupported agent kind', () => {
+    withTempConfig(
+      'agents:\n  - name: external-codex\n    kind: codex\n    credential: { source: secrets-file, key: CODEX_TOKEN }\n',
+      file => expect(() => loadConfig(file)).toThrow(/supported only for Claude agents/),
+    );
+  });
+
   test('parses strict CLIProxyAPI availability sources', () => {
     withTempConfig(
       [

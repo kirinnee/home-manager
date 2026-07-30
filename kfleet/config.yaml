@@ -191,44 +191,68 @@ agents:
       ANTHROPIC_DEFAULT_HAIKU_MODEL: deepseek-v4-flash
       ANTHROPIC_DEFAULT_OPUS_MODEL: deepseek-v4-flash
       ANTHROPIC_DEFAULT_SONNET_MODEL: deepseek-v4-flash
-  # Direct OAuth agents for the former kloge Claude pool. The shared claude
-  # profile supplies KTEAM_MODEL=opus; each agent resolves that alias to Opus 5
-  # with the 1M-context beta, matching the proxy-backed agent's effective model.
+  # Direct external-token agents for the former kloge Claude pool. The shared
+  # claude profile supplies KTEAM_MODEL=opus; each agent maps both Opus and
+  # Fable to its 1M-context model. The pooled proxy's Fable mapping stays disabled.
   - name: loge1
     kind: claude
     profiles: [claude]
+    credential:
+      source: secrets-file
+      key: LOGE_CLAUDE_1_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_1_TOKEN
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
   - name: loge2
     kind: claude
     profiles: [claude]
+    credential:
+      source: secrets-file
+      key: LOGE_CLAUDE_2_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_2_TOKEN
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
   - name: loge3
     kind: claude
     profiles: [claude]
+    credential:
+      source: secrets-file
+      key: LOGE_CLAUDE_3_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_3_TOKEN
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
   - name: loge4
     kind: claude
     profiles: [claude]
+    credential:
+      source: secrets-file
+      key: LOGE_CLAUDE_4_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_4_TOKEN
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
   - name: loge5
     kind: claude
     profiles: [claude]
+    credential:
+      source: secrets-file
+      key: LOGE_CLAUDE_5_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_5_TOKEN
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
   - name: loge6
     kind: claude
     profiles: [claude]
+    credential:
+      source: secrets-file
+      key: LOGE_CLAUDE_6_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_6_TOKEN
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
   - name: loge
     kind: claude

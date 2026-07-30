@@ -15,6 +15,17 @@ const KINDS = ['claude', 'codex'] as const;
 const kindSchema = z.enum(KINDS);
 export type Kind = (typeof KINDS)[number];
 
+/** Credential material supplied outside `kfleet login`. `secrets-file` names a
+ *  key in the generated `~/.secrets` shell file, so background
+ *  services can resolve it without inheriting an interactive shell's env. */
+const credentialSourceSchema = z
+  .object({
+    source: z.literal('secrets-file'),
+    key: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'must be an environment variable name'),
+  })
+  .strict();
+export type CredentialSource = z.infer<typeof credentialSourceSchema>;
+
 // A settings layer is either a path to a base config file or an inline object of
 // override values. Multiple layers deep-merge left→right (later wins) into one
 // destination file, parsed/serialized per kind (codex:TOML claude:JSON). A lone
@@ -65,10 +76,22 @@ const agentSchema = z
     // (e.g. f5-kirin → kirin). Defaults to the agent's own name. `kfleet login`
     // groups and credential-syncs by (kind × identity).
     identity: z.string().min(1).optional(),
+    // Explicitly external credential sources are never created, refreshed, or
+    // synchronized by `kfleet login`.
+    credential: credentialSourceSchema.optional(),
     profiles: z.array(z.string()).optional(),
     ...profileFields,
   })
-  .strict();
+  .strict()
+  .superRefine((agent, ctx) => {
+    if (agent.credential && agent.kind !== 'claude') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['credential'],
+        message: 'secrets-file credentials are supported only for Claude agents',
+      });
+    }
+  });
 
 // A command is a thin generated executable that execs an existing agent's wrapper
 // with flags prepended — e.g. `yolo-kirin` -> `claude-kirin --dangerously-skip-permissions`.
@@ -211,9 +234,13 @@ export type Config = z.infer<typeof configSchema>;
  *  `settings` is normalized to an ordered list of layers (see core/merge.ts).
  *  `base`/`variant` identify the (agent × variant) pair behind the flat name;
  *  `identity` is the base agent whose provider login this one shares. */
-export type ResolvedAgent = { name: string; kind: Kind; base?: string; variant?: string; identity?: string } & Omit<
-  Profile,
-  'settings'
-> & {
+export type ResolvedAgent = {
+  name: string;
+  kind: Kind;
+  base?: string;
+  variant?: string;
+  identity?: string;
+  credential?: CredentialSource;
+} & Omit<Profile, 'settings'> & {
     settings?: SettingsLayer[];
   };

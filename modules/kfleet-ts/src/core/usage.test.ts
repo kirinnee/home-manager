@@ -1,6 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import type { ResolvedAgent } from './types';
-import { classifyAgent, classifyMinimaxBody, corroborateAuthFailure, jwtExpMs, oauthTokenUsable } from './usage';
+import { configSchema } from './types';
+import {
+  classifyAgent,
+  classifyMinimaxBody,
+  corroborateAuthFailure,
+  jwtExpMs,
+  oauthTokenUsable,
+  parseAnthropicStoredUsage,
+  probeUsage,
+} from './usage';
 
 /** Build an unsigned JWT with the given payload (header.payload.sig, base64url). */
 function jwt(payload: Record<string, unknown>): string {
@@ -34,6 +43,56 @@ describe('classifyAgent', () => {
   test('claude with explicit anthropic.com base url → anthropic', () => {
     const c = classifyAgent(claude('x', { ANTHROPIC_BASE_URL: 'https://api.anthropic.com' }), {});
     expect(c?.provider).toBe('anthropic');
+  });
+
+  test('declared Claude secrets-file tokens are credential-keyed, never identity-keyed', () => {
+    const agent = (name: string, ref: string): ResolvedAgent => ({
+      name,
+      kind: 'claude',
+      identity: 'shared-name-must-not-win',
+      credential: { source: 'secrets-file', key: ref },
+      env: { CLAUDE_CODE_OAUTH_TOKEN: '$WRAPPER_TOKEN_MUST_NOT_BE_USED_FOR_USAGE' },
+    });
+    const usageEnv = {
+      LOGE_1: 'oauth-token-a',
+      LOGE_2: 'oauth-token-b',
+      WRAPPER_TOKEN_MUST_NOT_BE_USED_FOR_USAGE: 'wrong-wrapper-token',
+    };
+    const a = classifyAgent(agent('loge1', 'LOGE_1'), usageEnv);
+    const same = classifyAgent(agent('auto-loge1', 'LOGE_1'), usageEnv);
+    const other = classifyAgent(agent('loge2', 'LOGE_2'), usageEnv);
+
+    expect(a?.provider).toBe('anthropic');
+    expect(a?.credId).toMatch(/^anthropic:secrets-file:[0-9a-f]{64}$/);
+    expect(same?.credId).toBe(a?.credId); // same exact credential is safely deduped
+    expect(other?.credId).not.toBe(a?.credId); // same identity can never cross-account fallback
+    expect(JSON.stringify(a)).not.toContain('oauth-token-a');
+  });
+
+  test('a declared-but-missing Claude secrets-file token stays tracked as unusable', () => {
+    const c = classifyAgent(
+      {
+        ...claude('loge1'),
+        credential: {
+          source: 'secrets-file',
+          key: 'KFLEET_TEST_MISSING_CLAUDE_TOKEN',
+        },
+      },
+      {},
+    );
+    expect(c).toEqual({
+      provider: 'anthropic',
+      credId: 'anthropic:secrets-file:missing:KFLEET_TEST_MISSING_CLAUDE_TOKEN',
+      missingToken: 'KFLEET_TEST_MISSING_CLAUDE_TOKEN',
+      missingTokenSource: 'secrets-file',
+    });
+  });
+
+  test('CLAUDE_CODE_OAUTH_TOKEN alone is never inferred as the usage source', () => {
+    const c = classifyAgent(claude('loge1', { CLAUDE_CODE_OAUTH_TOKEN: '$LOGE_CLAUDE_1_TOKEN' }), {
+      LOGE_CLAUDE_1_TOKEN: 'must-not-be-used-without-a-declaration',
+    });
+    expect(c).toEqual({ provider: 'anthropic', credId: 'anthropic:id:loge1' });
   });
 
   test('claude pointed at z.ai → zai, credId derived from the resolved key', () => {
@@ -140,6 +199,222 @@ describe('classifyAgent', () => {
     );
     expect(a?.provider).toBe('zai');
     expect(a?.credId).toBe(b!.credId); // same resolved key ⇒ same credId
+  });
+});
+
+describe('stored Anthropic OAuth JSON (0..100 percentage points)', () => {
+  test('keeps stored OAuth utilization unscaled and range-checks it', () => {
+    const parsed = parseAnthropicStoredUsage({
+      five_hour: { utilization: 2, resets_at: '2026-07-30T20:00:00.000Z' },
+      seven_day: { utilization: 74, resets_at: '2026-08-03T00:00:00.000Z' },
+    });
+    expect(parsed).toMatchObject({
+      fiveHourPercent: 2,
+      weeklyPercent: 74,
+      fiveHourResetAt: Date.parse('2026-07-30T20:00:00.000Z'),
+      weeklyResetAt: Date.parse('2026-08-03T00:00:00.000Z'),
+    });
+
+    const invalid = parseAnthropicStoredUsage({
+      five_hour: { utilization: -1 },
+      seven_day: { utilization: 101 },
+    });
+    expect(invalid.fiveHourPercent).toBeUndefined();
+    expect(invalid.weeklyPercent).toBeUndefined();
+  });
+});
+
+describe('probeUsage: direct Claude secrets-file inference quota headers (0..1 fractions)', () => {
+  const config = (variants = false) =>
+    configSchema.parse({
+      variants: variants ? { default: {}, auto: {} } : undefined,
+      agents: [
+        {
+          name: 'loge1',
+          kind: 'claude',
+          credential: { source: 'secrets-file', key: 'LOGE_CLAUDE_1_TOKEN' },
+          env: { CLAUDE_CODE_OAUTH_TOKEN: '$WRONG_WRAPPER_TOKEN' },
+        },
+      ],
+    });
+
+  const probeDirect = async (opts: { variants?: boolean; atLimitPercent?: number } = {}) =>
+    probeUsage(config(opts.variants), {
+      env: {}, // equivalent to the service's stripped environment / `env -i`
+      relogin: false,
+      sync: false,
+      atLimitPercent: opts.atLimitPercent,
+      resolveExternalCredential: agent => ({
+        key: agent.credential!.key,
+        value: agent.credential!.key === 'LOGE_CLAUDE_1_TOKEN' ? 'exact-loge1-oauth-token' : undefined,
+      }),
+    });
+
+  test('HTTP 200 scales fractional headers, parses epoch resets, and dedupes the exact token', async () => {
+    const originalFetch = globalThis.fetch;
+    const seenAuth: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      seenAuth.push(headers.get('authorization') ?? '');
+      expect(String(input)).toBe('https://api.anthropic.com/v1/messages');
+      expect(init?.method).toBe('POST');
+      expect(headers.get('anthropic-version')).toBe('2023-06-01');
+      expect(headers.get('anthropic-beta')).toBe('oauth-2025-04-20');
+      expect(JSON.parse(String(init?.body))).toEqual({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1,
+        messages: [{ role: 'user', content: '.' }],
+      });
+      return new Response('', {
+        status: 200,
+        headers: {
+          'anthropic-ratelimit-unified-5h-status': 'allowed',
+          'anthropic-ratelimit-unified-5h-utilization': '0.12',
+          'anthropic-ratelimit-unified-5h-reset': '1785441600',
+          'anthropic-ratelimit-unified-7d-status': 'allowed',
+          'anthropic-ratelimit-unified-7d-utilization': '0.34',
+          'anthropic-ratelimit-unified-7d-reset': '1785715200',
+        },
+      });
+    }) as typeof fetch;
+
+    try {
+      const rows = await probeDirect({ variants: true });
+      const direct = rows.filter(row => row.binary === 'claude-loge1' || row.binary === 'claude-auto-loge1');
+
+      expect(seenAuth).toEqual(['Bearer exact-loge1-oauth-token']); // variants dedupe by exact token
+      expect(direct).toHaveLength(2);
+      for (const row of direct) {
+        expect(row.ok).toBe(true);
+        expect(row.authOk).toBe(true);
+        expect(row.unavailable).not.toBe(true);
+        expect(row.fiveHourPercent).toBe(12);
+        expect(row.weeklyPercent).toBe(34);
+        expect(row.fiveHourResetAt).toBe(1_785_441_600_000);
+        expect(row.weeklyResetAt).toBe(1_785_715_200_000);
+        expect(row.atLimit).toBe(false);
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('HTTP 429 with valid headers is a successful probe and honors the 85% cutoff', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('', {
+        status: 429,
+        headers: {
+          'anthropic-ratelimit-unified-5h-status': 'allowed',
+          'anthropic-ratelimit-unified-5h-utilization': '0.42',
+          'anthropic-ratelimit-unified-7d-status': 'allowed',
+          'anthropic-ratelimit-unified-7d-utilization': '0.85',
+        },
+      })) as typeof fetch;
+
+    try {
+      const row = (await probeDirect({ atLimitPercent: 85 })).find(item => item.binary === 'claude-loge1')!;
+      expect(row.ok).toBe(true);
+      expect(row.error).toBeUndefined();
+      expect(row.fiveHourPercent).toBe(42);
+      expect(row.weeklyPercent).toBe(85);
+      expect(row.atLimit).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('rejected status marks at-limit even when an over-1 utilization is discarded', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('', {
+        status: 429,
+        headers: {
+          'anthropic-ratelimit-unified-5h-status': 'rejected',
+          'anthropic-ratelimit-unified-5h-utilization': '1.01',
+          'anthropic-ratelimit-unified-5h-reset': '1785441600',
+          'anthropic-ratelimit-unified-7d-status': 'allowed',
+          'anthropic-ratelimit-unified-7d-utilization': '0.81',
+        },
+      })) as typeof fetch;
+
+    try {
+      const row = (await probeDirect()).find(item => item.binary === 'claude-loge1')!;
+      expect(row.ok).toBe(true);
+      expect(row.fiveHourPercent).toBeUndefined();
+      expect(row.weeklyPercent).toBe(81);
+      expect(row.atLimit).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('malformed and out-of-range headers remain unknown instead of poisoning quota decisions', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('', {
+        status: 429,
+        headers: {
+          'anthropic-ratelimit-unified-5h-status': 'mystery',
+          'anthropic-ratelimit-unified-5h-utilization': '-0.01',
+          'anthropic-ratelimit-unified-5h-reset': 'not-an-epoch',
+          'anthropic-ratelimit-unified-7d-utilization': '1.5',
+          'anthropic-ratelimit-unified-7d-reset': '-1',
+        },
+      })) as typeof fetch;
+
+    try {
+      const row = (await probeDirect()).find(item => item.binary === 'claude-loge1')!;
+      expect(row.ok).toBe(false);
+      expect(row.error).toBe('http 429: missing or invalid Anthropic quota headers');
+      expect(row.fiveHourPercent).toBeUndefined();
+      expect(row.weeklyPercent).toBeUndefined();
+      expect(row.atLimit).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('a reset-only 429 is not a successful quota probe', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('', {
+        status: 429,
+        headers: { 'anthropic-ratelimit-unified-5h-reset': '1785441600' },
+      })) as typeof fetch;
+
+    try {
+      const row = (await probeDirect()).find(item => item.binary === 'claude-loge1')!;
+      expect(row.ok).toBe(false);
+      expect(row.error).toBe('http 429: missing or invalid Anthropic quota headers');
+      expect(row.fiveHourResetAt).toBeUndefined();
+      expect(row.authOk).toBe(true);
+      expect(row.atLimit).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('only Anthropic 401 condemns an external token; 403 remains inconclusive', async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      const probe = async (status: number) => {
+        globalThis.fetch = (async () => new Response('{}', { status })) as typeof fetch;
+        return (await probeDirect()).find(row => row.binary === 'claude-loge1')!;
+      };
+
+      const orgBlocked = await probe(403);
+      expect(orgBlocked.ok).toBe(false);
+      expect(orgBlocked.authOk).toBe(true);
+      expect(orgBlocked.error).toBe('http 403');
+
+      const invalid = await probe(401);
+      expect(invalid.ok).toBe(false);
+      expect(invalid.authOk).toBe(false);
+      expect(invalid.error).toBe('http 401');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 

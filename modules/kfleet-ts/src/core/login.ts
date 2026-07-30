@@ -17,7 +17,7 @@ import { KIND_SPECS } from './kinds';
 import { jwtExpMs, keychainSuffix, readClaudeCred } from './creds';
 import { seedFirstRunFlags } from './firstrun';
 import { type AgentProbeTarget, prepareAgentEnv, resolveAgentWrapper } from './health';
-import type { Kind, ResolvedAgent } from './types';
+import type { CredentialSource, Kind, ResolvedAgent } from './types';
 
 const KEYCHAIN_TIMEOUT_MS = 5_000;
 const EXPIRY_SKEW_MS = 60_000; // a token this close to expiry counts as expired
@@ -40,8 +40,10 @@ export interface MemberStatus {
 export interface Identity {
   kind: Kind;
   base: string;
-  /** true = provider OAuth account (loginable); false = static API key (skipped) */
+  /** true = provider OAuth account (loginable); false = static/external credential (skipped) */
   oauth: boolean;
+  /** Declared external source, when this identity is intentionally not loginable. */
+  credential?: CredentialSource;
   members: MemberStatus[];
 }
 
@@ -55,6 +57,9 @@ export interface IdentityProbeResult {
 
 /** Whether this agent authenticates via provider OAuth (vs a static API key). */
 export function isOAuth(agent: ResolvedAgent): boolean {
+  // A declared external source always wins over URL/env heuristics. Kfleet must
+  // never scan, clone, refresh, or interactively replace that credential.
+  if (agent.credential) return false;
   if (agent.kind === 'claude') {
     const baseUrl = agent.env?.ANTHROPIC_BASE_URL ?? '';
     return !baseUrl || baseUrl.includes('anthropic.com');
@@ -102,13 +107,27 @@ export async function credStatus(
  *  per-dir credential state filled in. */
 export async function scanIdentities(agents: ResolvedAgent[], now = Date.now()): Promise<Identity[]> {
   const byKey = new Map<string, Identity>();
+  const sourceOf = (agent: ResolvedAgent): string =>
+    agent.credential ? `${agent.credential.source}:${agent.credential.key}` : isOAuth(agent) ? 'oauth' : 'api-key';
   for (const a of agents) {
     const base = a.identity ?? a.base ?? a.name;
     const key = `${a.kind}:${base}`;
     let id = byKey.get(key);
     if (!id) {
-      id = { kind: a.kind, base, oauth: isOAuth(a), members: [] };
+      id = { kind: a.kind, base, oauth: isOAuth(a), credential: a.credential, members: [] };
       byKey.set(key, id);
+    } else {
+      const existingSource = id.credential
+        ? `${id.credential.source}:${id.credential.key}`
+        : id.oauth
+          ? 'oauth'
+          : 'api-key';
+      const incomingSource = sourceOf(a);
+      if (existingSource !== incomingSource) {
+        throw new Error(
+          `identity "${key}" mixes credential sources (${existingSource} and ${incomingSource}); use distinct identity values`,
+        );
+      }
     }
     const dir = KIND_SPECS[a.kind].configDir(a.name);
     const status = id.oauth ? await credStatus(a.kind, dir, now) : { state: 'missing' as const };

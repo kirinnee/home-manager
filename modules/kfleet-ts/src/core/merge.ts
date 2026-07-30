@@ -52,7 +52,7 @@ export function resolveAll(config: Config): ResolvedAgent[] {
 
   const out: ResolvedAgent[] = [];
   for (const agent of config.agents) {
-    const { name, kind, identity, profiles: aProfiles = [], ...aInline } = agent;
+    const { name, kind, identity, credential, profiles: aProfiles = [], ...aInline } = agent;
     for (const [vName, variant] of Object.entries(variants)) {
       const { profiles: vProfiles = [], ...vInline } = variant;
       const who = `agent "${name}" (variant "${vName}")`;
@@ -68,6 +68,7 @@ export function resolveAll(config: Config): ResolvedAgent[] {
         base: name,
         variant: vName,
         identity,
+        credential,
         ...acc,
         settings: asLayers(acc.settings),
       });

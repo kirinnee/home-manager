@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { probeAgent } from '../core/health';
 import type { Identity, MemberStatus } from '../core/login';
-import { runLogin } from './login';
+import { nonLoginStatus, runLogin } from './login';
 
 const missingIdentity = (): Identity => ({
   kind: 'claude',
@@ -13,6 +13,17 @@ const missingIdentity = (): Identity => ({
   members: [
     { name: 'auto-kirin', variant: 'auto', dir: '/tmp/auto-kirin', state: 'missing' },
     { name: 'kirin', variant: 'default', dir: '/tmp/kirin', state: 'missing' },
+  ],
+});
+
+const externalIdentity = (): Identity => ({
+  kind: 'claude',
+  base: 'loge1',
+  oauth: false,
+  credential: { source: 'secrets-file', key: 'LOGE_CLAUDE_1_TOKEN' },
+  members: [
+    { name: 'loge1', variant: 'default', dir: '/tmp/loge1', state: 'missing' },
+    { name: 'auto-loge1', variant: 'auto', dir: '/tmp/auto-loge1', state: 'missing' },
   ],
 });
 
@@ -30,6 +41,42 @@ const logger = () => {
 };
 
 describe('runLogin probe gate', () => {
+  test('external-token identities are named clearly and never probed, synced, or logged in', async () => {
+    const identity = externalIdentity();
+    expect(nonLoginStatus(identity)).toBe(
+      'claude-loge1: external-token account (~/.secrets key LOGE_CLAUDE_1_TOKEN) — no login needed',
+    );
+
+    const output = logger();
+    let probeCalls = 0;
+    let syncCalls = 0;
+    let interactiveCalls = 0;
+    const summary = await runLogin(
+      [identity],
+      [],
+      { probe: true, syncOnly: false },
+      {
+        log: output.log,
+        probe: async () => {
+          probeCalls += 1;
+          return { up: false };
+        },
+        syncIdentity: async () => {
+          syncCalls += 1;
+          return [];
+        },
+        interactiveLogin: async item => {
+          interactiveCalls += 1;
+          return item.members[0]!;
+        },
+      },
+    );
+
+    expect({ probeCalls, syncCalls, interactiveCalls }).toEqual({ probeCalls: 0, syncCalls: 0, interactiveCalls: 0 });
+    expect(summary.loginNeeded).toBe(0);
+    expect(summary.unresolved).toBe(0);
+  });
+
   test('an unreadable credential with a passing probe skips interactive login', async () => {
     const output = logger();
     let interactiveCalls = 0;

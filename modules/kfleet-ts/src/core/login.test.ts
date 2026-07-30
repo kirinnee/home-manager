@@ -10,6 +10,7 @@ import {
   loginMember,
   pickDonor,
   resolveLoginTarget,
+  scanIdentities,
   syncIdentity,
 } from './login';
 import type { Identity, MemberStatus } from './login';
@@ -28,9 +29,62 @@ describe('isOAuth', () => {
     ).toBe(false);
   });
 
+  test('a declared external credential wins over OAuth URL/env heuristics', () => {
+    expect(
+      isOAuth({
+        name: 'loge1',
+        kind: 'claude',
+        credential: { source: 'secrets-file', key: 'LOGE_CLAUDE_1_TOKEN' },
+        env: { CLAUDE_CODE_OAUTH_TOKEN: '$LOGE_CLAUDE_1_TOKEN' },
+      }),
+    ).toBe(false);
+  });
+
   test('codex: OPENAI_API_KEY/BASE_URL env ⇒ api-key; plain ⇒ OAuth', () => {
     expect(isOAuth({ name: 'personal', kind: 'codex' })).toBe(true);
     expect(isOAuth({ name: 'loge', kind: 'codex', env: { OPENAI_API_KEY: 'loge-internal' } })).toBe(false);
+  });
+});
+
+describe('scanIdentities: declared external credentials', () => {
+  test('preserves the source and never scans it as a missing OAuth credential', async () => {
+    const [identity] = await scanIdentities([
+      {
+        name: 'loge1',
+        kind: 'claude',
+        base: 'loge1',
+        variant: 'default',
+        credential: { source: 'secrets-file', key: 'LOGE_CLAUDE_1_TOKEN' },
+      },
+      {
+        name: 'auto-loge1',
+        kind: 'claude',
+        base: 'loge1',
+        variant: 'auto',
+        credential: { source: 'secrets-file', key: 'LOGE_CLAUDE_1_TOKEN' },
+      },
+    ]);
+
+    expect(identity).toMatchObject({
+      kind: 'claude',
+      base: 'loge1',
+      oauth: false,
+      credential: { source: 'secrets-file', key: 'LOGE_CLAUDE_1_TOKEN' },
+    });
+    expect(identity?.members.map(member => member.state)).toEqual(['missing', 'missing']);
+  });
+
+  test('rejects a mixed external/OAuth identity independent of member order', async () => {
+    const external = {
+      name: 'loge1',
+      kind: 'claude' as const,
+      identity: 'shared',
+      credential: { source: 'secrets-file' as const, key: 'LOGE_CLAUDE_1_TOKEN' },
+    };
+    const oauth = { name: 'kirin-alias', kind: 'claude' as const, identity: 'shared' };
+
+    await expect(scanIdentities([external, oauth])).rejects.toThrow(/mixes credential sources/);
+    await expect(scanIdentities([oauth, external])).rejects.toThrow(/mixes credential sources/);
   });
 });
 

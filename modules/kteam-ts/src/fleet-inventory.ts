@@ -39,10 +39,10 @@ const ANTHROPIC_RUNTIME_MODELS: RuntimeModelOption[] = [
   { value: 'haiku', label: 'Haiku 4.5' },
 ];
 
-// Direct Anthropic OAuth just like the other first-party accounts, but Fable is
-// deliberately unavailable across this pool (see ecc2ba1). Keep the native
-// aliases; unlike the bare loge proxy below, these wrappers do not need real IDs.
-const LOGE_DIRECT_RUNTIME_MODELS = ANTHROPIC_RUNTIME_MODELS.filter(model => model.value !== 'fable');
+// Direct Anthropic OAuth just like the other first-party accounts. The human
+// explicitly restored Fable on loge1..6; these wrappers use native aliases,
+// unlike the bare pooled proxy below (which remains a separate real-ID branch).
+const LOGE_DIRECT_RUNTIME_MODELS = ANTHROPIC_RUNTIME_MODELS;
 
 const LOGE_RUNTIME_MODELS: RuntimeModelOption[] = [
   { value: 'claude-fable-5[1m]', label: 'Fable 5 · 1M' },

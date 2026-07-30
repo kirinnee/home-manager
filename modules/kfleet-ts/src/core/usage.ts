@@ -1,8 +1,9 @@
 // Account usage/quota probing. For every resolved agent we work out whether it's
 // a usage-windowed subscription account (Anthropic OAuth, z.ai GLM coding plan, or
-// Codex/ChatGPT) and, if so, fetch its 5-hour and weekly utilization from the same
-// read-only endpoint the underlying CLI uses. These probes do NOT consume quota,
-// so callers can run them often.
+// Codex/ChatGPT) and, if so, fetch its 5-hour and weekly utilization. Stored
+// Anthropic OAuth credentials use the read-only usage endpoint. Declared external
+// Anthropic credentials lack that endpoint's scope, so they make one minimal Haiku
+// inference request (max_tokens:1) and read the response quota headers instead.
 //
 // Probes are deduped by CREDENTIAL: many wrappers share one credential (e.g. every
 // z.ai wrapper using $ZAI_API_KEY_A, or two claude wrappers pointing at the same
@@ -10,6 +11,7 @@
 // back out to every binary that uses it.
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { probeCLIProxyUsage, type CLIProxyAvailability, type CLIProxyUnavailableReason } from './cliproxy-usage';
 import { jwtExpMs, readClaudeCred } from './creds';
@@ -55,6 +57,9 @@ interface Windows {
   weeklyPercent?: number;
   fiveHourResetAt?: number;
   weeklyResetAt?: number;
+  /** The provider explicitly rejected a quota window, even if its utilization
+   *  value was malformed or temporarily exceeded the documented range. */
+  providerAtLimit?: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -126,9 +131,161 @@ export function oauthTokenUsable(
 // Per-provider probes
 // ---------------------------------------------------------------------------
 
-/** Anthropic subscription (OAuth). Token lives in the macOS Keychain / Linux
- *  .credentials.json keyed by the config dir; both windows come back from one
- *  GET /api/oauth/usage. */
+interface AnthropicStoredUsageBody {
+  five_hour?: UtilWindow;
+  seven_day?: UtilWindow;
+}
+
+/** Parse the stored OAuth endpoint's JSON unit. Its utilization values are
+ *  percentage points already; keeping this conversion separate from inference
+ *  headers prevents an accidental 100x rescale. Exported for source-unit tests. */
+export function parseAnthropicStoredUsage(j: unknown): Omit<Windows, 'ok'> {
+  const body = (j && typeof j === 'object' ? j : {}) as AnthropicStoredUsageBody;
+  return {
+    fiveHourPercent: percentOrUndef(body.five_hour?.utilization),
+    weeklyPercent: percentOrUndef(body.seven_day?.utilization),
+    fiveHourResetAt: isoToMs(body.five_hour?.resets_at),
+    weeklyResetAt: isoToMs(body.seven_day?.resets_at),
+  };
+}
+
+/** Query the first-party Anthropic OAuth usage endpoint with one exact stored
+ *  credential. This GET is read-only and does not consume inference quota. */
+async function probeAnthropicStoredToken(token: string, timeoutMs: number, authOk = true): Promise<Windows> {
+  try {
+    const j = await getJson(
+      'https://api.anthropic.com/api/oauth/usage',
+      { Authorization: `Bearer ${token}` },
+      timeoutMs,
+    );
+    return {
+      ok: true,
+      authOk,
+      ...parseAnthropicStoredUsage(j),
+    };
+  } catch (e) {
+    // Anthropic uses 401 + `authentication_error` for an invalid bearer token.
+    // A 403 can instead be an org/spend policy response from a token Claude Code
+    // still reports as logged in, so it is inconclusive here (as are 429/5xx).
+    // This preserves real auth failures without recreating the false exclusion.
+    const rejected = (e as { status?: number }).status === 401;
+    return { ok: false, error: (e as Error).message, authOk: rejected ? false : authOk };
+  }
+}
+
+const ANTHROPIC_EXTERNAL_PROBE_MODEL = 'claude-haiku-4-5-20251001';
+const ANTHROPIC_EXTERNAL_PROBE_BODY = JSON.stringify({
+  model: ANTHROPIC_EXTERNAL_PROBE_MODEL,
+  max_tokens: 1,
+  messages: [{ role: 'user', content: '.' }],
+});
+const ANTHROPIC_QUOTA_STATUSES = new Set(['allowed', 'rejected']);
+
+interface ParsedAnthropicInferenceHeaders {
+  windows: Omit<Windows, 'ok'>;
+  hasValidQuotaHeader: boolean;
+}
+
+/** Parse ONE inference quota window. These utilization headers are fractions in
+ *  the inclusive 0..1 range, unlike the stored OAuth JSON's 0..100 values. */
+function parseAnthropicInferenceWindow(
+  headers: Headers,
+  window: '5h' | '7d',
+): {
+  percent?: number;
+  resetAt?: number;
+  rejected: boolean;
+  hasQuotaSignal: boolean;
+} {
+  const prefix = `anthropic-ratelimit-unified-${window}-`;
+  const rawStatus = headers.get(`${prefix}status`)?.trim().toLowerCase();
+  const status = rawStatus && ANTHROPIC_QUOTA_STATUSES.has(rawStatus) ? rawStatus : undefined;
+
+  const rawUtilization = headers.get(`${prefix}utilization`)?.trim();
+  const utilization = rawUtilization ? Number(rawUtilization) : Number.NaN;
+  const percent = Number.isFinite(utilization) && utilization >= 0 && utilization <= 1 ? utilization * 100 : undefined;
+
+  const rawReset = headers.get(`${prefix}reset`)?.trim();
+  const resetSeconds = rawReset ? Number(rawReset) : Number.NaN;
+  const resetAt =
+    Number.isFinite(resetSeconds) && resetSeconds >= 0 && resetSeconds <= Number.MAX_SAFE_INTEGER / 1000
+      ? resetSeconds * 1000
+      : undefined;
+
+  return {
+    percent,
+    resetAt,
+    rejected: status === 'rejected',
+    // A reset timestamp or `allowed` label alone cannot prove utilization or
+    // headroom. An explicit rejection is useful even when Anthropic reports an
+    // over-1 utilization such as the observed 1.01 snapshot.
+    hasQuotaSignal: percent !== undefined || status === 'rejected',
+  };
+}
+
+function parseAnthropicInferenceHeaders(headers: Headers): ParsedAnthropicInferenceHeaders {
+  const fiveHour = parseAnthropicInferenceWindow(headers, '5h');
+  const weekly = parseAnthropicInferenceWindow(headers, '7d');
+  return {
+    windows: {
+      fiveHourPercent: fiveHour.percent,
+      weeklyPercent: weekly.percent,
+      fiveHourResetAt: fiveHour.resetAt,
+      weeklyResetAt: weekly.resetAt,
+      providerAtLimit: fiveHour.rejected || weekly.rejected,
+    },
+    hasValidQuotaHeader: fiveHour.hasQuotaSignal || weekly.hasQuotaSignal,
+  };
+}
+
+/** Declared external OAuth tokens are inference-scoped and permanently lack
+ *  `user:profile`, so GET /api/oauth/usage cannot work for them. Make the
+ *  smallest valid inference request and read its quota headers. A rate-limited
+ *  429 is a successful quota probe when Anthropic still supplies valid headers. */
+async function probeAnthropicExternalToken(token: string, timeoutMs: number): Promise<Windows> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'oauth-2025-04-20',
+        'content-type': 'application/json',
+      },
+      body: ANTHROPIC_EXTERNAL_PROBE_BODY,
+      signal: ctrl.signal,
+    });
+    const parsed = parseAnthropicInferenceHeaders(res.headers);
+    try {
+      await res.body?.cancel();
+    } catch {
+      /* headers are complete; body cleanup is best-effort */
+    }
+
+    if (!res.ok && res.status !== 429) {
+      const rejected = res.status === 401;
+      return { ok: false, error: `http ${res.status}`, authOk: rejected ? false : true };
+    }
+    if (!parsed.hasValidQuotaHeader) {
+      const prefix = res.ok ? '' : `http ${res.status}: `;
+      return { ok: false, error: `${prefix}missing or invalid Anthropic quota headers`, authOk: true };
+    }
+    return { ok: true, authOk: true, ...parsed.windows };
+  } catch (e) {
+    if ((e as Error).name === 'AbortError')
+      return { ok: false, error: `timeout after ${Math.round(timeoutMs / 1000)}s` };
+    return { ok: false, error: (e as Error).message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Anthropic subscription (OAuth) stored in the macOS Keychain / Linux
+ *  .credentials.json keyed by config dir. Declared external-token agents bypass
+ *  this function entirely: falling back to an unrelated stored credential would
+ *  attach the wrong account's quota and auth verdict to that binary. */
 async function probeAnthropic(configDir: string, timeoutMs: number): Promise<Windows> {
   const blob = await readClaudeCred(configDir, timeoutMs);
   if (!blob) return { ok: false, error: 'not logged in (no stored credential)', authOk: false };
@@ -147,25 +304,7 @@ async function probeAnthropic(configDir: string, timeoutMs: number): Promise<Win
   const authOk = oauthTokenUsable({ accessToken: token, expiresAt });
   if (!token) return { ok: false, error: 'no access token', authOk };
   if (expired) return { ok: false, error: 'token expired', authOk };
-  try {
-    const j = (await getJson(
-      'https://api.anthropic.com/api/oauth/usage',
-      { Authorization: `Bearer ${token}` },
-      timeoutMs,
-    )) as { five_hour?: UtilWindow; seven_day?: UtilWindow };
-    return {
-      ok: true,
-      authOk,
-      fiveHourPercent: numOrUndef(j.five_hour?.utilization),
-      weeklyPercent: numOrUndef(j.seven_day?.utilization),
-      fiveHourResetAt: isoToMs(j.five_hour?.resets_at),
-      weeklyResetAt: isoToMs(j.seven_day?.resets_at),
-    };
-  } catch (e) {
-    // A 401/403 means the (non-expired) token was actually rejected ⇒ not logged in;
-    // otherwise keep the presence-based verdict (the usage endpoint just couldn't answer).
-    return { ok: false, error: (e as Error).message, authOk: authFromHttpError(e) === false ? false : authOk };
-  }
+  return await probeAnthropicStoredToken(token, timeoutMs, authOk);
 }
 interface UtilWindow {
   utilization?: number;
@@ -205,8 +344,8 @@ async function probeCodex(configDir: string, timeoutMs: number): Promise<Windows
     return {
       ok: true,
       authOk, // NOT hard-true: the endpoint serves data on a stale token; trust JWT expiry.
-      fiveHourPercent: numOrUndef(rl.primary_window?.used_percent),
-      weeklyPercent: numOrUndef(rl.secondary_window?.used_percent),
+      fiveHourPercent: percentOrUndef(rl.primary_window?.used_percent),
+      weeklyPercent: percentOrUndef(rl.secondary_window?.used_percent),
       fiveHourResetAt: secToMs(rl.primary_window?.reset_at),
       weeklyResetAt: secToMs(rl.secondary_window?.reset_at),
     };
@@ -246,8 +385,8 @@ async function probeZai(token: string, timeoutMs: number): Promise<Windows> {
     return {
       ok: true,
       authOk: true, // the key authorized the request
-      fiveHourPercent: numOrUndef(short.percentage),
-      weeklyPercent: numOrUndef(long.percentage),
+      fiveHourPercent: percentOrUndef(short.percentage),
+      weeklyPercent: percentOrUndef(long.percentage),
       fiveHourResetAt: numOrUndef(short.nextResetTime),
       weeklyResetAt: numOrUndef(long.nextResetTime),
     };
@@ -286,7 +425,7 @@ export function classifyMinimaxBody(j: MinimaxBody): Windows {
   }
   const gen = (j.model_remains ?? []).find(m => m.model_name === 'general') ?? j.model_remains?.[0];
   const used = (remaining?: number): number | undefined =>
-    typeof remaining === 'number' && Number.isFinite(remaining) ? 100 - remaining : undefined;
+    percentOrUndef(remaining) === undefined ? undefined : 100 - remaining!;
   return {
     ok: true,
     authOk: true,
@@ -353,6 +492,10 @@ interface MinimaxRemains {
   current_weekly_remaining_percent?: number; // REMAINING % of the weekly window
 }
 
+/** Accept only percentage points. Invalid provider data stays unknown instead
+ *  of poisoning limit comparisons or rendered quota values. */
+const percentOrUndef = (v: unknown): number | undefined =>
+  typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100 ? v : undefined;
 const numOrUndef = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 const secToMs = (v: unknown): number | undefined =>
   typeof v === 'number' && Number.isFinite(v) ? v * 1000 : undefined;
@@ -475,6 +618,9 @@ async function reloginExpiredOAuth(
   const seen = new Set<string>();
   const targets: { kind: Kind; configDir: string; binary: string }[] = [];
   for (const agent of resolveAll(config)) {
+    // A declared external token is static from this process's perspective:
+    // there is no refresh token/config-dir credential for the CLI to rotate.
+    if (agent.credential) continue;
     const cls = classifyAgent(agent, env);
     if (!cls || (cls.provider !== 'anthropic' && cls.provider !== 'codex')) continue;
     const configDir = KIND_SPECS[agent.kind].configDir(agent.name);
@@ -518,12 +664,73 @@ interface CredTarget {
  *  ONE quota window, so OAuth usage probes dedupe on this. */
 const identityOf = (agent: ResolvedAgent): string => agent.identity ?? agent.base ?? agent.name;
 
+interface ResolvedExternalCredential {
+  key: string;
+  value?: string;
+}
+
+/** Test seam for the otherwise fixed `~/.secrets` credential lookup. */
+type ExternalCredentialResolver = (agent: ResolvedAgent) => ResolvedExternalCredential | undefined;
+
+const READ_SECRET_FILE_KEY = `
+set -a
+. "$1" >/dev/null 2>&1 || exit 1
+exec "$2" -e 'const value = process.env[process.argv[1]]; if (value !== undefined) process.stdout.write(value)' "$3"
+`;
+
+const SECRETS_FILE = path.join(homedir(), '.secrets');
+
+/** Resolve an explicitly declared secret without depending on ambient shell
+ *  state. An inherited value wins when present; otherwise a bounded shell reads
+ *  the generated `~/.secrets` syntax. Values never enter argv or logs. */
+function createExternalCredentialResolver(env: NodeJS.ProcessEnv): ExternalCredentialResolver {
+  const cache = new Map<string, ResolvedExternalCredential>();
+  return agent => {
+    const credential = agent.credential;
+    if (!credential || credential.source !== 'secrets-file') return undefined;
+    const cached = cache.get(credential.key);
+    if (cached) return cached;
+
+    let value = env[credential.key] || undefined;
+    if (!value && existsSync(SECRETS_FILE)) {
+      const child = Bun.spawnSync({
+        cmd: [
+          '/bin/sh',
+          '-c',
+          READ_SECRET_FILE_KEY,
+          'kfleet-read-secret',
+          SECRETS_FILE,
+          process.execPath,
+          credential.key,
+        ],
+        env,
+        stdin: 'ignore',
+        stdout: 'pipe',
+        stderr: 'ignore',
+        timeout: 5_000,
+        maxBuffer: 1024 * 1024,
+      });
+      if (child.success) value = child.stdout.toString() || undefined;
+    }
+
+    const resolved = { key: credential.key, value };
+    cache.set(credential.key, resolved);
+    return resolved;
+  };
+}
+
 /** Decide an agent's usage provider + credential identity, or null if untracked.
  *  Exported for tests. */
 export function classifyAgent(
   agent: ResolvedAgent,
   env: NodeJS.ProcessEnv = process.env,
-): { provider: UsageProvider; credId: string; missingToken?: string } | null {
+  resolveExternal: ExternalCredentialResolver = createExternalCredentialResolver(env),
+): {
+  provider: UsageProvider;
+  credId: string;
+  missingToken?: string;
+  missingTokenSource?: 'env' | 'secrets-file';
+} | null {
   const configDir = KIND_SPECS[agent.kind].configDir(agent.name);
   if (agent.kind === 'claude') {
     const baseUrl = agent.env?.ANTHROPIC_BASE_URL ?? '';
@@ -553,11 +760,31 @@ export function classifyAgent(
     // Keyed by IDENTITY (not config dir): the quota window is account-level, so
     // every variant dir of one account shares a single probe.
     if (!baseUrl || baseUrl.includes('anthropic.com')) {
+      // Direct first-party wrappers (notably loge1..6) may explicitly declare
+      // a secrets-file key. Key by the RESOLVED token so each account gets its
+      // own real probe; never fall back to an identity donor or wrapper env.
+      const external = resolveExternal(agent);
+      if (external) {
+        const token = external.value;
+        if (!token)
+          return {
+            provider: 'anthropic',
+            credId: `anthropic:secrets-file:missing:${external.key}`,
+            missingToken: external.key,
+            missingTokenSource: 'secrets-file',
+          };
+        return {
+          provider: 'anthropic',
+          credId: `anthropic:secrets-file:${createHash('sha256').update(token).digest('hex')}`,
+        };
+      }
       return { provider: 'anthropic', credId: `anthropic:id:${identityOf(agent)}` };
     }
     return null;
   }
   // codex: only ChatGPT-plan (OAuth) accounts have usage windows.
+  // A declared external source must never fall back to a stale stored account.
+  if (agent.credential) return null;
   const authPath = path.join(configDir, 'auth.json');
   if (!existsSync(authPath)) return null;
   try {
@@ -581,10 +808,11 @@ function planTargets(
   agents: ResolvedAgent[],
   env: NodeJS.ProcessEnv,
   donorDirs: Map<string, string> = new Map(),
+  resolveExternal: ExternalCredentialResolver = createExternalCredentialResolver(env),
 ): CredTarget[] {
   const byCred = new Map<string, CredTarget>();
   for (const agent of agents) {
-    const cls = classifyAgent(agent, env);
+    const cls = classifyAgent(agent, env, resolveExternal);
     if (!cls) continue;
     const configDir = KIND_SPECS[agent.kind].configDir(agent.name);
     const binary = `${agent.kind}-${agent.name}`;
@@ -595,21 +823,26 @@ function planTargets(
       continue;
     }
     const probeDir = donorDirs.get(cls.credId) ?? configDir;
-    const run: CredTarget['run'] =
-      cls.provider === 'anthropic'
-        ? t => probeAnthropic(probeDir, t)
+    const external = resolveExternal(agent);
+    const run: CredTarget['run'] = cls.missingToken
+      ? async () => ({
+          ok: false,
+          error:
+            cls.missingTokenSource === 'secrets-file'
+              ? `missing secrets-file key ${cls.missingToken}`
+              : `missing env var ${cls.missingToken}`,
+          unavailable: true,
+          authOk: false,
+        })
+      : cls.provider === 'anthropic'
+        ? external
+          ? t => probeAnthropicExternalToken(external.value!, t)
+          : t => probeAnthropic(probeDir, t)
         : cls.provider === 'codex'
           ? t => probeCodex(probeDir, t)
-          : cls.missingToken
-            ? async () => ({
-                ok: false,
-                error: `missing env var ${cls.missingToken}`,
-                unavailable: true,
-                authOk: false,
-              })
-            : cls.provider === 'minimax'
-              ? t => probeMinimax(expandEnv(agent.env?.ANTHROPIC_AUTH_TOKEN, env)!, t)
-              : t => probeZai(expandEnv(agent.env?.ANTHROPIC_AUTH_TOKEN, env)!, t);
+          : cls.provider === 'minimax'
+            ? t => probeMinimax(expandEnv(agent.env?.ANTHROPIC_AUTH_TOKEN, env)!, t)
+            : t => probeZai(expandEnv(agent.env?.ANTHROPIC_AUTH_TOKEN, env)!, t);
     byCred.set(cls.credId, { credId: cls.credId, provider: cls.provider, run, members: [member] });
   }
   return [...byCred.values()];
@@ -640,6 +873,8 @@ async function scanOAuthAuth(
   const authByBinary = new Map<string, boolean>();
   // isOAuth (not classifyAgent): a codex dir with NO auth.json yet is untracked
   // for probing but still belongs to its identity — heal can materialize it.
+  // Declared external-token agents are classified out by isOAuth: they have no
+  // durable credential directory to scan, heal, or use as an identity donor.
   const identities: Identity[] = await scanIdentities(agents.filter(isOAuth));
   for (const id of identities) {
     const donor = pickDonor(id.members);
@@ -667,6 +902,9 @@ export async function probeUsage(
     relogin?: boolean;
     /** heal dead credential copies from a valid sibling before probing (default on) */
     sync?: boolean;
+    /** Override only for tests; production always resolves declared keys from
+     *  the ambient env or the fixed generated `~/.secrets` file. */
+    resolveExternalCredential?: ExternalCredentialResolver;
   } = {},
 ): Promise<AccountUsage[]> {
   const env = opts.env ?? process.env;
@@ -687,7 +925,7 @@ export async function probeUsage(
   // healing dead copies from valid siblings first unless disabled.
   const { donorDirs, authByBinary } = await scanOAuthAuth(agents, opts.sync !== false);
 
-  const targets = planTargets(agents, env, donorDirs);
+  const targets = planTargets(agents, env, donorDirs, opts.resolveExternalCredential);
   const results = await runProbes(targets, concurrency, timeoutMs);
 
   // Map each credential's windows back onto its member binaries. Quota numbers
@@ -741,7 +979,10 @@ function windowsToUsage(
   w: Windows,
   atLimitPercent: number,
 ): AccountUsage {
-  const atLimit = (w.fiveHourPercent ?? 0) >= atLimitPercent || (w.weeklyPercent ?? 0) >= atLimitPercent;
+  const atLimit =
+    w.providerAtLimit === true ||
+    (w.fiveHourPercent ?? 0) >= atLimitPercent ||
+    (w.weeklyPercent ?? 0) >= atLimitPercent;
   return {
     binary: m.binary,
     kind: m.kind,

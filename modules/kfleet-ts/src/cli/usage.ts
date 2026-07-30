@@ -1,8 +1,8 @@
 // `kfleet usage` — probe every tracked subscription/usage account (Anthropic
 // OAuth, Codex/ChatGPT, z.ai GLM, MiniMax coding plan) and print each one's 5-hour
-// and weekly utilization plus whether it's logged in. Read-only, does NOT consume
-// quota. Same prober the `kfleet serve` /metrics + /usage endpoints use; this is
-// the on-demand view.
+// and weekly utilization plus whether it's logged in. Declared external Anthropic
+// credentials use a max_tokens:1 inference probe; other sources are read-only.
+// Same prober the `kfleet serve` /metrics + /usage endpoints use.
 import { Command } from 'commander';
 import pc from 'picocolors';
 import { loadConfig } from '../core/config';
@@ -71,7 +71,7 @@ export function createUsageCommand(): Command {
         const sync = opts.sync === false ? false : u.sync;
         if (!opts.json)
           logDim(
-            `probing subscription accounts (read-only, does not use quota)${relogin ? '; refreshing expired tokens first' : ''}…`,
+            `probing subscription accounts (external Anthropic credentials use max_tokens:1 quota probes)${relogin ? '; refreshing expired tokens first' : ''}…`,
           );
         const rows = await probeUsage(config, {
           concurrency: opts.concurrency ?? u.concurrency,
@@ -125,14 +125,14 @@ export function createUsageCommand(): Command {
           }
         }
         const down = rows.filter(r => r.unavailable === true);
-        const exhausted = rows.filter(r => r.atLimit && r.availability === undefined);
+        const limitSummary = usageLimitSummary(rows);
         const loggedOut = rows.filter(r => r.authOk === false && r.availability === undefined);
         // "Errored" = couldn't read usage but the creds ARE fine (transient/endpoint) — distinct from logged-out.
         const errored = rows.filter(r => r.usageBased && !r.ok && r.authOk !== false);
         console.log(
-          exhausted.length
-            ? pc.yellow(`\n${exhausted.length} at limit: ${exhausted.map(r => r.binary).join(', ')}`)
-            : pc.green('\nall tracked accounts have usage left'),
+          limitSummary.state === 'confirmed-headroom'
+            ? pc.green(`\n${limitSummary.message}`)
+            : pc.yellow(`\n${limitSummary.message}`),
         );
         if (loggedOut.length)
           logWarn(`${loggedOut.length} NOT logged in (re-auth needed): ${loggedOut.map(r => r.binary).join(', ')}`);
@@ -147,6 +147,30 @@ export function createUsageCommand(): Command {
         logOk('done');
       },
     );
+}
+
+export function usageLimitSummary(rows: AccountUsage[]): {
+  state: 'at-limit' | 'unknown' | 'confirmed-headroom';
+  message: string;
+} {
+  const tracked = rows.filter(r => r.usageBased && r.availability === undefined);
+  const exhausted = tracked.filter(r => r.atLimit);
+  if (exhausted.length)
+    return {
+      state: 'at-limit',
+      message: `${exhausted.length} at limit: ${exhausted.map(r => r.binary).join(', ')}`,
+    };
+
+  const unknown = tracked.filter(
+    r => !r.ok || r.authOk === false || typeof r.fiveHourPercent !== 'number' || typeof r.weeklyPercent !== 'number',
+  );
+  if (unknown.length)
+    return {
+      state: 'unknown',
+      message: `no account was reported at limit; ${unknown.length} usage verdict${unknown.length === 1 ? ' is' : 's are'} unknown`,
+    };
+
+  return { state: 'confirmed-headroom', message: 'all tracked accounts have confirmed usage left' };
 }
 
 /** One aligned table row: `{mark} {binary} {provider}  {5h bar+%}  {wk bar+%}  {5h↻} {wk↻}  {note}`.

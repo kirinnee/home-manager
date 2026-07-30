@@ -12,6 +12,15 @@ export const configFile = join(dataDir, 'config.yaml');
 export const composeFile = join(dataDir, 'compose.yaml');
 export const managementKeyFile = join(dataDir, 'management-key');
 
+// `kloge pull` also keeps the direct Claude wrappers in kfleet in sync through
+// this checkout's required decrypted-edit → encrypt-script workflow.
+export const homeManagerDir =
+  process.env.KLOGE_HOME_MANAGER_DIR ?? process.env.HM_CONFIG_DIR ?? join(homedir(), '.config', 'home-manager');
+export const kfleetConfigFile = join(homeManagerDir, 'kfleet', 'config.yaml');
+export const decryptedSecretsFile = join(homeManagerDir, 'secrets.yaml');
+export const decryptSecretsScript = join(homeManagerDir, 'scripts', 'secrets', 'decrypt.sh');
+export const encryptSecretsScript = join(homeManagerDir, 'scripts', 'secrets', 'encrypt.sh');
+
 // CLIProxyAPI docker images. The maintained fork is the configured default so
 // kfleet's model-aware availability probe is active after a normal render. The
 // upstream image remains an explicit rollback/escape hatch via KLOGE_IMAGE.

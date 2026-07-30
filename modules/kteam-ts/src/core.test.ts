@@ -1,10 +1,17 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  ACCOUNT_SELECTION_POLICY,
+  HARD_ACCOUNT_EXCLUSIONS,
+  LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
+  PRODUCT_FACING_MODEL_GUARD,
+  ROUTING_DOCTRINE,
   classifyTask,
   harnessDisplayName,
   inferHarness,
   interactiveHarnessArgs,
+  recommendDecisionGuide,
   recommendTeam,
+  renderRecommendationDecisionGuide,
   resolveDisplayModel,
   resolveParent,
   startWaitMsFor,
@@ -274,7 +281,160 @@ test('contextWindowForSession: [1m] on config survives a stripped served model (
 });
 
 // ---------------------------------------------------------------------------
-// `kteam recommend` — doctrine floors (kfleet/skills/kteam/SKILL.md)
+// `kteam recommend` — decision guide (human doctrine + real account inputs)
+// ---------------------------------------------------------------------------
+
+describe('recommendDecisionGuide: teaches the decision without making it', () => {
+  test('encodes the human routing table as ordered data with the confirmed terra correction', () => {
+    expect(ROUTING_DOCTRINE.map(row => [row.work, row.models.map(model => model.model)])).toEqual([
+      [
+        'Mission-critical thinking/planning — where a blindspot or missed understanding causes large rework or impact',
+        ['Fable 5'],
+      ],
+      ['Normal planning', ['Opus 5']],
+      ['Implementing', ['Opus 5', 'gpt-5.6-sol', 'glm-5.2']],
+      ['Review', ['gpt-5.6-terra', 'Opus 5']],
+      ['Super-small mechanical', ['MiniMax M3']],
+      ['Internal docs/HTML', ['MiniMax M3']],
+      ['External docs/HTML', ['gpt-5.6-sol']],
+      ['Small/medium mechanical', ['Sonnet 5', 'glm-5.2', 'gpt-5.6-terra']],
+    ]);
+    expect(ROUTING_DOCTRINE.find(row => row.work === 'Implementing')?.models.at(-1)?.caution).toBe('only if you must');
+    expect(JSON.stringify(ROUTING_DOCTRINE)).not.toContain('gpt-5.5');
+    expect(PRODUCT_FACING_MODEL_GUARD.rule).toContain('Never route product-facing work');
+  });
+
+  test('hands over live quota inputs and evaluates only the named loge cutoff', () => {
+    const reset = Date.parse('2026-08-03T00:00:00.000Z');
+    const guide = recommendDecisionGuide(
+      'Implement the reporting service',
+      ['claude-auto-loge1', 'claude-auto-loge2', 'claude-auto-atomi', 'claude-auto-kirin'],
+      {
+        usageProbed: true,
+        usage: [
+          {
+            binary: 'claude-auto-loge1',
+            account: 'loge1',
+            provider: 'anthropic',
+            ok: true,
+            authOk: true,
+            atLimit: false,
+            fiveHourPercent: 12,
+            weeklyPercent: 84,
+            weeklyResetAt: reset,
+          },
+          {
+            binary: 'claude-auto-loge2',
+            account: 'loge2',
+            provider: 'anthropic',
+            ok: true,
+            authOk: true,
+            atLimit: false,
+            fiveHourPercent: 20,
+            weeklyPercent: LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
+            weeklyResetAt: reset,
+          },
+          {
+            binary: 'claude-auto-atomi',
+            account: 'atomi',
+            provider: 'anthropic',
+            ok: false,
+            authOk: true,
+            error: 'http 429',
+            // Failed probes must not leak stale values into the guide.
+            fiveHourPercent: 99,
+            weeklyPercent: 99,
+            weeklyResetAt: reset,
+          },
+        ],
+      },
+    );
+    const byBinary = new Map(guide.accounts.map(account => [account.binary, account]));
+
+    expect(guide.kind).toBe('decision-guide');
+    expect(guide.decisionOwner).toBe('calling-agent');
+    expect(guide.accountSelection.logeToNonLogeRatio).toEqual({ loge: 9, nonLoge: 1 });
+    expect(guide.accountSelection.ownAccountFallbacks).toEqual(['atomi', 'liftoff']);
+    expect(byBinary.get('claude-auto-loge1')).toMatchObject({
+      pool: 'loge',
+      usable: 'usable',
+      fiveHourPercent: 12,
+      weeklyPercent: 84,
+      weeklyRemainingPercent: 16,
+      weeklyResetAt: reset,
+      logePreferenceEligible: true,
+    });
+    expect(byBinary.get('claude-auto-loge2')).toMatchObject({
+      weeklyPercent: 85,
+      weeklyRemainingPercent: 15,
+      logePreferenceEligible: false,
+    });
+    expect(byBinary.get('claude-auto-atomi')).toMatchObject({
+      pool: 'own-fallback',
+      usable: 'unknown',
+      quotaState: 'unknown',
+      fiveHourPercent: null,
+      weeklyPercent: null,
+      probeError: 'http 429',
+    });
+    expect(byBinary.get('claude-auto-kirin')).toMatchObject({ pool: 'never-route', usable: 'unusable' });
+  });
+
+  test('--no-usage stays explicit: quota is missing/unknown and never fabricated as zero', () => {
+    const guide = recommendDecisionGuide('Review the change', ['claude-auto-loge1', 'claude-auto-atomi'], {
+      usageProbed: false,
+      usage: [],
+    });
+    expect(guide.quota).toMatchObject({ probed: false, source: 'skipped', anyRealNumbers: false });
+    expect(guide.warnings.join(' ')).toContain('--no-usage');
+    for (const account of guide.accounts) {
+      expect(account.quotaState).toBe('skipped');
+      expect(account.usable).toBe('unknown');
+      expect(account.fiveHourPercent).toBeNull();
+      expect(account.weeklyPercent).toBeNull();
+      expect(account.weeklyResetAt).toBeNull();
+    }
+  });
+
+  test('a rejected declared loge token never recommends the excluded login workflow', () => {
+    const guide = recommendDecisionGuide('Review the change', ['claude-auto-loge1'], {
+      usageProbed: true,
+      usage: [
+        {
+          binary: 'claude-auto-loge1',
+          provider: 'anthropic',
+          ok: false,
+          authOk: false,
+          atLimit: false,
+          error: 'http 401',
+        },
+      ],
+    });
+    expect(guide.accounts[0]).toMatchObject({ usable: 'unusable' });
+    expect(guide.accounts[0]?.usabilityReason).toContain('`kloge pull`');
+    expect(guide.accounts[0]?.usabilityReason).toContain('`hms`');
+    expect(guide.accounts[0]?.usabilityReason).not.toContain('`kfleet login`');
+  });
+
+  test('hard exclusions are always called out, and output contains no pick or launch command', () => {
+    const guide = recommendDecisionGuide('Plan the migration', ['claude-auto-loge1'], {
+      usageProbed: false,
+    });
+    expect(HARD_ACCOUNT_EXCLUSIONS.map(item => item.binary)).toContain('claude-auto-kirin');
+    expect(HARD_ACCOUNT_EXCLUSIONS.map(item => item.binary)).toContain('codex-auto-personal');
+    expect(guide.hardExclusions).toEqual(HARD_ACCOUNT_EXCLUSIONS.map(item => ({ ...item })));
+    expect(guide).not.toHaveProperty('roles');
+    const text = renderRecommendationDecisionGuide(guide);
+    expect(text).toContain('Decision owner: calling agent');
+    expect(text).toContain('Fable 5');
+    expect(text).toContain('5h unknown');
+    expect(text).not.toContain('PRIMARY');
+    expect(text).not.toContain('kteam start');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Legacy core recommendation compatibility (the CLI no longer uses this path)
 // ---------------------------------------------------------------------------
 
 /** The whole installed fleet minus the wrappers doctrine bans outright. */
@@ -490,14 +650,14 @@ describe('recommendTeam: account rules', () => {
     expect(team.exclusions.find(item => item.binary === 'claude-auto-loge')?.reason).toContain('monthly spend limit');
   });
 
-  test('direct loge accounts use Anthropic aliases without inheriting proxy or Fable semantics', () => {
+  test('direct loge accounts offer Fable through Anthropic aliases without inheriting proxy semantics', () => {
     for (let n = 1; n <= 6; n += 1) {
       const binary = `claude-auto-loge${n}`;
       const team = recommendTeam('Research how the API pagination works', [binary], { roles: ['researcher'] });
       const options = everyone(team);
       expect(team.exclusions).toEqual([]);
       expect(options.every(option => option.binary === binary)).toBe(true);
-      expect(options.some(option => option.model === 'fable5')).toBe(false);
+      expect(options.find(option => option.model === 'fable5')?.modelFlag).toBe('fable');
       expect(options.find(option => option.model === 'opus5')?.modelFlag).toBeUndefined();
       expect(options.find(option => option.model === 'sonnet5')?.modelFlag).toBe('sonnet');
       expect(options.every(option => !option.command.includes('claude-opus-5'))).toBe(true);

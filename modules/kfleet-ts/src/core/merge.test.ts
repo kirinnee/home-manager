@@ -50,6 +50,25 @@ describe('resolveAll', () => {
     const r = resolveAll(cfg({ agents: [{ name: 'kirin', kind: 'claude' }] }));
     expect(r.map(a => a.name)).toEqual(['kirin']);
   });
+
+  test('an agent credential source survives resolution on every variant without entering profile merges', () => {
+    const r = resolveAll(
+      cfg({
+        variants: { default: {}, auto: {} },
+        agents: [
+          {
+            name: 'loge1',
+            kind: 'claude',
+            credential: { source: 'secrets-file', key: 'LOGE_CLAUDE_1_TOKEN' },
+          },
+        ],
+      }),
+    );
+    expect(r.map(agent => [agent.name, agent.credential])).toEqual([
+      ['loge1', { source: 'secrets-file', key: 'LOGE_CLAUDE_1_TOKEN' }],
+      ['auto-loge1', { source: 'secrets-file', key: 'LOGE_CLAUDE_1_TOKEN' }],
+    ]);
+  });
 });
 
 describe('variants', () => {

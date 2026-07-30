@@ -24,16 +24,29 @@ const LOGIN_PROBE_TIMEOUT_MS = 25_000;
 const stateIcon = (s: string): string =>
   s === 'valid' ? pc.green('✓') : s === 'refreshable' ? pc.yellow('~') : pc.red('✗');
 
+/** Human-readable reason an identity is outside the interactive login workflow. */
+export function nonLoginStatus(identity: Identity): string | undefined {
+  if (identity.oauth) return undefined;
+  if (identity.credential?.source === 'secrets-file') {
+    return `${identity.kind}-${identity.base}: external-token account (~/.secrets key ${identity.credential.key}) — no login needed`;
+  }
+  return `${identity.kind}-${identity.base}: api-key account — no login needed`;
+}
+
 function printStatus(identities: Identity[]): void {
+  let showedOAuth = false;
   for (const id of identities) {
-    if (!id.oauth) {
-      logDim(`  ${id.kind}-${id.base}: api-key account — no login needed`);
+    const skipped = nonLoginStatus(id);
+    if (skipped) {
+      logDim(`  ${skipped}`);
       continue;
     }
+    showedOAuth = true;
     const parts = id.members.map(m => `${stateIcon(m.state)} ${m.name}`).join('  ');
     console.log(`  ${pc.bold(`${id.kind}-${id.base}`)}: ${parts}`);
   }
-  logDim(`  (${pc.green('✓')} valid  ${pc.yellow('~')} expired-but-refreshable  ${pc.red('✗')} missing/dead)`);
+  if (showedOAuth)
+    logDim(`  (${pc.green('✓')} valid  ${pc.yellow('~')} expired-but-refreshable  ${pc.red('✗')} missing/dead)`);
 }
 
 interface LoginLogger {

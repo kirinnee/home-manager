@@ -86,6 +86,13 @@ ssh -N -L 8317:127.0.0.1:8317 user@box
 - `KLOGE_IMAGE` — override the CLIProxyAPI image (default
   `kloge-cliproxy:patched`; use `eceasy/cli-proxy-api:latest` for rollback).
 - `KLOGE_API_KEY` — client-facing placeholder key (default `loge-internal`).
+- `KLOGE_HOME_MANAGER_DIR` — checkout containing `kfleet/config.yaml`,
+  `secrets.yaml`, and `scripts/secrets/{decrypt,encrypt}.sh` (default
+  `$HM_CONFIG_DIR` or `~/.config/home-manager`). During `kloge pull`, Claude
+  slots 1–6 are additionally written to the `secrets-file` keys declared by
+  their kfleet agents. Kloge edits the decrypted `secrets.yaml`, invokes the
+  repository encrypt script, and retains all existing CLIProxyAPI auth files.
+  Run `hms` afterwards to materialize the refreshed values into `~/.secrets`.
 - `KLOGE_MANAGEMENT_KEY` — optional management-key import/rotation value. On
   render, kloge persists it to `~/.kloge/management-key` with mode `0600`;
   otherwise it generates a durable random key there. This key is separate from
