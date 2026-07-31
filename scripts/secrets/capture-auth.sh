@@ -21,6 +21,26 @@ cd "$(dirname "$0")/../.."
 
 ./scripts/secrets/decrypt.sh
 
+# Refuse to run against a STALE working copy. decrypt.sh deliberately never
+# overwrites an existing secrets.yaml, and encrypt.sh at the end overwrites
+# secrets.enc.yaml from it — so on a machine whose working copy predates the
+# committed secrets, capturing would silently republish that old base and drop
+# every key added since. That is not hypothetical: it wiped an Obsidian auth
+# token and three API tokens the first time this script ran on a second machine.
+if ! ./scripts/secrets/check.sh >/dev/null 2>&1; then
+  echo "❌ secrets.yaml is out of step with secrets.enc.yaml — refusing to capture."
+  echo ""
+  echo "   Capturing now would overwrite secrets.enc.yaml from this stale working"
+  echo "   copy and drop any key it is missing. Reconcile first:"
+  echo ""
+  echo "   • working copy has no edits worth keeping (the usual case):"
+  echo "       rm secrets.yaml && ./scripts/secrets/decrypt.sh"
+  echo "   • it has edits you need: merge them, then ./scripts/secrets/encrypt.sh"
+  echo ""
+  echo "   Then re-run this script."
+  exit 1
+fi
+
 captured=0
 skipped=0
 
