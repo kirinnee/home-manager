@@ -88,6 +88,22 @@ export function composeUsesPatchedImage(contents: string): boolean {
   return contents.split('\n').some(line => line.trim() === `image: ${PATCHED_IMAGE}`);
 }
 
+/** Build the remote command used to start the mirrored compose deployment. */
+export function buildRemoteStartCommand(opts: Pick<PushOpts, 'host' | 'remoteDir'>): string {
+  // Non-interactive SSH has a minimal PATH. Put Nix profiles first so their
+  // Docker (and its Compose v2 plugin) wins over an older system Docker, while
+  // still retaining system Docker and docker-compose v1 as fallbacks.
+  return (
+    `export PATH="$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH"; ` +
+    `cd ${shq(opts.remoteDir)} && ` +
+    `if docker compose version >/dev/null 2>&1; then docker compose up -d; ` +
+    `elif command -v docker-compose >/dev/null 2>&1; then docker-compose up -d; ` +
+    `elif command -v docker >/dev/null 2>&1; then ` +
+    `echo "Docker Compose unavailable on ${opts.host} (need docker compose v2 or docker-compose v1)" >&2; exit 127; ` +
+    `else echo "docker not found on ${opts.host} (need docker + compose)" >&2; exit 127; fi`
+  );
+}
+
 /** rsync ~/.kloge to a box and (optionally) start CLIProxyAPI there. */
 export async function push(opts: PushOpts): Promise<void> {
   requireRendered();
@@ -142,16 +158,7 @@ export async function push(opts: PushOpts): Promise<void> {
   }
 
   log(`starting CLIProxyAPI on ${opts.host}…`);
-  // Non-interactive ssh gets a minimal PATH. Append ~/.nix-profile/bin as a
-  // fallback (nix-only boxes), but keep system paths first so an apt docker at
-  // /usr/bin/docker — which carries its compose v2 plugin — wins when present.
-  // Prefer `docker compose` v2, fall back to docker-compose v1.
-  const remoteCmd =
-    `export PATH="$PATH:$HOME/.nix-profile/bin"; ` +
-    `cd ${shq(opts.remoteDir)} && ` +
-    `if docker compose version >/dev/null 2>&1; then docker compose up -d; ` +
-    `elif command -v docker-compose >/dev/null 2>&1; then docker-compose up -d; ` +
-    `else echo "docker not found on ${opts.host} (need docker + compose)" >&2; exit 127; fi`;
+  const remoteCmd = buildRemoteStartCommand(opts);
   const startr = await run([...SSH, opts.host, remoteCmd]);
   if (startr.code !== 0) die(`remote start failed:\n${startr.stderr.trim() || startr.stdout.trim()}`);
   ok(`started on ${opts.host} — reachable there at ${localUrl()} (bound to the box's 127.0.0.1)`);
