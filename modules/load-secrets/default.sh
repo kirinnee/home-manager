@@ -60,6 +60,91 @@ if [ -n "$ob_token" ]; then
 fi
 unset ob_token
 
+# Obsidian Sync end-to-end encryption password. Separate secret from the auth
+# token above and NOT derivable from it: the token authenticates the account to
+# Obsidian's servers, while this password decrypts vault contents client-side —
+# by design the servers never hold it, so `ob sync-setup` must be given it
+# locally. Materialized to a 0600 file rather than interpolated into the
+# activation script, because that script is a /nix/store path and world-readable.
+# Absent key => skip, so a box without E2E vaults still activates.
+ob_e2e="$(yq -r '.obsidian.e2e_password // ""' <<<"$yaml")"
+if [ -n "$ob_e2e" ]; then
+  mkdir -p "$HOME/.config/obsidian-headless"
+  (
+    umask 077
+    printf '%s' "$ob_e2e" >"$HOME/.config/obsidian-headless/e2e_password"
+  )
+  chmod 0600 "$HOME/.config/obsidian-headless/e2e_password"
+fi
+unset ob_e2e
+
+# Google Workspace CLI (`gws`) per-account credentials. The multi-gws wrappers
+# isolate each account with GOOGLE_WORKSPACE_CLI_CONFIG_DIR=~/.config/gws-<acct>
+# (see programs.multi-gws in home-template.nix), so dropping the files there is
+# all a fresh box needs — and it is the only route that works headlessly:
+# `gws auth login` wants a browser, and `gws` defaults to a keyring backend that
+# a box with no org.freedesktop.secrets on the user bus cannot use. The plaintext
+# credentials.json path is what `gws` falls back to, so that is what we write.
+#
+# Data-driven: every account under `.gws` is materialized, so adding one is a
+# secrets edit with no change to this script. Generate the values with
+# `gws auth export --unmasked` on a machine where the account already works.
+# Absent key => skip, so a box without gws credentials still activates.
+yq -r '.gws // {} | keys[]' <<<"$yaml" | while read -r gws_acct; do
+  [ -n "$gws_acct" ] || continue
+  gws_dir="$HOME/.config/gws-$gws_acct"
+  mkdir -p "$gws_dir"
+  # client_secret.json = the OAuth client; credentials.json = the refresh token.
+  # Both are needed for a non-interactive account, but write whichever is present
+  # so a partially-populated secrets file still makes forward progress.
+  for gws_file in client_secret credentials; do
+    gws_val="$(yq -r ".gws.\"$gws_acct\".$gws_file // \"\"" <<<"$yaml")"
+    [ -n "$gws_val" ] || continue
+    (
+      umask 077
+      printf '%s' "$gws_val" >"$gws_dir/$gws_file.json"
+    )
+    chmod 0600 "$gws_dir/$gws_file.json"
+    echo "🔑 gws: materialized $gws_file.json for account $gws_acct"
+  done
+done
+unset gws_acct gws_dir gws_file gws_val
+
+# GitHub CLI (`gh`) account tokens. All accounts share ONE config dir — the
+# multi-gh wrappers only run `gh auth switch -u <user>` before exec'ing gh — so
+# one hosts.yml holds every account, and we rebuild it here from the captured
+# tokens (see scripts/secrets/capture-auth.sh).
+#
+# SEED-ONLY, unlike every other secret in this file: gh actively owns hosts.yml
+# at runtime (it rewrites the active-account field on every `auth switch`, and
+# may refresh tokens in place). Overwriting on each activation would fight the
+# tool and could revert a locally-refreshed token to a stale one from sops. So
+# write it only when absent — which is exactly the fresh-box case this is for.
+# Rotation is therefore deliberate: delete hosts.yml, then re-run the switch.
+gh_hosts="$HOME/.config/gh/hosts.yml"
+if [ ! -f "$gh_hosts" ] && [ "$(yq -r '.gh.tokens // {} | length' <<<"$yaml")" != "0" ]; then
+  mkdir -p "$(dirname "$gh_hosts")"
+  # The host-level user/oauth_token pair is gh's "active account". Seed it from
+  # the first captured user purely as a starting value — the wrappers set the real
+  # one per invocation with `gh auth switch`.
+  gh_first="$(yq -r '.gh.tokens | keys | .[0]' <<<"$yaml")"
+  (
+    umask 077
+    {
+      echo "github.com:"
+      echo "    users:"
+      yq -r '.gh.tokens | to_entries[] | "        \(.key):\n            oauth_token: \(.value)"' <<<"$yaml"
+      echo "    git_protocol: https"
+      echo "    user: $gh_first"
+      yq -r ".gh.tokens.\"$gh_first\" | \"    oauth_token: \(.)\"" <<<"$yaml"
+    } >"$gh_hosts"
+  )
+  chmod 0600 "$gh_hosts"
+  echo "🔑 gh: seeded hosts.yml with $(yq -r '.gh.tokens | length' <<<"$yaml") account(s)"
+  unset gh_first
+fi
+unset gh_hosts
+
 # load gpg keys — batch/loopback so secret-key import also works headless:
 # over ssh there is no tty, and gpg-agent's pinentry would otherwise die with
 # "Inappropriate ioctl for device" and fail the whole activation

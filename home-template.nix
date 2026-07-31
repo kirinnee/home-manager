@@ -48,10 +48,29 @@ let
   // (linkDirs ".kfleet/skills" (kfleetAssets + "/skills"))
   // (linkDirs ".kfleet/skills-codex" (kfleetAssets + "/skills-codex"));
 
+  # `systemctl` is NOT on PATH inside a home-manager activation script — the
+  # generated activate runs with a minimal PATH that does not include /usr/bin.
+  # Every `systemctl ... || true` in an activation block was therefore failing
+  # with "command not found" and being swallowed by the `|| true`, so units were
+  # linked but never reloaded, enabled, or started. Resolve the host binary
+  # explicitly instead, and warn (rather than silently continue) when absent.
+  #
+  # Deliberately the HOST systemctl, not pkgs.systemd: it has to speak to the
+  # already-running user manager, so it must match that manager's version.
+  systemctlPrelude = ''
+    sctl=""
+    for candidate in /usr/bin/systemctl /run/current-system/sw/bin/systemctl /bin/systemctl; do
+      if [ -x "$candidate" ]; then sctl="$candidate"; break; fi
+    done
+    if [ -z "$sctl" ]; then
+      echo "⚠️  systemctl not found — skipping systemd unit management"
+    fi
+  '';
+
   # Every Obsidian vault that syncs continuously on Linux boxes. Adding one here
-  # enables it at activation; also add the matching xdg.configFile line below
-  # (that option takes literal keys, so the set cannot be generated from a list
-  # without colliding with the other entries beside it).
+  # registers it and enables its unit at activation; also add the matching
+  # xdg.configFile line below (that option takes literal keys, so the set cannot
+  # be generated from a list without colliding with the other entries beside it).
   obsidianVaults = [ "HQ" "Main" ];
   obsidianUnitName = vault: "obsidian-sync-${lib.toLower vault}";
   obsidianSyncUnit = vault: {
@@ -347,39 +366,86 @@ rec {
   home.activation.enable-backup-timer = lib.hm.dag.entryAfter [ "writeBoundary" ] (
     lib.optionalString (profile.kernel == "linux") ''
       export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-      if [ -d "$XDG_RUNTIME_DIR" ]; then
-        systemctl --user daemon-reload || true
-        systemctl --user enable --now box-backup.timer || true
+      ${systemctlPrelude}
+      if [ -n "$sctl" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+        # `enable` no-ops here for the same reason it does on the Obsidian units
+        # below: the unit file is a nix-store symlink, which systemd classifies as
+        # an alias and skips installing. Create the timers.target want by hand,
+        # which is what [Install] WantedBy=timers.target would have produced.
+        wants="$HOME/.config/systemd/user/timers.target.wants"
+        mkdir -p "$wants"
+        ln -sf "$HOME/.config/systemd/user/box-backup.timer" "$wants/box-backup.timer"
+        "$sctl" --user daemon-reload || true
+        "$sctl" --user start box-backup.timer || true
       fi
     ''
   );
 
-  # Enable the continuous Obsidian Sync unit. Kept separate from the backup
-  # activation above so a failure in one does not mask the other. `|| true`
-  # because a fresh box has no auth_token yet: the unit will crash-loop until
-  # `ob login` is run once, which is expected and must not fail activation.
-  home.activation.enable-obsidian-sync = lib.hm.dag.entryAfter [ "writeBoundary" ] (
-    lib.optionalString (profile.kernel == "linux") ''
-      export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-      if [ -d "$XDG_RUNTIME_DIR" ]; then
-        # `systemctl --user enable` does NOT work on these units: the unit file
-        # is a symlink into the nix store, so systemd classifies it as an alias
-        # and silently skips creating the default.target.wants link — meaning
-        # nothing would start at boot on a fresh box. Create the want ourselves,
-        # which is what [Install] WantedBy=default.target would have produced.
-        wants="$HOME/.config/systemd/user/default.target.wants"
-        mkdir -p "$wants"
-        systemctl --user daemon-reload || true
-        ${lib.concatMapStringsSep "\n        "
-          (vault:
-            let unit = "${obsidianUnitName vault}.service"; in
-            ''ln -sf "$HOME/.config/systemd/user/${unit}" "$wants/${unit}"
-        systemctl --user start ${unit} || true'')
-          obsidianVaults}
-        systemctl --user daemon-reload || true
-      fi
-    ''
-  );
+  # Register each vault with Obsidian Sync, then enable + start its unit. Kept
+  # separate from the backup activation above so a failure in one does not mask
+  # the other, and every step is `|| true` because a box whose secrets have not
+  # landed yet must still activate.
+  #
+  # Runs after load-secrets: registration needs BOTH secrets it materializes —
+  # the auth token AND the E2E password (see modules/load-secrets/default.sh).
+  home.activation.enable-obsidian-sync =
+    lib.hm.dag.entryAfter [ "writeBoundary" "load-secrets" ]
+      (
+        lib.optionalString (profile.kernel == "linux") ''
+          export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          ${systemctlPrelude}
+          if [ -n "$sctl" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+            ob="$HOME/.nix-profile/bin/ob"
+            pw_file="$HOME/.config/obsidian-headless/e2e_password"
+
+            # `systemctl --user enable` does NOT work on these units: the unit file
+            # is a symlink into the nix store, so systemd classifies it as an alias
+            # and silently skips creating the default.target.wants link — meaning
+            # nothing would start at boot on a fresh box. Create the want ourselves,
+            # which is what [Install] WantedBy=default.target would have produced.
+            #
+            # All links are created BEFORE the single daemon-reload below, so the
+            # units systemd learns about are the ones we just linked; starting them
+            # before that reload would race a stale unit cache.
+            wants="$HOME/.config/systemd/user/default.target.wants"
+            mkdir -p "$wants"
+
+            # "<vault>:<unit>" pairs, so obsidianUnitName stays the single source
+            # of truth for the unit naming instead of being re-derived in shell.
+            vaults="${
+              lib.concatMapStringsSep " " (v: "${v}:${obsidianUnitName v}.service") obsidianVaults
+            }"
+
+            for pair in $vaults; do
+              unit="''${pair#*:}"
+              ln -sf "$HOME/.config/systemd/user/$unit" "$wants/$unit"
+            done
+            "$sctl" --user daemon-reload || true
+
+            for pair in $vaults; do
+              vault="''${pair%%:*}"
+              unit="''${pair#*:}"
+              vault_path="$HOME/Obsidian/$vault"
+
+              # Idempotent: `ob sync-setup` is a one-time, machine-local
+              # registration — it is carried by neither git nor home-manager — so
+              # converge it here rather than assuming someone ran it by hand. Skip
+              # when this path is already configured; without it a fresh box gets a
+              # unit that crash-loops forever on an unregistered vault.
+              mkdir -p "$vault_path"
+              if [ -x "$ob" ] && [ -f "$pw_file" ] \
+                && ! "$ob" sync-list-local 2>/dev/null | grep -qF "Path: $vault_path"; then
+                echo "🔗 obsidian: registering $vault at $vault_path"
+                "$ob" sync-setup --vault "$vault" --path "$vault_path" \
+                  --password "$(cat "$pw_file")" --device-name "$(uname -n)" \
+                  </dev/null >/dev/null 2>&1 \
+                  || echo "⚠️  obsidian: sync-setup failed for $vault — unit idles until it succeeds"
+              fi
+              "$sctl" --user start "$unit" || true
+            done
+          fi
+        ''
+      );
 
   programs.home-manager.enable = true;
 
@@ -517,6 +583,7 @@ rec {
       if profile.kernel == "linux" then
         [
           pinentry-all
+          google-chrome # official Google Chrome (unfree); upstream .deb
         ]
       else
         [
