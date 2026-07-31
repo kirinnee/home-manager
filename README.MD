@@ -94,6 +94,60 @@ pls secret:encrypt   # re-encrypts into secrets.enc.yaml (skips if already in st
 The `a-secrets-sync` pre-commit hook blocks any commit while `secrets.yaml`
 holds edits that haven't been re-encrypted, so drift can't slip into git.
 
+### Capturing logins into secrets
+
+Some credentials can only be minted on a machine with a browser: `gh auth login`
+and `gws auth login` both open one, and `gws` stores results in an OS keyring
+that a headless box (no `org.freedesktop.secrets`) cannot use. So mint them once
+interactively, then carry them in sops:
+
+```bash
+pls secret:capture-auth   # on the Mac — reads this machine's gh + gws logins into secrets.yaml
+git add -A && git commit && git push
+# then on each box:
+git pull && hms           # load-secrets materializes them
+```
+
+It reads through each CLI's own accessor (`gh auth token`, `gws auth export`)
+rather than scraping config files, since either tool may keep secrets in a
+keychain with no file to scrape. It reports per-account status and refuses to
+write anything if it captured nothing.
+
+`gh` is **seed-only**: `hosts.yml` is written only when absent, because `gh` owns
+that file at runtime (it rewrites the active account on every `auth switch`).
+To rotate, delete `hosts.yml` and re-run `hms`.
+
+## Workspace layout
+
+`~/Workspace` is split by **identity**, not by project type. The directory you
+are in determines which GitHub and Google account the CLIs use — so cloning a
+repo into the right folder is what wires up its credentials.
+
+| Directory              | Identity | `gh` account     | `gws` account |
+| ---------------------- | -------- | ---------------- | ------------- |
+| `~/Workspace/personal` | personal | `kirinnee`       | `per`         |
+| `~/Workspace/work`     | Liftoff  | `ernest-liftoff` | `lo`          |
+| `~/Workspace/atomi`    | Atomi    | `adelphi-liong`  | —             |
+| `~/Workspace/durian`   | Durian   | `adelphi-durian` | —             |
+
+Everything outside those (including `~` and this repo) falls back to the
+**personal** identity.
+
+The switching is done by generated smart wrappers, not by shell aliases: `gh`
+and `gws` on `PATH` match `$PWD` against the `directoryRules` declared in
+`programs.multi-gh` / `programs.multi-gws` (see `home-template.nix`), print which
+account they picked, and exec the real binary. Per-account escape hatches exist
+too — `gh-personal`, `gh-liftoff`, `gh-atomi`, `gh-durian`, `gws-lo`, `gws-per` —
+for when you need a specific identity regardless of directory.
+
+Rule order matters: the broad `~` rule sits *after* the specific ones, so
+`~/Workspace/atomi` matches Atomi rather than falling through to personal.
+
+The directories themselves are created at activation by `modules/workspace`, and
+`~/Workspace/work` additionally gets an `.envrc` pinning `CLAUDE_CONFIG_DIR` to
+the work agent home. Repos are cloned into them from the sops-encrypted manifest
+at `.box.repos` — see `pls box:gen-repos` and `scripts/box/clone-stuff.sh`.
+
 ## AutoBackup CLI
 
 Within this home-manager, I created a CLI that helps me backup folders to pCloud itself.
