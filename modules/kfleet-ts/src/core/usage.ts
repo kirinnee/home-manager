@@ -265,8 +265,25 @@ async function probeAnthropicExternalToken(token: string, timeoutMs: number): Pr
     }
 
     if (!res.ok && res.status !== 429) {
+      // Only 401 CONDEMNS the credential: a 403 here can be a transient org or
+      // spend-policy block, so authOk stays inconclusive (see the 401-vs-403
+      // test). But inconclusive-auth is not the same as usable. This is
+      // POST /v1/messages, so a 403 (`permission_error`) means the account
+      // cannot infer RIGHT NOW — unlike a 403 from GET /api/oauth/usage, which
+      // only means the token lacks `user:profile` scope and is expected for
+      // external tokens.
+      //
+      // Leaving `unavailable` unset made these accounts read as "usable, just
+      // no usage data", so routing kept selecting them and every teammate
+      // launched on one died on arrival. Mark them unusable without claiming
+      // the credential is permanently dead.
       const rejected = res.status === 401;
-      return { ok: false, error: `http ${res.status}`, authOk: rejected ? false : true };
+      return {
+        ok: false,
+        error: `http ${res.status}`,
+        authOk: rejected ? false : true,
+        unavailable: rejected || res.status === 403,
+      };
     }
     if (!parsed.hasValidQuotaHeader) {
       const prefix = res.ok ? '' : `http ${res.status}: `;

@@ -416,6 +416,38 @@ describe('probeUsage: direct Claude secrets-file inference quota headers (0..1 f
       globalThis.fetch = originalFetch;
     }
   });
+
+  // Observed live: three loge accounts returned 403 `permission_error` from
+  // POST /v1/messages with ZERO quota headers, while healthy siblings returned
+  // 429 WITH headers (a 429 is a successful quota probe). Because 403 left
+  // `unavailable` unset, those accounts reported as "usage unavailable (creds
+  // OK)" and stayed eligible for selection — so every teammate launched on one
+  // died on arrival. Inconclusive AUTH must not mean usable.
+  test('a 403 from the inference probe marks the account unavailable, not merely unmeasured', async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      const probe = async (status: number) => {
+        globalThis.fetch = (async () => new Response('{}', { status })) as typeof fetch;
+        return (await probeDirect()).find(row => row.binary === 'claude-loge1')!;
+      };
+
+      const forbidden = await probe(403);
+      // authOk stays inconclusive: a 403 may be a transient org/spend block.
+      expect(forbidden.authOk).toBe(true);
+      // ...but it is definitively not usable right now.
+      expect(forbidden.unavailable).toBe(true);
+      // `atLimit: w.ok ? atLimit : w.unavailable === true` — so marking it
+      // unavailable is what actually removes it from routing. That wiring
+      // already existed; the 403 path simply never set the flag.
+      expect(forbidden.atLimit).toBe(true);
+
+      const invalid = await probe(401);
+      expect(invalid.unavailable).toBe(true);
+      expect(invalid.atLimit).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe('oauthTokenUsable (auth_ok = currently-usable token)', () => {
