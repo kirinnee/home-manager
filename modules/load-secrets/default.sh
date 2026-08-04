@@ -26,6 +26,49 @@ yaml=$(sops -d "${SECRETS_FILE}")
   yq -r '.env | to_entries[] | "export \(.key)=\(.value|@sh)"' <<<"$yaml" >>"$HOME/.secrets"
 )
 
+# loge Claude pool tokens — IN TRANSIT ONLY, deliberately NOT in sops.
+#
+# These are shared PE/LLM-cluster credentials (k8s Secret loge/loge-credentials,
+# keys CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_{1..6}). They used to be committed to
+# secrets.enc.yaml so that boxes — which cannot reach the cluster to run
+# `kloge pull` — could still get them. That put rotating third-party credentials
+# into the permanent history of a PUBLIC repo, encrypted or not.
+#
+# They now travel the same way the codex/cliproxy pool always has: `kloge pull`
+# fetches them on the Mac into ~/.kloge/auth/, and `kloge push` / `kloge-deploy`
+# rsyncs that directory to each host. ~/.kloge lives outside the repo, so it can
+# never be committed. Here we only project the pool into ~/.secrets, which is
+# generated, 0600, gitignored and rebuilt on every switch.
+#
+# The mapping is positional: auth/claude-N.json -> LOGE_CLAUDE_N_TOKEN, matching
+# kfleet's `credential: {source: secrets-file, key: LOGE_CLAUDE_N_TOKEN}` — so
+# no kfleet schema or config change is needed.
+#
+# A host that has not been pushed to yet simply has no ~/.kloge/auth: the keys
+# stay absent, kfleet reports the account as missing-token rather than silently
+# authenticating with a stale value, and the switch still succeeds.
+kloge_auth="$HOME/.kloge/auth"
+if [ -d "$kloge_auth" ]; then
+  kloge_written=0
+  for kloge_n in 1 2 3 4 5 6; do
+    kloge_file="$kloge_auth/claude-$kloge_n.json"
+    [ -f "$kloge_file" ] || continue
+    # Respect the pool's own kill switch rather than handing out a token the
+    # cluster has retired.
+    [ "$(yq -r '.disabled // false' "$kloge_file" 2>/dev/null)" = "true" ] && continue
+    kloge_tok="$(yq -r '.access_token // ""' "$kloge_file" 2>/dev/null)"
+    [ -n "$kloge_tok" ] || continue
+    (
+      umask 077
+      printf 'export LOGE_CLAUDE_%s_TOKEN=%s\n' "$kloge_n" "$(printf '%s' "$kloge_tok" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/")" >>"$HOME/.secrets"
+    )
+    kloge_written=$((kloge_written + 1))
+  done
+  [ "$kloge_written" -gt 0 ] && echo "🔑 loge: projected $kloge_written Claude pool token(s) from ~/.kloge/auth (in transit, not sops)"
+  unset kloge_n kloge_file kloge_tok kloge_written
+fi
+unset kloge_auth
+
 # nix secrets
 [ -f "$HOME/nix.conf" ] && rm "$HOME/nix.conf"
 yq -r '.nix | to_entries[] | "\(.key) = \(.value)"' <<<"$yaml" >>"$HOME/nix.conf"
