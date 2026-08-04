@@ -548,6 +548,7 @@ rec {
       kteamd
       kfleet
       kloge
+      kloge-deploy
       atomi.clickup_cli
       atomi.nsc
       grafana-loki

@@ -38,6 +38,49 @@ rec {
     export PATH="${nixpkgs.lib.makeBinPath [ nixpkgs.bash nixpkgs.gitMinimal nixpkgs.jq nixpkgs.rsync nixpkgs.openssh nixpkgs.curl nixpkgs.coreutils ]}:$PATH"
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kloge-ts/src/index.ts "$@"
   '';
+  # kloge-deploy: one command to get a remote box onto the CURRENT patched image.
+  #
+  # `kloge push` deliberately refuses to move Docker images, and the default
+  # image is a LOCALLY built tag (kloge-cliproxy:patched). So a bare
+  # `kloge push <host>` aborts before transferring anything — leaving the box
+  # with neither the image nor the refreshed credentials, while a stale
+  # container keeps running unpatched upstream. That failure is silent enough
+  # that all three hosts drifted for ~5 days.
+  #
+  # The only sequence that works is build-there, push --no-up, start-there.
+  # This wraps it. Remote commands set PATH explicitly because a
+  # non-interactive ssh does NOT get the nix profile (`kloge: not found`).
+  kloge-deploy = nixpkgs.writeShellScriptBin "kloge-deploy" ''
+    export PATH="${nixpkgs.lib.makeBinPath [ nixpkgs.bash nixpkgs.gitMinimal nixpkgs.jq nixpkgs.rsync nixpkgs.openssh nixpkgs.curl nixpkgs.coreutils ]}:$PATH"
+    set -euo pipefail
+
+    if [ "$#" -eq 0 ]; then
+      echo "usage: kloge-deploy <host> [host...]     e.g. kloge-deploy box kirin@pebox" >&2
+      exit 64
+    fi
+
+    # nix profile first: non-interactive ssh gets a minimal PATH, and the system
+    # docker (with its compose v2 plugin) must still win over nothing at all.
+    REMOTE_PATH='export PATH="$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH"'
+
+    for host in "$@"; do
+      echo "==> [$host] building patched image"
+      ssh "$host" "''${REMOTE_PATH}; cd ~/.config/home-manager && kloge build"
+
+      echo "==> [$host] pushing auth + config + compose"
+      # --no-up: with the patched tag, the default (start) path hard-fails.
+      kloge push "$host" --no-up
+
+      echo "==> [$host] starting container"
+      ssh "$host" "''${REMOTE_PATH}; cd ~/.kloge && docker compose up -d"
+
+      echo "==> [$host] verifying"
+      ssh "$host" "''${REMOTE_PATH}; docker ps --format '{{.Names}} {{.Image}} {{.Status}}' | grep -i kloge || { echo 'NO kloge container on $host' >&2; exit 1; }"
+      echo "✓ $host"
+    done
+
+    echo "✓ all hosts deployed"
+  '';
   # kfleet: run-from-source wrapper. Generates the claude/codex/gemini/opencode
   # account wrappers + config dirs from ~/.kfleet/config.yaml (replaces the old
   # Nix multi-* agent modules). Also generates `commands` (flag-prepended
