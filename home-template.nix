@@ -854,6 +854,14 @@ rec {
             fi
             if [ -e $HOME/.nix-profile/etc/profile.d/nix.sh ]; then . $HOME/.nix-profile/etc/profile.d/nix.sh; fi
             if [ -e $HOME/.secrets ]; then . $HOME/.secrets; fi
+            # Machine-local secrets: NOT sops-managed, never committed. `.secrets`
+            # is regenerated from secrets.enc.yaml on every switch, and that file
+            # lives in a PUBLIC repo — so credentials that must not enter git
+            # history (e.g. OKTA_PASSWORD, whose blast radius is an SSO account
+            # rather than one rotatable API token) are written directly on the
+            # host that needs them and sourced here. Sourced AFTER .secrets so a
+            # host-local value wins over a sops one of the same name.
+            if [ -e $HOME/.secrets.local ]; then . $HOME/.secrets.local; fi
 
             # Keep zsh-autocomplete's live menus, but make redraws less aggressive
             # around multi-line prompts.
