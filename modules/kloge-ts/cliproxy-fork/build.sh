@@ -55,6 +55,19 @@ jq --slurpfile overlay "${overlay_file}" '
 ' "${models_file}" >"${patched_models}"
 mv -- "${patched_models}" "${models_file}"
 
+# Trim: for every section listed in models.keep.json keep ONLY those ids, so the
+# proxy (and therefore Claude Code's /model picker, which lists every id the
+# gateway advertises) only shows the fleet's current models.
+keep_file="${fork_dir}/models.keep.json"
+if [[ -f ${keep_file} ]]; then
+  jq --slurpfile keep "${keep_file}" '
+    reduce ($keep[0] | to_entries[]) as $section (.;
+      .[$section.key] = ((.[$section.key] // []) | map(select(.id as $id | $section.value | index($id))))
+    )
+  ' "${models_file}" >"${patched_models}"
+  mv -- "${patched_models}" "${models_file}"
+fi
+
 patch_dir="${fork_dir}/patches"
 shopt -s nullglob
 patches=("${patch_dir}"/*.patch)
@@ -86,12 +99,12 @@ git -C "${source_dir}" diff --check
 
 echo "Building ${image_tag} from patched ${UPSTREAM_REF}..."
 docker build \
-  --build-arg "VERSION=${UPSTREAM_REF}+kloge-opus55.mgmt1" \
+  --build-arg "VERSION=${UPSTREAM_REF}+kloge-opus55.trim1" \
   --build-arg "COMMIT=${UPSTREAM_COMMIT}" \
   --build-arg "BUILD_DATE=${UPSTREAM_RELEASE_DATE}" \
   --label "org.opencontainers.image.source=${UPSTREAM_REPOSITORY}" \
   --label "org.opencontainers.image.revision=${UPSTREAM_COMMIT}" \
-  --label "io.kloge.model-catalog=claude-opus-5,claude-opus-5-5,claude-fable-5-1" \
+  --label "io.kloge.model-catalog=$(jq -r '.claude | join(",")' "${keep_file}")" \
   --label "io.kloge.management-model-states=redacted-v1" \
   --tag "${image_tag}" \
   "${source_dir}"

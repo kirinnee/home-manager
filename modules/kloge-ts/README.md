@@ -51,7 +51,7 @@ port is bound to `127.0.0.1` on whichever host it runs on.
 ## Usage
 
 ```bash
-kloge build                    # build the default maintained image (overlay adds claude-opus-5, claude-opus-5-5, claude-fable-5-1)
+kloge build                    # build the maintained image (overlay adds claude-opus-5-5 + claude-fable-5-1; models.keep.json trims the catalog to the fleet set)
 kloge pull                     # pull creds + render config/compose (kubectl, ctx eks-llm-us-east-1)
 kloge pull -c <other-context>  # pull from a different kube context
 kloge up                       # start the container locally -> http://127.0.0.1:8317
@@ -68,7 +68,7 @@ not alias to `fable-5-1`/`opus-5-5`):
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
 export ANTHROPIC_API_KEY=loge-internal
-# models: claude-opus-5-5, claude-fable-5-1 (+ claude-opus-5, claude-fable-5, claude-opus-4-8, claude-sonnet-5, claude-haiku-4-5-20251001)
+# models (trimmed by models.keep.json): claude-opus-5-5, claude-fable-5-1, claude-sonnet-5, claude-haiku-4-5-20251001
 # codex/openai: none — the pool has no Codex credentials (2026-09-24)
 ```
 
