@@ -245,13 +245,13 @@ describe('harness-flag escape hatch', () => {
 
 test('contextWindowForModel: 1m suffix, default, and overrides (turn-020)', () => {
   const { contextWindowForModel } = require('./core');
-  expect(contextWindowForModel('claude-fable-5[1m]')).toBe(1_000_000);
+  expect(contextWindowForModel('claude-fable-5-1[1m]')).toBe(1_000_000);
   expect(contextWindowForModel('claude-opus-4-8')).toBe(200_000);
   expect(contextWindowForModel(undefined)).toBe(200_000);
   // Overrides match by substring, longest pattern wins.
-  expect(contextWindowForModel('glm-5.2', { 'glm-5.2': 131_072 })).toBe(131_072);
-  expect(contextWindowForModel('glm-5.2-turbo', { glm: 100_000, 'glm-5.2-turbo': 65_536 })).toBe(65_536);
-  expect(contextWindowForModel('claude-fable-5[1m]', { fable: 900_000 })).toBe(900_000);
+  expect(contextWindowForModel('glm-5.3', { 'glm-5.3': 131_072 })).toBe(131_072);
+  expect(contextWindowForModel('glm-5.3-flashx', { glm: 100_000, 'glm-5.3-flashx': 65_536 })).toBe(65_536);
+  expect(contextWindowForModel('claude-fable-5-1[1m]', { fable: 900_000 })).toBe(900_000);
 });
 
 test('contextWindowForSession: [1m] on config survives a stripped served model (turn-001 ctx bug)', () => {
@@ -274,7 +274,7 @@ test('contextWindowForSession: [1m] on config survives a stripped served model (
   ).toBe(1_000_000);
   // Overrides match the SERVED model (aliases resolved) and beat the [1m] rule.
   expect(
-    contextWindowForSession({ configModel: 'opus', servedModel: 'glm-5.2', overrides: { 'glm-5.2': 131_072 } }),
+    contextWindowForSession({ configModel: 'opus', servedModel: 'glm-5.3', overrides: { 'glm-5.3': 131_072 } }),
   ).toBe(131_072);
   // Nothing known → default.
   expect(contextWindowForSession({})).toBe(200_000);
@@ -289,17 +289,18 @@ describe('recommendDecisionGuide: teaches the decision without making it', () =>
     expect(ROUTING_DOCTRINE.map(row => [row.work, row.models.map(model => model.model)])).toEqual([
       [
         'Mission-critical thinking/planning — where a blindspot or missed understanding causes large rework or impact',
-        ['Fable 5'],
+        ['Fable 5.1', 'GPT-6 Astra'],
       ],
-      ['Normal planning', ['Opus 5']],
-      ['Implementing', ['Opus 5', 'gpt-5.6-sol', 'glm-5.2']],
-      ['Review', ['gpt-5.6-terra', 'Opus 5']],
+      ['Normal planning', ['Opus 5.5']],
+      ['Implementing', ['Opus 5.5', 'GPT-6 Sol', 'GPT-6 Astra', 'glm-5.3']],
+      ['Review', ['GPT-6 Sol', 'Opus 5.5']],
       ['Super-small mechanical', ['MiniMax M3']],
       ['Internal docs/HTML', ['MiniMax M3']],
-      ['External docs/HTML', ['gpt-5.6-sol']],
-      ['Small/medium mechanical', ['Sonnet 5', 'glm-5.2', 'gpt-5.6-terra']],
+      ['External docs/HTML', ['GPT-6 Sol']],
+      ['Small/medium mechanical', ['Sonnet 5', 'glm-5.3', 'gpt-5.6-terra', 'GPT-6 Luna']],
     ]);
     expect(ROUTING_DOCTRINE.find(row => row.work === 'Implementing')?.models.at(-1)?.caution).toBe('only if you must');
+    expect(ROUTING_DOCTRINE.find(row => row.work === 'Implementing')?.models.at(-2)?.caution).toBe('only the hardest');
     expect(JSON.stringify(ROUTING_DOCTRINE)).not.toContain('gpt-5.5');
     expect(PRODUCT_FACING_MODEL_GUARD.rule).toContain('Never route product-facing work');
   });
@@ -433,7 +434,7 @@ describe('recommendDecisionGuide: teaches the decision without making it', () =>
     expect(guide).not.toHaveProperty('roles');
     const text = renderRecommendationDecisionGuide(guide);
     expect(text).toContain('Decision owner: calling agent');
-    expect(text).toContain('Fable 5');
+    expect(text).toContain('Fable 5.1');
     expect(text).toContain('5h unknown');
     expect(text).not.toContain('PRIMARY');
     expect(text).not.toContain('kteam start');
@@ -469,8 +470,11 @@ const FLEET = [
   'codex-auto-personal',
 ];
 
-const MASS_CHORE_TIER = ['glm52', 'mm3', 'dsv4f', 'haiku', 'sonnet5'];
-const TOP_TIER = ['sol', 'opus5'];
+const MASS_CHORE_TIER = ['glm52', 'mm3', 'dsv4f', 'haiku', 'sonnet5', 'gpt6luna'];
+const TOP_TIER = ['astra', 'sol', 'opus55'];
+// Opus-class power: GPT-6 Sol is in this class but priced mid-tier, so it is the
+// quality-first answer for mid work without being "the top tier on a chore".
+const OPUS_CLASS = [...TOP_TIER, 'gpt6sol'];
 
 const role = (team: TeamRecommendation, name: TeamRole) => team.roles.find(item => item.role === name);
 const everyone = (team: TeamRecommendation): RoleOption[] =>
@@ -664,10 +668,10 @@ describe('recommendTeam: account rules', () => {
       const options = everyone(team);
       expect(team.exclusions).toEqual([]);
       expect(options.every(option => option.binary === binary)).toBe(true);
-      expect(options.find(option => option.model === 'fable5')?.modelFlag).toBe('fable');
-      expect(options.find(option => option.model === 'opus5')?.modelFlag).toBeUndefined();
+      expect(options.find(option => option.model === 'fable51')?.modelFlag).toBe('fable');
+      expect(options.find(option => option.model === 'opus55')?.modelFlag).toBeUndefined();
       expect(options.find(option => option.model === 'sonnet5')?.modelFlag).toBe('sonnet');
-      expect(options.every(option => !option.command.includes('claude-opus-5'))).toBe(true);
+      expect(options.every(option => !option.command.includes('claude-opus-5-5'))).toBe(true);
     }
 
     const fanOut = recommendTeam('Rename one helper across 40 files, one file per agent', ['claude-auto-loge1'], {
@@ -678,8 +682,8 @@ describe('recommendTeam: account rules', () => {
     const proxy = recommendTeam('Research how the API pagination works', ['claude-auto-loge'], {
       roles: ['researcher'],
     });
-    expect(everyone(proxy).find(option => option.model === 'opus5')?.modelFlag).toBe('claude-opus-5');
-    expect(everyone(proxy).some(option => option.model === 'fable5')).toBe(true);
+    expect(everyone(proxy).find(option => option.model === 'opus55')?.modelFlag).toBe('claude-opus-5-5');
+    expect(everyone(proxy).some(option => option.model === 'fable51')).toBe(true);
   });
 
   test('loge-first: same tier, the loge account wins', () => {
@@ -720,6 +724,35 @@ describe('recommendTeam: options, alternatives, and the handoff chain', () => {
     }
   });
 
+  test('GPT-6 Sol is the default cross-family reviewer and needs no planner', () => {
+    const team = recommendTeam('Review the reporting service diff', FLEET, { roles: ['reviewer'] });
+    const reviewer = role(team, 'reviewer')!;
+    expect(reviewer.primary.model).toBe('gpt6sol');
+    expect(reviewer.primary.modelFlag).toBeUndefined();
+    // As the codex implementer it carries no plan requirement.
+    const codexOnly = recommendTeam('Implement the reporting service endpoints', ['codex-auto-atomi'], {
+      roles: ['implementer'],
+    });
+    expect(codexOnly.roles[0]!.primary.model).toBe('gpt6sol');
+    expect(role(codexOnly, 'planner')).toBeUndefined();
+  });
+
+  test('GPT-6 Astra is the codex frontier planner; loio and loge only offer what they serve', () => {
+    const planner = recommendTeam('Design the new distributed scheduler', ['codex-auto-ernest'], {
+      roles: ['planner'],
+    });
+    expect(planner.roles[0]!.primary.model).toBe('astra');
+    expect(planner.roles[0]!.primary.modelFlag).toBe('gpt-6-astra');
+
+    // loio: GPT-6 rollout incomplete (astra only); loge: unverified, 5.6 ids.
+    const thin = recommendTeam('Review the scheduler diff', ['codex-auto-loio', 'codex-auto-loge'], {
+      roles: ['planner', 'implementer', 'reviewer'],
+    });
+    const models = everyone(thin).map(option => `${option.binary}:${option.model}`);
+    expect(models.some(item => /:(gpt6sol|gpt6luna)$/.test(item))).toBe(false);
+    expect(models.some(item => /^codex-auto-loge:(astra|gpt6sol|gpt6luna)$/.test(item))).toBe(false);
+  });
+
   test('--budget max always plans and reviews; --budget cheap trims the shape', () => {
     const task = 'Rename a helper across the config module';
     const max = recommendTeam(task, FLEET, { budget: 'max' });
@@ -736,7 +769,7 @@ describe('recommendTeam: options, alternatives, and the handoff chain', () => {
     expect(MASS_CHORE_TIER).toContain(primary('cheap'));
     expect(new Set([primary('cheap'), primary('balanced'), primary('max')]).size).toBeGreaterThanOrEqual(2);
     expect(primary('balanced')).not.toBe('opus48');
-    expect(TOP_TIER).toContain(primary('max'));
+    expect(OPUS_CLASS).toContain(primary('max'));
   });
 
   test('--budget max does not buy the top tier for a chore', () => {
@@ -779,15 +812,15 @@ describe('slow-provider launch window', () => {
 });
 
 describe('resolveDisplayModel: show what the pane actually runs', () => {
-  test('a GLM wrapper reports glm-5.2, not its `opus` alias', () => {
-    expect(resolveDisplayModel('claude-auto-glm52a', 'opus')).toEqual({ model: 'glm-5.2', source: 'wrapper' });
+  test('a GLM wrapper reports glm-5.3, not its `opus` alias', () => {
+    expect(resolveDisplayModel('claude-auto-glm52a', 'opus')).toEqual({ model: 'glm-5.3', source: 'wrapper' });
     expect(resolveDisplayModel('claude-auto-mm3', 'opus').model).toBe('minimax-m3');
-    expect(resolveDisplayModel('claude-auto-dsv4f', undefined).model).toBe('deepseek-v4-flash');
+    expect(resolveDisplayModel('claude-auto-dsv4f', undefined).model).toBe('deepseek-flash');
   });
 
   test('the harness’s own usage record always wins', () => {
-    expect(resolveDisplayModel('claude-auto-glm52a', 'opus', 'glm-5.2-turbo')).toEqual({
-      model: 'glm-5.2-turbo',
+    expect(resolveDisplayModel('claude-auto-glm52a', 'opus', 'glm-5.3-flashx')).toEqual({
+      model: 'glm-5.3-flashx',
       source: 'harness',
     });
   });

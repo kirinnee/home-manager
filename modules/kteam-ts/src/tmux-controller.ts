@@ -1407,7 +1407,7 @@ export class TmuxController {
         value === '' ||
         /^[─━═_┄┅┈┉┊┋│|╭╰╮╯┌┐└┘]+$/.test(value) ||
         /^(\?|shift\+tab|tab |esc |ctrl\+|\/ for|[0-9]+% context|context left)/.test(value) ||
-        // Codex footer statusline: "gpt-5.6-sol ultra · Context 0% used · /tmp"
+        // Codex footer statusline: "gpt-6-sol ultra · Context 0% used · /tmp"
         /context [0-9]+% used/.test(value)
       );
     });

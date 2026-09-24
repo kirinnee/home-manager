@@ -67,21 +67,13 @@ done
 
 grep -q 'entry\["model_states"\]' "${source_dir}/internal/api/handlers/management/auth_files.go"
 
-jq -e '
-  [.claude[] | select(.id == "claude-opus-5")] as $models
-  | ($models | length) == 1
-    and ($models[0].object == "model")
-    and ($models[0].created == 1784038800)
-    and ($models[0].owned_by == "anthropic")
-    and ($models[0].type == "claude")
-    and ($models[0].display_name == "Claude Opus 5")
-    and ($models[0].description == "Premium model combining maximum intelligence with practical performance")
-    and ($models[0].context_length == 1000000)
-    and ($models[0].max_completion_tokens == 128000)
-    and ($models[0].thinking.min == 1024)
-    and ($models[0].thinking.max == 128000)
-    and ($models[0].thinking.zero_allowed == true)
-    and ($models[0].thinking.levels == ["low", "medium", "high", "xhigh", "max"])
+jq -e --slurpfile overlay "${overlay_file}" '
+  # Every overlay entry must land verbatim (one copy each) in the patched catalog.
+  . as $patched
+  | all($overlay[0] | to_entries[];
+      .key as $section | all(.value[]; . as $want
+        | ([$patched[$section][] | select(.id == $want.id)] | length == 1)
+          and (($patched[$section][] | select(.id == $want.id)) == $want)))
 ' "${models_file}" >/dev/null
 jq -e '
   all(to_entries[];
@@ -94,12 +86,12 @@ git -C "${source_dir}" diff --check
 
 echo "Building ${image_tag} from patched ${UPSTREAM_REF}..."
 docker build \
-  --build-arg "VERSION=${UPSTREAM_REF}+kloge-opus5.mgmt1" \
+  --build-arg "VERSION=${UPSTREAM_REF}+kloge-opus55.mgmt1" \
   --build-arg "COMMIT=${UPSTREAM_COMMIT}" \
   --build-arg "BUILD_DATE=${UPSTREAM_RELEASE_DATE}" \
   --label "org.opencontainers.image.source=${UPSTREAM_REPOSITORY}" \
   --label "org.opencontainers.image.revision=${UPSTREAM_COMMIT}" \
-  --label "io.kloge.model-catalog=claude-opus-5" \
+  --label "io.kloge.model-catalog=claude-opus-5,claude-opus-5-5,claude-fable-5-1" \
   --label "io.kloge.management-model-states=redacted-v1" \
   --tag "${image_tag}" \
   "${source_dir}"

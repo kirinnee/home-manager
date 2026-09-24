@@ -118,8 +118,8 @@ function statusBadge(status) { return '<span class="badge ' + tone(status) + '">
 function fmtTime(value) { if (!value) return '—'; const date = new Date(value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString(); }
 // The RESOLVED model, mirroring core.ts resolveDisplayModel: what the harness
 // itself reported, else the wrapper's alias mapping (claude-auto-glm52a
-// defaults to the alias "opus" while the pane runs glm-5.2), else configured.
-const WRAPPER_MODELS = [[/^claude-auto-glm52[ab]?$/, 'glm-5.2'], [/^claude-auto-mm3$/, 'minimax-m3'], [/^claude-auto-dsv4f$/, 'deepseek-v4-flash'], [/^claude-auto-dsv4p$/, 'deepseek-v4-pro']];
+// defaults to the alias "opus" while the pane runs glm-5.3), else configured.
+const WRAPPER_MODELS = [[/^claude-auto-glm52[ab]?$/, 'glm-5.3'], [/^claude-auto-mm3$/, 'minimax-m3'], [/^claude-auto-dsv4f$/, 'deepseek-flash'], [/^claude-auto-dsv4p$/, 'deepseek-v4-pro']];
 function fmtModel(view) {
   if (view.state && view.state.observedModel) return view.state.observedModel;
   const binary = String(view.config.binary || '');

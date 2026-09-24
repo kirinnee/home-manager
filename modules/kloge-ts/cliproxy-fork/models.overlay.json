@@ -16,6 +16,40 @@
         "zero_allowed": true,
         "levels": ["low", "medium", "high", "xhigh", "max"]
       }
+    },
+    {
+      "id": "claude-opus-5-5",
+      "object": "model",
+      "created": 1790007840,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 5.5",
+      "description": "Premium model combining maximum intelligence with practical performance",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": ["low", "medium", "high", "xhigh", "max"]
+      }
+    },
+    {
+      "id": "claude-fable-5-1",
+      "object": "model",
+      "created": 1787875200,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Fable 5.1",
+      "description": "Most capable model for the most demanding reasoning and long-horizon agentic work",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": ["low", "medium", "high", "xhigh", "max"]
+      }
     }
   ]
 }

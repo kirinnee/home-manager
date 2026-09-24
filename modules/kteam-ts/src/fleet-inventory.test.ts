@@ -27,8 +27,8 @@ test('listWrappers marks harness + auto/interactive and sorts launchable-first',
   expect(loge.mode).toBe('auto');
   expect(loge.launchable).toBe(true);
   expect(loge.runtimeModels?.map(model => model.value)).toEqual([
-    'claude-fable-5[1m]',
-    'claude-opus-5[1m]',
+    'claude-fable-5-1[1m]',
+    'claude-opus-5-5[1m]',
     'claude-sonnet-5',
     'claude-haiku-4-5-20251001',
   ]);
@@ -53,13 +53,13 @@ test('runtime model choices are account-aware and never leak Anthropic ids to pr
     'haiku',
   ]);
   expect(runtimeModelsForWrapper('/fleet/bin/claude-auto-glm52a').map(model => model.value)).toEqual([
-    'glm-5.2',
+    'glm-5.3',
     'glm-5-turbo',
-    'glm-4.7',
+    'glm-5.3-flash',
   ]);
   expect(runtimeModelsForWrapper('claude-auto-mm3').map(model => model.value)).toEqual(['MiniMax-M3']);
   expect(runtimeModelsForWrapper('claude-auto-dsv4f').map(model => model.value)).toEqual([
-    'deepseek-v4-flash',
+    'deepseek-flash',
     'deepseek-v4-pro',
   ]);
 
@@ -72,8 +72,8 @@ test('runtime model choices are account-aware and never leak Anthropic ids to pr
   // The bare proxy remains a separate real-ID account; widening its branch
   // would send unsupported aliases through raw CLIProxyAPI.
   expect(runtimeModelsForWrapper('claude-auto-loge').map(model => model.value)).toEqual([
-    'claude-fable-5[1m]',
-    'claude-opus-5[1m]',
+    'claude-fable-5-1[1m]',
+    'claude-opus-5-5[1m]',
     'claude-sonnet-5',
     'claude-haiku-4-5-20251001',
   ]);

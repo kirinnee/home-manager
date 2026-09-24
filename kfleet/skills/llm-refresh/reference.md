@@ -1,0 +1,89 @@
+# LLM refresh — how the fleet resolves models (read before editing)
+
+## The multi-account model (kfleet)
+
+`kfleet` generates one wrapper per account under `~/.kfleet/bin/` (`claude-<name>`,
+`claude-auto-<name>`, `codex-<name>`, `codex-auto-<name>`) from `kfleet/config.yaml`.
+A wrapper is a tiny shell script: it exports the account's env (`CLAUDE_CONFIG_DIR`,
+`KTEAM_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`, provider `ANTHROPIC_BASE_URL`/`AUTH_TOKEN`) and
+`exec`s the shared `claude` / `codex` binary. So "which model does account X run" is
+answered by **env, not by the binary**. The old Nix `multi-{claude,codex}` modules are gone
+(`modules/kfleet-ts/README.md`); only `multi-gh`/`multi-gws` are still Nix-managed.
+
+Model resolution for a **Claude** wrapper, in order:
+
+1. `--model <x>` on the command line (kteam passes `KTEAM_MODEL` here when no override).
+2. If `<x>` is an alias (`opus`, `fable`, `sonnet`, `haiku`), Claude Code maps it through
+   `ANTHROPIC_DEFAULT_<ALIAS>_MODEL` from the wrapper env; unset → Claude Code's built-in
+   default for that alias (which may be older than what the fleet wants).
+3. The resulting id goes to `ANTHROPIC_BASE_URL` (default api.anthropic.com).
+
+Consequences that bite during refreshes:
+
+| Account kind (config.yaml)                                | What ids are legal                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| First-party Anthropic OAuth (`kirin`, `atomi`, `liftoff`) | real ids + the `[1m]` suffix (1M-context beta), e.g. `claude-opus-5-5[1m]`. Aliases work. Anchor `&anthropic-1m`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `loge1..6` (direct OAuth tokens from `~/.secrets`)        | same as first-party; each carries its own `ANTHROPIC_DEFAULT_{OPUS,FABLE}_MODEL` (no anchor — edit all six).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `loge` claude profile (local CLIProxyAPI :8317)           | **real ids only, no aliases**; the proxy only serves ids present in its catalog (`models.overlay.json` adds the ones upstream lacks). `[1m]` verified OK through it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `glm52a/b` (z.ai), `mm3` (MiniMax), `dsv4*` (DeepSeek)    | provider ids only (`glm-5.3`, `MiniMax-M3`, `deepseek-v4-flash`). A provider may LIST a model the plan cannot use (z.ai listed `glm-5.3-flashx` but returned error 1311 "subscription plan does not yet include access") — always smoke-test, never trust the list alone. A `claude-*` id or `[1m]` suffix **400s**. The `opus`/`fable` aliases are remapped to the provider's top model so `KTEAM_MODEL=opus` keeps working. Account names are slugs (`glm52`) — do not rename them when the model moves on; the home dirs would move.                                                                                                                   |
+| Codex on ChatGPT accounts (`codex` profile)               | **real catalog ids only** (`gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-*`, `gpt-5.5`); bare `sol` 400s. The catalog is PER ACCOUNT and filtered by the Codex `client_version` — with 0.144 the GPT-6 ids were hidden and `gpt-6-astra` said "requires a newer version of Codex" (`gpt-6-sol` misleadingly said "not supported"); after `codex update` to 0.156.1 all three worked. Rollout is staggered per account (2026-09-24: loio had Astra only). On the Mac `codex` is the standalone self-updating install (`~/.codex/packages/standalone`), NOT the nix package — run `codex update`; the flake's `codex-cli` only covers the Linux boxes. |
+| `loge-codex` (CLIProxyAPI OpenAI side)                    | pinned `gpt-5.6-sol` at `model_reasoning_effort: ultra` (config.yaml `settings`). As of 2026-09-24 the kloge pool holds NO Codex credentials (`kloge status` lists only `claude-*.json`), so this lane serves nothing — do not route to it until creds exist.                                                                                                                                                                                                                                                                                                                                                                                             |
+
+`KTEAM_MODEL` is what `kteam start` feeds as `--model` when no override is given: `opus` on
+Anthropic-backed claude accounts (resolves per account), a real id on cliproxy/codex accounts.
+
+## CLI version gates
+
+Anthropic refuses brand-new models on old CLIs: `400 Claude Code 2.1.258 does not support this
+model; version 2.1.280 or newer is required`. Both CLIs come from the flake
+(`claude-code` → `sadjow/claude-code-nix`, `codex-cli` → `sadjow/codex-cli-nix`), so the
+fix is `nix flake update` + `hms`. To test a model BEFORE `hms`, build the locked package and
+run it directly: `P=$(nix build --no-link --print-out-paths github:sadjow/claude-code-nix/<rev>#claude-code)`
+then `CLAUDE_CONFIG_DIR=~/.claude-auto-atomi $P/bin/claude -p --model '<id>[1m]' ...`.
+
+## Where model ids live (the edit checklist)
+
+| File                                                                                            | Holds                                                                                                                                                                                                                |
+| ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kfleet/config.yaml`                                                                            | SOURCE OF TRUTH: alias env per account, `KTEAM_MODEL`, cliproxy real ids, codex defaults, dated comments.                                                                                                            |
+| `kfleet/templates/codex/chatgpt.toml`                                                           | codex base `model` / effort (overridden per profile in config.yaml).                                                                                                                                                 |
+| `modules/kloge-ts/cliproxy-fork/models.overlay.json` + `build.sh`                               | Anthropic ids the pinned CLIProxyAPI lacks (id, created epoch, display_name, context/thinking); `build.sh` asserts every overlay entry lands verbatim. Rebuild: `kloge build && kloge up`; on the box: `kloge push`. |
+| `modules/kteam-ts/src/core.ts`                                                                  | `MODELS` (label/tier/power/fit), `ACCOUNTS` (which wrapper serves which model, with `--model` flag), `ROUTING_DOCTRINE`, `WRAPPER_MODELS` (served-id detection for provider accounts), `modelHint`.                  |
+| `modules/kteam-ts/src/ui.ts`                                                                    | second `WRAPPER_MODELS` copy — keep in sync.                                                                                                                                                                         |
+| `modules/kteam-ts/src/fleet-inventory.ts`                                                       | per-wrapper `/model` allowlists (aliases for OAuth accounts, real ids for cliproxy/providers).                                                                                                                       |
+| `modules/kteam-ts/src/model-cost.ts` (+ `ui/src/lib/model-cost.ts` if mirrored)                 | pricing registry: APPEND a dated row per new id (`pricingKey: provider:id@YYYY-MM-DD`, `verifiedAt`, `validCreatedAt.from` = release date). Source: the Anthropic pricing page / OpenAI pricing page — never guess.  |
+| `modules/kteam-ts/src/daemon-config.ts`                                                         | warden wrapper/model comments.                                                                                                                                                                                       |
+| `modules/kteam-ts/ui/src/pages/NewSessionPage.tsx`                                              | `--model` placeholder text.                                                                                                                                                                                          |
+| `kfleet/skills{,-codex}/kteam/SKILL.md`                                                         | the human-readable routing doctrine `core.ts` encodes: model table, handoff chain, wrapper defaults. Both twins.                                                                                                     |
+| `kfleet/skills{,-codex}/rc-session/SKILL.md`, `home-template.nix`                               | hard-coded `--model 'claude-opus-…[1m]'` pins for the interactive kirin session.                                                                                                                                     |
+| `kfleet/CLAUDE.md`, `kfleet/CLAUDE.auto.md`                                                     | one-line routing summary every agent reads.                                                                                                                                                                          |
+| `modules/kfleet-ts/README.md`, `modules/kloge-ts/README.md`                                     | examples / served-model lists.                                                                                                                                                                                       |
+| tests: `modules/kteam-ts/src/{core,fleet-inventory,model-cost}.test.ts`, `ui/src/lib/*.test.ts` | pin labels/ids/prices — update alongside.                                                                                                                                                                            |
+
+`scripts/inventory.sh` prints all of the above; run it until no stale id remains.
+
+## Decision rules the human has set (keep unless told otherwise)
+
+- Newest Anthropic flagship = `opus` alias; newest Fable = `fable`. Fable stays gated by the
+  weekly-utilization rule in `core.ts` (`FABLE_MAX_WEEKLY_UTILIZATION_PERCENT`).
+- `claude-auto-kirin` / `codex-auto-personal` are daily drivers: never route kteam work there
+  (`HARD_ACCOUNT_EXCLUSIONS`). Smoke-test on `atomi`/`loge1` and `codex-auto-loai` instead.
+- MiniMax M3 / DeepSeek: never product-facing; DeepSeek V4 Pro banned (`dsv4p`).
+- Prices: append, never rewrite history (peer cost comparisons key on `pricingKey`).
+- A model the locked CLI cannot use, or that a provider does not list, is reported, not configured.
+
+## Deploy / restart matrix
+
+| Change                                    | Needed                                                                                                                                                                                                                                                                   |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `kfleet/config.yaml`, skills, CLAUDE\*.md | `hms` — REQUIRED. `~/.kfleet/config.yaml` and the skill dirs are nix-store copies linked by home-manager, so a bare `kfleet apply` regenerates wrappers from the OLD config (verified 2026-09-24). `kfleet apply` alone only helps after `hms` has re-linked the assets. |
+| flake.lock CLI bumps                      | `hms` (`sudo darwin-rebuild` via the askpass pattern in `kfleet/CLAUDE.md`).                                                                                                                                                                                             |
+| `models.overlay.json`                     | `kloge build && kloge up` locally; `kloge push user@box` for the box.                                                                                                                                                                                                    |
+| `modules/kteam-ts/**`                     | kteamd runs from source; the HUMAN restarts `kteamd` (never do it yourself).                                                                                                                                                                                             |
+
+## Probe endpoints (what `probe-catalogs.sh` calls)
+
+- Anthropic: `GET https://api.anthropic.com/v1/models` with `Authorization: Bearer <oauth token>` + `anthropic-beta: oauth-2025-04-20`; pricing: `docs.anthropic.com/en/docs/about-claude/pricing.md`.
+- Codex: no public list endpoint for ChatGPT auth — run one trivial `codex exec` and read `~/.codex-<name>/models_cache.json` (`fetched_at`, `slug`, `visibility`).
+- z.ai: `GET https://api.z.ai/api/anthropic/v1/models` (`x-api-key`); MiniMax: `GET https://api.minimax.io/anthropic/v1/models`; DeepSeek: `GET https://api.deepseek.com/models` (Bearer); Kimi/Moonshot: `GET https://api.moonshot.ai/v1/models` (Bearer) — only if a kimi account exists.
+- A NEW provider = add a `profiles.<name>` block + agent in `config.yaml`, a probe line in `probe-catalogs.sh`, a `WRAPPER_MODELS`/`ACCOUNTS`/`fleet-inventory` entry in kteam-ts, and a row in the kteam skill table.

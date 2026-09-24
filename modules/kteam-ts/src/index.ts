@@ -685,7 +685,7 @@ program
           }`
         : view.state.status,
       // The RESOLVED model, not the alias: `claude-auto-glm52a` defaults to the
-      // alias `opus` while the pane actually runs glm-5.2. Harness-reported
+      // alias `opus` while the pane actually runs glm-5.3. Harness-reported
       // first, then the wrapper's known mapping, then whatever was configured.
       resolveDisplayModel(view.config.binary, view.config.model, view.state.observedModel).model,
       view.config.binary,

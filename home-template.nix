@@ -931,7 +931,7 @@ rec {
 
               kteam start \
                 --agent claude-auto-kirin \
-                --model 'claude-opus-5[1m]' \
+                --model 'claude-opus-5-5[1m]' \
                 --mode interactive \
                 --teammate "$mate" \
                 --name "$task" \

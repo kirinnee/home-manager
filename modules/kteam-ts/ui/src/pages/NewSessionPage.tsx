@@ -199,7 +199,7 @@ export function NewSessionPage() {
               type="text"
               value={model}
               onChange={e => setModel(e.target.value)}
-              placeholder="e.g. claude-opus-4-8[1m]"
+              placeholder="e.g. claude-opus-5-5[1m]"
               className="w-full mono text-[12.5px]"
             />
           </Field>

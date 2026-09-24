@@ -13,8 +13,8 @@ export function inferHarness(binary: string): Harness {
 export function modelHint(binary: string): string {
   const base = path.basename(binary).replace(/^(claude|codex)-auto-/, '');
   if (base === 'mm3') return 'MiniMax M3';
-  if (base.startsWith('glm52')) return 'GLM-5.2';
-  if (base.startsWith('dsv4f')) return 'DeepSeek V4 Flash';
+  if (base.startsWith('glm52')) return 'GLM-5.3';
+  if (base.startsWith('dsv4f')) return 'DeepSeek V4.1 Flash';
   if (base.startsWith('dsv4p')) return 'DeepSeek V4 Pro';
   if (base.startsWith('f5-') || base === 'loge') return 'F5/frontier account';
   return base;
@@ -22,11 +22,11 @@ export function modelHint(binary: string): string {
 
 /** Wrappers whose alias mapping makes the CONFIGURED model meaningless: their
  *  kfleet default is an alias (`opus`) that the proxy resolves to something
- *  else entirely, so `ps` showed `model=opus` for a pane running GLM-5.2. */
+ *  else entirely, so `ps` showed `model=opus` for a pane running GLM-5.3. */
 const WRAPPER_RESOLVED_MODEL: Array<[RegExp, string]> = [
-  [/^claude-auto-glm52[ab]?$/, 'glm-5.2'],
+  [/^claude-auto-glm52[ab]?$/, 'glm-5.3'],
   [/^claude-auto-mm3$/, 'minimax-m3'],
-  [/^claude-auto-dsv4f$/, 'deepseek-v4-flash'],
+  [/^claude-auto-dsv4f$/, 'deepseek-flash'],
   [/^claude-auto-dsv4p$/, 'deepseek-v4-pro'],
 ];
 
@@ -161,24 +161,33 @@ export interface RoutingDoctrineRow {
 /** Human-authored routing doctrine, encoded as editable data. The human
  *  confirmed on 2026-07-30 that both earlier phrases "gpt-5.5 terra" and
  *  "5.5 terra" meant the SINGLE model gpt-5.6-terra. GPT-5.5 is therefore not
- *  present in this doctrine. */
+ *  present in this doctrine. 2026-09-24: the GPT-6 generation took over the
+ *  codex slots — GPT-6 Astra is Fable-tier (frontier planner, and the codex
+ *  "only the hardest" implementer that gpt-5.6-sol held), GPT-6 Sol is
+ *  Opus-tier and replaces gpt-5.6-terra as the default reviewer, GPT-6 Luna is
+ *  Haiku-tier. */
 export const ROUTING_DOCTRINE: RoutingDoctrineRow[] = [
   {
     work: 'Mission-critical thinking/planning — where a blindspot or missed understanding causes large rework or impact',
-    models: [{ model: 'Fable 5' }],
+    models: [{ model: 'Fable 5.1' }, { model: 'GPT-6 Astra' }],
   },
-  { work: 'Normal planning', models: [{ model: 'Opus 5' }] },
+  { work: 'Normal planning', models: [{ model: 'Opus 5.5' }] },
   {
     work: 'Implementing',
-    models: [{ model: 'Opus 5' }, { model: 'gpt-5.6-sol' }, { model: 'glm-5.2', caution: 'only if you must' }],
+    models: [
+      { model: 'Opus 5.5' },
+      { model: 'GPT-6 Sol' },
+      { model: 'GPT-6 Astra', caution: 'only the hardest' },
+      { model: 'glm-5.3', caution: 'only if you must' },
+    ],
   },
-  { work: 'Review', models: [{ model: 'gpt-5.6-terra' }, { model: 'Opus 5' }] },
+  { work: 'Review', models: [{ model: 'GPT-6 Sol' }, { model: 'Opus 5.5' }] },
   { work: 'Super-small mechanical', models: [{ model: 'MiniMax M3' }] },
   { work: 'Internal docs/HTML', models: [{ model: 'MiniMax M3' }] },
-  { work: 'External docs/HTML', models: [{ model: 'gpt-5.6-sol' }] },
+  { work: 'External docs/HTML', models: [{ model: 'GPT-6 Sol' }] },
   {
     work: 'Small/medium mechanical',
-    models: [{ model: 'Sonnet 5' }, { model: 'glm-5.2' }, { model: 'gpt-5.6-terra' }],
+    models: [{ model: 'Sonnet 5' }, { model: 'glm-5.3' }, { model: 'gpt-5.6-terra' }, { model: 'GPT-6 Luna' }],
   },
 ];
 
@@ -481,15 +490,17 @@ export function renderRecommendationDecisionGuide(guide: RecommendationDecisionG
 // The authority is kfleet/skills/kteam/SKILL.md ("Pick the right model", tiers
 // + handoff chain). This module ENCODES that table; when the skill changes,
 // change the catalog below and the tests that pin its floors. The old
-// implementation was a handful of keyword regexes that recommended GLM-5.2 for
-// anything matching /hard|complex/ — the exact opposite of the doctrine, which
-// restricts GLM to the mass-chore tier.
+// implementation was a handful of keyword regexes that recommended GLM (5.2 at
+// the time) for anything matching /hard|complex/ — the exact opposite of the
+// doctrine, which restricts GLM to the mass-chore tier.
 // ---------------------------------------------------------------------------
 
 export type ModelKey =
-  | 'fable5'
+  | 'fable51'
+  | 'astra'
   | 'sol'
-  | 'opus5'
+  | 'gpt6sol'
+  | 'opus55'
   | 'opus48'
   | 'terra'
   | 'gpt55'
@@ -497,6 +508,7 @@ export type ModelKey =
   | 'mm3'
   | 'sonnet5'
   | 'dsv4f'
+  | 'gpt6luna'
   | 'haiku';
 
 export type TeamRole = 'planner' | 'implementer' | 'researcher' | 'reviewer' | 'fan-out';
@@ -537,8 +549,8 @@ interface ModelSpec {
 }
 
 const MODELS: Record<ModelKey, ModelSpec> = {
-  fable5: {
-    label: 'Fable 5',
+  fable51: {
+    label: 'Fable 5.1',
     family: 'claude',
     tier: 'frontier planner',
     speed: 'slow',
@@ -548,6 +560,22 @@ const MODELS: Record<ModelKey, ModelSpec> = {
     implementerFit: { mechanical: 5, mid: 40, hard: 78 },
     note: 'smartest: maps blindspots and complex relations before code exists',
   },
+  // GPT-6 generation (live on the ChatGPT Codex accounts, probed 2026-09-24).
+  // Astra is Fable-tier: the codex frontier planner AND the "only the hardest"
+  // implementer slot GPT-5.6-sol held.
+  astra: {
+    label: 'GPT-6 Astra',
+    family: 'codex',
+    tier: 'frontier planner',
+    speed: 'slow',
+    cost: 'very-high',
+    power: 100,
+    score: { planner: 97, researcher: 92, reviewer: 88 },
+    implementerFit: { mechanical: 5, mid: 45, hard: 100 },
+    note: 'codex frontier: plans like Fable, implements the hardest work @ ultra; very expensive',
+  },
+  // Superseded by GPT-6 (2026-09-24). Kept only because codex-auto-loge (whose
+  // served ids are unverified) still points at it.
   sol: {
     label: 'GPT-5.6-sol @ ultra',
     family: 'codex',
@@ -559,8 +587,21 @@ const MODELS: Record<ModelKey, ModelSpec> = {
     implementerFit: { mechanical: 10, mid: 55, hard: 100 },
     note: 'most diligent implementer; expensive — reserve for the hardest work',
   },
-  opus5: {
-    label: 'Opus 5',
+  // Opus-tier and CHEAPER than Opus 5.5. Replaces gpt-5.6-terra as the default
+  // reviewer and the codex generic implementer; unlike terra it needs no plan.
+  gpt6sol: {
+    label: 'GPT-6 Sol',
+    family: 'codex',
+    tier: 'top implementer / reviewer',
+    speed: 'medium',
+    cost: 'medium',
+    power: 95,
+    score: { planner: 84, researcher: 84, reviewer: 100 },
+    implementerFit: { mechanical: 15, mid: 78, hard: 95 },
+    note: 'Opus-class implementer and the default reviewer; cheaper than Opus 5.5',
+  },
+  opus55: {
+    label: 'Opus 5.5',
     family: 'claude',
     tier: 'top implementer',
     speed: 'medium',
@@ -570,8 +611,9 @@ const MODELS: Record<ModelKey, ModelSpec> = {
     implementerFit: { mechanical: 12, mid: 60, hard: 98 },
     note: 'same top tier as sol, faster; served by every Anthropic-backed account',
   },
-  // RETIRED as a choice (2026-07-25): Opus 5 costs the same, so 4.8 is never
-  // the right pick. Kept only as the 'strong implementer' power threshold.
+  // RETIRED as a choice (2026-07-25, reconfirmed 2026-09-24): Opus 5.5 is now
+  // CHEAPER than 4.8 as well as smarter, so 4.8 is never the right pick. Kept
+  // only as the 'strong implementer' power threshold.
   opus48: {
     label: 'Opus 4.8',
     family: 'claude',
@@ -583,6 +625,8 @@ const MODELS: Record<ModelKey, ModelSpec> = {
     implementerFit: { mechanical: 25, mid: 100, hard: 70 },
     note: 'next-best after the top tier; the generic-to-mid-high workhorse',
   },
+  // Prev-gen (Sonnet-tier since GPT-6, 2026-09-24): GPT-6 Sol took its default
+  // reviewer and generic-implementer slots. Still needs a plan.
   terra: {
     label: 'GPT-5.6-terra',
     family: 'codex',
@@ -591,8 +635,8 @@ const MODELS: Record<ModelKey, ModelSpec> = {
     cost: 'medium',
     power: 72,
     needsPlan: true,
-    score: { researcher: 70, reviewer: 100 },
-    implementerFit: { mechanical: 35, mid: 92, hard: 55 },
+    score: { researcher: 70, reviewer: 90 },
+    implementerFit: { mechanical: 35, mid: 70, hard: 55 },
     note: 'very strong reviewer; implements only against someone else’s plan',
   },
   gpt55: {
@@ -608,7 +652,7 @@ const MODELS: Record<ModelKey, ModelSpec> = {
     note: 'second-opinion reviewer; cheaper than terra, same review strength class',
   },
   glm52: {
-    label: 'GLM-5.2',
+    label: 'GLM-5.3',
     family: 'claude',
     tier: 'mass-chore',
     speed: 'slow',
@@ -642,7 +686,7 @@ const MODELS: Record<ModelKey, ModelSpec> = {
     note: 'well-guarded mechanical work with a bit of judgement',
   },
   dsv4f: {
-    label: 'DeepSeek V4 Flash',
+    label: 'DeepSeek V4.1 Flash',
     family: 'claude',
     tier: 'mechanical',
     speed: 'fast',
@@ -652,6 +696,18 @@ const MODELS: Record<ModelKey, ModelSpec> = {
     score: { researcher: 40, 'fan-out': 70 },
     implementerFit: { mechanical: 80, mid: 15, hard: 0 },
     note: 'fully-specified mechanical work only — no blindspots allowed',
+  },
+  // Haiku-tier, first-party (so NOT barred from product-facing work).
+  gpt6luna: {
+    label: 'GPT-6 Luna',
+    family: 'codex',
+    tier: 'trivial',
+    speed: 'fastest',
+    cost: 'low',
+    power: 25,
+    score: { researcher: 35, 'fan-out': 60 },
+    implementerFit: { mechanical: 70, mid: 8, hard: 0 },
+    note: 'cheap, fast codex fan-out for trivial mechanical work',
   },
   haiku: {
     label: 'Haiku 4.5',
@@ -698,8 +754,8 @@ const ACCOUNTS: AccountSpec[] = [
     match: /^claude-auto-loge$/,
     loge: true,
     options: [
-      { model: 'fable5' },
-      { model: 'opus5', flag: 'claude-opus-5' },
+      { model: 'fable51' },
+      { model: 'opus55', flag: 'claude-opus-5-5' },
       { model: 'sonnet5', flag: 'claude-sonnet-5' },
     ],
   },
@@ -709,8 +765,8 @@ const ACCOUNTS: AccountSpec[] = [
     // remains governed separately by its real-ID configuration.
     match: /^claude-auto-loge[1-6]$/,
     options: [
-      { model: 'opus5' },
-      { model: 'fable5', flag: 'fable' },
+      { model: 'opus55' },
+      { model: 'fable51', flag: 'fable' },
       { model: 'sonnet5', flag: 'sonnet' },
       { model: 'haiku', flag: 'haiku' },
     ],
@@ -718,8 +774,8 @@ const ACCOUNTS: AccountSpec[] = [
   {
     match: /^claude-auto-atomi$/,
     options: [
-      { model: 'opus5' },
-      { model: 'fable5', flag: 'fable' },
+      { model: 'opus55' },
+      { model: 'fable51', flag: 'fable' },
       { model: 'sonnet5', flag: 'sonnet' },
       { model: 'haiku', flag: 'haiku' },
     ],
@@ -727,8 +783,8 @@ const ACCOUNTS: AccountSpec[] = [
   {
     match: /^claude-auto-liftoff$/,
     options: [
-      { model: 'opus5' },
-      { model: 'fable5', flag: 'fable' },
+      { model: 'opus55' },
+      { model: 'fable51', flag: 'fable' },
       { model: 'sonnet5', flag: 'sonnet' },
       { model: 'haiku', flag: 'haiku' },
     ],
@@ -737,13 +793,28 @@ const ACCOUNTS: AccountSpec[] = [
   { match: /^claude-auto-mm3$/, options: [{ model: 'mm3' }] },
   { match: /^claude-auto-dsv4f$/, options: [{ model: 'dsv4f' }] },
   {
+    // UNVERIFIED / DEAD as of 2026-09-24: the CLIProxyAPI lane has no Codex
+    // credentials and serves nothing, so its GPT-6 availability is unknown.
+    // Options intentionally left on the 5.6 ids until it is re-probed.
     match: /^codex-auto-loge$/,
     loge: true,
     options: [{ model: 'sol' }, { model: 'terra', flag: 'gpt-5.6-terra' }, { model: 'gpt55', flag: 'gpt-5.5' }],
   },
   {
-    match: /^codex-auto-(loai|loio|ernest|atomi|kirin)$/,
-    options: [{ model: 'terra' }, { model: 'sol', flag: 'gpt-5.6-sol' }, { model: 'gpt55', flag: 'gpt-5.5' }],
+    // GPT-6 generation probed live on these accounts 2026-09-24.
+    match: /^codex-auto-(loai|ernest|atomi|kirin)$/,
+    options: [
+      { model: 'gpt6sol' },
+      { model: 'astra', flag: 'gpt-6-astra' },
+      { model: 'gpt6luna', flag: 'gpt-6-luna' },
+      { model: 'terra', flag: 'gpt-5.6-terra' },
+    ],
+  },
+  {
+    // GPT-6 is still rolling out here: only gpt-6-astra was served on
+    // 2026-09-24 (no gpt-6-sol / gpt-6-luna yet), so terra stays the default.
+    match: /^codex-auto-loio$/,
+    options: [{ model: 'terra' }, { model: 'astra', flag: 'gpt-6-astra' }],
   },
 ];
 
@@ -913,7 +984,7 @@ const COST_PENALTY: Record<Budget, Record<ModelSpec['cost'], number>> = {
 };
 
 /** The doctrine FLOOR: the least capable model allowed as primary for a role.
- *  This is what stops "hard/complex" from landing on GLM-5.2 again.
+ *  This is what stops "hard/complex" from landing on GLM-5.3 again.
  *
  *  `--budget max` raises the floor a tier rather than nudging scores: buying
  *  quality means changing which tier is ELIGIBLE, not re-ranking within one.
@@ -923,12 +994,13 @@ const COST_PENALTY: Record<Budget, Record<ModelSpec['cost'], number>> = {
  *  above it. */
 function primaryFloor(role: TeamRole, classification: TaskClassification, budget: Budget): number {
   if (role === 'fan-out') return 0;
-  if (role === 'reviewer') return MODELS.gpt55.power;
-  if (role === 'planner') return MODELS.opus5.power;
+  // Reviewer floor stays mid-tier: terra-class reviewers remain acceptable.
+  if (role === 'reviewer') return MODELS.terra.power;
+  if (role === 'planner') return MODELS.opus55.power;
   const { complexity, risk, size } = classification;
-  const qualityFirst = budget === 'max' && complexity !== 'mechanical' ? MODELS.opus5.power : 0;
+  const qualityFirst = budget === 'max' && complexity !== 'mechanical' ? MODELS.opus55.power : 0;
   // Big-context IMPLEMENTATION is a top-tier-only job per the skill.
-  if (complexity === 'hard' && (risk === 'critical' || size === 'large')) return MODELS.opus5.power;
+  if (complexity === 'hard' && (risk === 'critical' || size === 'large')) return MODELS.opus55.power;
   if (complexity === 'hard' || risk === 'critical') return Math.max(qualityFirst, MODELS.opus48.power);
   if (complexity === 'mid') return Math.max(qualityFirst, MODELS.glm52.power);
   return qualityFirst;
@@ -1137,8 +1209,10 @@ export function recommendTeam(task: string, agents: string[], options: Recommend
   }
 
   // Handoff-chain invariant: terra / GPT-5.5 may implement ONLY from a plan
-  // written by a smarter model. If one of them won the implementer slot and no
-  // planner is on the team, add one rather than silently breaking the chain.
+  // written by a smarter model. (GPT-6 Sol and Astra carry no such
+  // restriction; only the prev-gen needsPlan models do.) If one of them won the
+  // implementer slot and no planner is on the team, add one rather than
+  // silently breaking the chain.
   const implementer = roles.find(item => item.role === 'implementer');
   if (implementer && MODELS[implementer.primary.model].needsPlan && !roles.some(item => item.role === 'planner')) {
     const ranked = candidatesFor('planner', pool, classification, budget, usageByBinary, task, options.label);

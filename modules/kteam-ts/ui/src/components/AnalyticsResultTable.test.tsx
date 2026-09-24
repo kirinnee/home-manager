@@ -174,7 +174,7 @@ describe('AnalyticsResultTable', () => {
   test('names the money honestly and dates the rates it used', () => {
     // The date comes from the SHARED registry constant, not a private copy.
     expect(pricingVerifiedAt()).toBe(PRICING_REGISTRY_VERIFIED_AT);
-    expect(pricingVerifiedAt()).toBe('2026-07-28');
+    expect(pricingVerifiedAt()).toBe('2026-09-24');
     const footnote = equivalentCostFootnote();
     expect(footnote).toContain(EQUIVALENT_API_COST_CAVEAT);
     expect(footnote).toContain('Equivalent API cost is what this usage would cost at public API rates');
@@ -182,7 +182,7 @@ describe('AnalyticsResultTable', () => {
     expect(footnote).toContain('not a claim about how any session was billed');
     // Gross input is a reading trap if it is only a tooltip on the header.
     expect(footnote).toContain('Input is gross: it includes cache reads and cache writes');
-    expect(footnote).toContain('Rates verified 2026-07-28');
+    expect(footnote).toContain('Rates verified 2026-09-24');
     expect(renderToStaticMarkup(<AnalyticsResultTable response={mixed} />)).toContain(
       'includes cache reads and cache writes',
     );

@@ -33,8 +33,8 @@ export interface WrapperInfo {
 }
 
 const ANTHROPIC_RUNTIME_MODELS: RuntimeModelOption[] = [
-  { value: 'fable', label: 'Fable 5 · 1M' },
-  { value: 'opus', label: 'Opus 5 · 1M' },
+  { value: 'fable', label: 'Fable 5.1 · 1M' },
+  { value: 'opus', label: 'Opus 5.5 · 1M' },
   { value: 'sonnet', label: 'Sonnet 5' },
   { value: 'haiku', label: 'Haiku 4.5' },
 ];
@@ -45,20 +45,20 @@ const ANTHROPIC_RUNTIME_MODELS: RuntimeModelOption[] = [
 const LOGE_DIRECT_RUNTIME_MODELS = ANTHROPIC_RUNTIME_MODELS;
 
 const LOGE_RUNTIME_MODELS: RuntimeModelOption[] = [
-  { value: 'claude-fable-5[1m]', label: 'Fable 5 · 1M' },
-  { value: 'claude-opus-5[1m]', label: 'Opus 5 · 1M' },
+  { value: 'claude-fable-5-1[1m]', label: 'Fable 5.1 · 1M' },
+  { value: 'claude-opus-5-5[1m]', label: 'Opus 5.5 · 1M' },
   { value: 'claude-sonnet-5', label: 'Sonnet 5' },
   { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
 ];
 
 const GLM_RUNTIME_MODELS: RuntimeModelOption[] = [
-  { value: 'glm-5.2', label: 'GLM-5.2' },
+  { value: 'glm-5.3', label: 'GLM-5.3' },
   { value: 'glm-5-turbo', label: 'GLM-5 Turbo' },
-  { value: 'glm-4.7', label: 'GLM-4.7' },
+  { value: 'glm-5.3-flash', label: 'GLM-5.3 Flash' },
 ];
 
 const DEEPSEEK_RUNTIME_MODELS: RuntimeModelOption[] = [
-  { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+  { value: 'deepseek-flash', label: 'DeepSeek V4.1 Flash' },
   { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
 ];
 

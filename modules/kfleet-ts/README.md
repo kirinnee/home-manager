@@ -236,7 +236,7 @@ defaultHomes: # optional: configure the bare upstream CLI homes too
 agents: # define each ONCE — variants generate the auto-* clones
   - { name: kirin, kind: claude, profiles: [claude] } # manual Anthropic OAuth
   - { name: loge1, kind: claude, profiles: [claude], credential: { source: secrets-file, key: LOGE_CLAUDE_1_TOKEN } }
-  - { name: glm52a, kind: claude, profiles: [claude, zai-a], env: { ANTHROPIC_DEFAULT_OPUS_MODEL: glm-5.2, ... } }
+  - { name: glm52a, kind: claude, profiles: [claude, zai-a], env: { ANTHROPIC_DEFAULT_OPUS_MODEL: glm-5.3, ... } }
   - { name: loai, kind: codex, profiles: [codex], settings: ./templates/codex/chatgpt.toml }
 
 # Aliases fan ONE entry out across the whole fleet: per listed kind, the alias

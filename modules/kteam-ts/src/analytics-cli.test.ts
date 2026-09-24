@@ -107,7 +107,7 @@ test('analytics CLI shows token breakdowns, sorts priced rows first, and retains
   expect(rendered).toContain('9.9k');
   expect(rendered).toContain('—[0/1]');
   expect(rendered).toContain('comparison, not a bill');
-  expect(rendered).toContain('Rates verified 2026-07-28');
+  expect(rendered).toContain('Rates verified 2026-09-24');
 });
 
 test('analytics CLI labels an unpriced raw row unknown without hiding its tokens', () => {

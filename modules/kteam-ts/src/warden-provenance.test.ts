@@ -72,7 +72,7 @@ describe('warden spawn provenance', () => {
 
   test('records wrapper model resolution and its honest source', () => {
     const spawn = buildWardenSpawnProvenance(view({ binary: 'claude-auto-glm52a', model: 'opus' }), selection());
-    expect(spawn.model).toBe('glm-5.2');
+    expect(spawn.model).toBe('glm-5.3');
     expect(spawn.modelSource).toBe('wrapper');
   });
 });

@@ -3289,8 +3289,8 @@ describe('migrate — cross-account continuation', () => {
       parent: 'p0',
       binary: 'claude-auto-glm52a',
       harness: 'claude',
-      modelHint: 'GLM-5.2',
-      model: 'glm-5.2',
+      modelHint: 'GLM-5.3',
+      model: 'glm-5.3',
       mode: 'auto',
       cwd: '/repo',
       createdAt: '2026-01-01T00:00:00Z',
@@ -3455,7 +3455,7 @@ describe('migrate — cross-account continuation', () => {
     // Config rewritten to the new account…
     expect(current.binary).toBe('claude-auto-glm52b');
     expect(current.harness).toBe('claude');
-    expect(current.modelHint).toBe('GLM-5.2');
+    expect(current.modelHint).toBe('GLM-5.3');
     expect(current.model).toBe('glm-5.2-air'); // new wrapper's KTEAM_MODEL
     expect(current.harnessHome).toBe('/new/home');
     // …while identity is preserved.
@@ -3550,7 +3550,7 @@ describe('migrate — cross-account continuation', () => {
     // never launched.
     expect(current.binary).toBe('claude-auto-glm52a');
     expect(current.harnessHome).toBe('/old/home');
-    expect(current.model).toBe('glm-5.2');
+    expect(current.model).toBe('glm-5.3');
     expect(current.migration).toBeUndefined();
     // Intent was journaled BEFORE stopping, then the session was marked failed.
     expect(events).toContain('session.migrating');

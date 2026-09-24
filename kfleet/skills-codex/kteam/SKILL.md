@@ -116,10 +116,10 @@ kteam task link '#F12' --doc ~/.kteam/<id>/brief-parser.md
 
 Whenever you use kteam (one member or many) — both when proposing the team AND after launching it — list the assignments to the user as a 3-column table: which CLI wrapper, which model it will actually run, and the task it was given.
 
-| CLI                 | Model           | Task                              |
-| ------------------- | --------------- | --------------------------------- |
-| `codex-auto-loge`   | gpt-5.6-sol     | implement the migration checklist |
-| `claude-auto-atomi` | claude-opus-4-8 | fix the flaky session tests       |
+| CLI                 | Model               | Task                              |
+| ------------------- | ------------------- | --------------------------------- |
+| `codex-auto-atomi`  | gpt-6-astra         | implement the migration checklist |
+| `claude-auto-atomi` | claude-opus-5-5[1m] | fix the flaky session tests       |
 
 Fill the Model column with the resolved model (the wrapper's `KTEAM_MODEL` default, or the `--model` override you passed) — never leave it implied.
 
@@ -127,32 +127,32 @@ Fill the Model column with the resolved model (the wrapper's `KTEAM_MODEL` defau
 
 Model choice is driven by the task: how much thinking it needs, how confident you must be in correctness, and how fast/cheap it should run. Wrappers default to their kfleet `KTEAM_MODEL`; `--model <alias|id>` selects any other model the account serves (Claude aliases `opus`/`sonnet`/`haiku`/`fable` resolve per account).
 
-| Model                             | Role — use when                                                                                                                                                                                                       | Speed   | How to get it                                                                         |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------- |
-| Fable 5                           | smartest — plan hard problems, understand complex relations and concepts, map blindspots; pin the design down BEFORE implementation starts                                                                            | slow    | `claude-auto-{liftoff,atomi,loge1..6}` + `--model fable`                              |
-| GPT-5.6-sol @ ultra effort        | best/smartest IMPLEMENTER — less raw smarts than Fable but more diligent and thorough. VERY EXPENSIVE: reserve for the hardest, most critical implementations, only after the big ideas and blindspots are mapped out | slow    | `codex-auto-loge` (default; pinned to ultra reasoning effort)                         |
-| Opus 5                            | TOP IMPLEMENTER TIER — same tier as GPT-5.6-sol: use for the hardest, most critical implementations (and strong planning)                                                                                             | medium  | first-party Anthropic accounts and `claude-auto-loge1..6` (default via `opus`)        |
-| Opus 4.8                          | next-best after the top tier — good implementer                                                                                                                                                                       | medium  | `claude-auto-{kirin,liftoff,atomi}` (default)                                         |
-| GPT-5.6-terra                     | alright implementer but VERY STRONG reviewer — default choice for reviewing anyone's work                                                                                                                             | medium  | `codex-auto-{loai,loio,ernest,kirin,atomi}` (default)                                 |
-| GLM-5.2                           | Opus 4.8 substitute for implementation; downside: SLOW                                                                                                                                                                | slow    | `claude-auto-glm52{a,b}` (default)                                                    |
-| MiniMax M3 / Sonnet 5             | super well-guarded tasks — mechanical plus a bit of smarts; M3 is also strong at frontend/UI/screenshot-to-code/SVG                                                                                                   | fast    | `claude-auto-mm3`; Anthropic accounts + `--model sonnet`                              |
-| DeepSeek V4 Flash                 | very well-scoped tasks only — no blindspots, everything written out; pure mechanical                                                                                                                                  | fast    | `claude-auto-dsv4f` (default)                                                         |
-| Haiku 4.5 / GLM-4.7 / GLM-5-Turbo | trivial mechanical work only                                                                                                                                                                                          | fastest | Anthropic accounts + `--model haiku`; `glm52{a,b}` + `--model sonnet`/`--model haiku` |
+| Model                                  | Role — use when                                                                                                                                                                                                                                      | Speed   | How to get it                                                                                                           |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Fable 5.1 / GPT-6 Astra                | smartest tier — plan hard problems, understand complex relations and concepts, map blindspots; pin the design down BEFORE implementation starts. Astra ($10/$50, ultra effort) is also the codex top implementer for the hardest, most critical work | slow    | `claude-auto-{liftoff,atomi,loge1..6}` + `--model fable`; `codex-auto-{loai,ernest,atomi,loio}` + `--model gpt-6-astra` |
+| GPT-6 Sol                              | Opus-tier: strong implementer AND the default reviewer (replaced GPT-5.6-terra); cheaper than Opus 5.5 ($2/$10). No plan needed                                                                                                                      | medium  | `codex-auto-{loai,ernest,atomi}` (default)                                                                              |
+| Opus 5.5                               | TOP IMPLEMENTER TIER — same tier as GPT-6 Sol: hardest, most critical implementations (and strong planning); $4/$20                                                                                                                                  | medium  | first-party Anthropic accounts and `claude-auto-loge1..6` (default via `opus`)                                          |
+| Opus 5 / Opus 4.8                      | previous generations — Opus 5.5 is both smarter and cheaper, so only reach for these when an account cannot serve 5.5                                                                                                                                | medium  | Anthropic accounts + `--model claude-opus-5[1m]` / `--model claude-opus-4-8[1m]`                                        |
+| GPT-5.6-terra / GPT-5.6-sol            | previous generation — terra is still a fine second-opinion reviewer and plan-following implementer; `codex-auto-loio` keeps terra as default until GPT-6 Sol rolls out there                                                                         | medium  | `codex-auto-loio` (default); others + `--model gpt-5.6-terra`                                                           |
+| GLM-5.3                                | Opus-class substitute for implementation; downside: SLOW                                                                                                                                                                                             | slow    | `claude-auto-glm52{a,b}` (default)                                                                                      |
+| MiniMax M3 / Sonnet 5                  | super well-guarded tasks — mechanical plus a bit of smarts; M3 is also strong at frontend/UI/screenshot-to-code/SVG                                                                                                                                  | fast    | `claude-auto-mm3`; Anthropic accounts + `--model sonnet`                                                                |
+| DeepSeek V4.1 Flash                    | very well-scoped tasks only — no blindspots, everything written out; pure mechanical                                                                                                                                                                 | fast    | `claude-auto-dsv4f` (default, id `deepseek-flash`)                                                                      |
+| Haiku 4.5 / GPT-6 Luna / GLM-5.3-Flash | trivial mechanical work only (Luna: $0.10/$0.50)                                                                                                                                                                                                     | fastest | Anthropic accounts + `--model haiku`; codex + `--model gpt-6-luna`; `glm52{a,b}` + `--model haiku`                      |
 
 ### Handoff chain (main thread → planner → implementer → reviewer)
 
 The standard chain: **main thread (Fable) → planner session → implementer session(s) → reviewer**.
 
-- The main thread stays team lead and judges complexity, but OFFLOADS the planning itself: send it to a kteam **Fable** session. For simpler, low-ambiguity plans the planner can be **GPT-5.6-sol, Opus 5, or Opus 4.8** instead.
-- A planner session may spawn its own implementer teammates — ideally **Opus 4.8, GPT-5.6-terra, or GLM-5.2** — for generic to mid-high difficulty tasks.
+- The main thread stays team lead and judges complexity, but OFFLOADS the planning itself: send it to a kteam **Fable** session. For simpler, low-ambiguity plans the planner can be **GPT-6 Sol or Opus 5.5** instead.
+- A planner session may spawn its own implementer teammates — ideally **Opus 5.5, GPT-6 Sol, or GLM-5.3** — for generic to mid-high difficulty tasks.
 - Implementer selection:
-  - **GPT-5.6-sol / Opus 5** — the top implementer tier: long, big workloads with many checkpoints/checklists, and the hardest critical implementations. Expensive; don’t spend them on small tasks. (Opus 5 only on accounts that have it: kirin/atomi.)
-  - **Opus 4.8 / GPT-5.6-terra** — generic to mid-high difficulty.
-  - **GLM-5.2** — mechanical or frontend work; use sparingly.
-- **GPT-5.6-terra may implement ONLY when a smarter model (Fable, sol, Opus 5, or Opus 4.8) wrote the plan.** Never let terra plan-and-implement nontrivial work on its own.
-- **Product-facing work: NEVER MiniMax M3 or DeepSeek V4** — too weak; GLM-5.2 sparingly.
-- **GLM-5.2 and MiniMax M3 are the mass-chore tier**: divide-and-conquer jobs, 1 file = 1 agent style. That is their only broad-use niche.
-- **Big-context tasks need at least Opus 4.8 or GPT-5.6-terra — and if a big-context task is being IMPLEMENTED, the implementer must be GPT-5.6-sol, Opus 5, or Fable** (Fable implementing is fine there).
+  - **GPT-6 Astra / Opus 5.5 / GPT-6 Sol** — the top implementer tier: long, big workloads with many checkpoints/checklists, and the hardest critical implementations. Expensive; don’t spend them on small tasks. (Opus 5.5 is served by every first-party Anthropic account and loge1..6.)
+  - **Opus 5.5 / GPT-6 Sol** — generic to mid-high difficulty (GPT-5.6-terra only where Sol is not rolled out yet).
+  - **GLM-5.3** — mechanical or frontend work; use sparingly.
+- **GPT-5.6-terra / GPT-5.5 may implement ONLY when a smarter model (Fable, Astra, GPT-6 Sol, or Opus 5.5) wrote the plan.** Never let terra plan-and-implement nontrivial work on its own.
+- **Product-facing work: NEVER MiniMax M3 or DeepSeek V4** — too weak; GLM-5.3 sparingly.
+- **GLM-5.3 and MiniMax M3 are the mass-chore tier**: divide-and-conquer jobs, 1 file = 1 agent style. That is their only broad-use niche.
+- **Big-context tasks need at least Opus 5.5 or GPT-6 Sol — and if a big-context task is being IMPLEMENTED, the implementer must be GPT-6 Astra, Opus 5.5, GPT-6 Sol, or Fable** (Fable implementing is fine there).
 
 Other rules of thumb:
 
@@ -180,7 +180,7 @@ kteam start --agent codex-auto-atomi --mode interactive --cwd "$PWD" --name revi
 
 For LONG prompts (more than a few sentences), write the brief to a file and pass `--prompt-file <file>` instead of inlining it on the command line (`kteam send` takes `--message-file` for the same reason); command-line and file content are combined when both are given. The daemon already delivers every prompt to the TUI via a turn file, so file-based briefs lose nothing.
 
-Each wrapper already carries its own default model (kfleet's `KTEAM_MODEL`: `opus` for standard Claude accounts, `fable-5` for F5/frontier, `terra` for Codex), so you normally omit the model. Override only when a task needs a specific one with `--model <alias|id>`, e.g. `kteam start --agent claude-auto-kirin --model sonnet --cwd "$PWD" "…"`. Leave it off to keep the account default.
+Each wrapper already carries its own default model (kfleet's `KTEAM_MODEL`: `opus` for standard Claude accounts, `fable` where Fable is allowed (`opus` → Opus 5.5, `fable` → Fable 5.1 on Anthropic accounts), `gpt-6-sol` for Codex, real ids only), so you normally omit the model. Override only when a task needs a specific one with `--model <alias|id>`, e.g. `kteam start --agent claude-auto-kirin --model sonnet --cwd "$PWD" "…"`. Leave it off to keep the account default.
 
 Every session gets an auto-assigned teammate NAME (e.g. mordecai) plus its model, both shown by `kteam ps` and `kteam status`. Always refer to teammates by NAME when reporting to the user — never by raw session ID — and present the team as a three-column table: Name | Model | Task. Names resolve anywhere an id is accepted (`kteam send mordecai "…"`), matched against sessions from the last 5 days, most recent wins.
 

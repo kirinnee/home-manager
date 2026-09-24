@@ -120,7 +120,9 @@ const rate = (usdPerMillion: string): bigint => {
 };
 
 /**
- * Official sources, verified 2026-07-28:
+ * Official sources, verified 2026-07-28; Anthropic re-checked 2026-09-24 for the
+ * Opus 5.5 / Fable 5.1 lineup and OpenAI re-checked 2026-09-24 for the GPT-6
+ * generation and the GPT-5.6 re-price (all appended, never mutated):
  * - https://developers.openai.com/api/docs/pricing.md
  * - https://docs.anthropic.com/en/docs/about-claude/pricing.md
  *
@@ -223,6 +225,122 @@ export const PRICING_REGISTRY: readonly PricingEntry[] = [
     },
     verifiedAt: '2026-07-28',
     validCreatedAt: { from: '2026-07-28T00:00:00.000Z' },
+  },
+  {
+    // Claude Opus 5.5 (released 2026-09-21) — the fleet's `opus` alias since
+    // 2026-09-24. Cheaper per token than both Opus 5 and Opus 4.8.
+    aliases: ['claude-opus-5-5'],
+    provider: 'anthropic',
+    pricingKey: 'anthropic:claude-opus-5-5@2026-09-24',
+    ratesUsdMicrosPerMillion: {
+      input: rate('4'),
+      cachedRead: rate('0.2'),
+      cacheWrite5m: rate('5'),
+      cacheWrite1h: rate('8'),
+      output: rate('20'),
+    },
+    verifiedAt: '2026-09-24',
+    validCreatedAt: { from: '2026-09-21T00:00:00.000Z' },
+  },
+  {
+    // Claude Fable 5.1 (released 2026-08-28) — the fleet's `fable` alias since
+    // 2026-09-24. Same input/output rates as Fable 5; cache read is dearer.
+    aliases: ['claude-fable-5-1'],
+    provider: 'anthropic',
+    pricingKey: 'anthropic:claude-fable-5-1@2026-09-24',
+    ratesUsdMicrosPerMillion: {
+      input: rate('10'),
+      cachedRead: rate('0.25'),
+      cacheWrite5m: rate('12.5'),
+      cacheWrite1h: rate('20'),
+      output: rate('50'),
+    },
+    verifiedAt: '2026-09-24',
+    validCreatedAt: { from: '2026-08-28T00:00:00.000Z' },
+  },
+  // --- OpenAI, verified 2026-09-24 (GPT-6 generation + 5.6 re-price). OpenAI
+  // cache writes keep the registry convention: cacheWrite = 1.25x input.
+  {
+    // GPT-6 Astra (released 2026-09-04) — flagship.
+    aliases: ['gpt-6-astra'],
+    provider: 'openai',
+    pricingKey: 'openai:gpt-6-astra@2026-09-24',
+    ratesUsdMicrosPerMillion: {
+      input: rate('10'),
+      cachedRead: rate('1'),
+      cacheWrite: rate('12.5'),
+      output: rate('50'),
+    },
+    verifiedAt: '2026-09-24',
+    validCreatedAt: { from: '2026-09-04T00:00:00.000Z' },
+  },
+  {
+    // GPT-6 Sol (released 2026-09-22).
+    aliases: ['gpt-6-sol'],
+    provider: 'openai',
+    pricingKey: 'openai:gpt-6-sol@2026-09-24',
+    ratesUsdMicrosPerMillion: {
+      input: rate('2'),
+      cachedRead: rate('0.2'),
+      cacheWrite: rate('2.5'),
+      output: rate('10'),
+    },
+    verifiedAt: '2026-09-24',
+    validCreatedAt: { from: '2026-09-22T00:00:00.000Z' },
+  },
+  {
+    // GPT-6 Luna (released 2026-09-22).
+    aliases: ['gpt-6-luna'],
+    provider: 'openai',
+    pricingKey: 'openai:gpt-6-luna@2026-09-24',
+    ratesUsdMicrosPerMillion: {
+      input: rate('0.1'),
+      cachedRead: rate('0.01'),
+      cacheWrite: rate('0.125'),
+      output: rate('0.5'),
+    },
+    verifiedAt: '2026-09-24',
+    validCreatedAt: { from: '2026-09-22T00:00:00.000Z' },
+  },
+  {
+    // GPT-5.6 re-price observed 2026-09-24; the 2026-07-28 row stays for older sessions.
+    aliases: ['gpt-5.6-sol'],
+    provider: 'openai',
+    pricingKey: 'openai:gpt-5.6-sol@2026-09-24',
+    ratesUsdMicrosPerMillion: {
+      input: rate('4'),
+      cachedRead: rate('0.4'),
+      cacheWrite: rate('5'),
+      output: rate('20'),
+    },
+    verifiedAt: '2026-09-24',
+    validCreatedAt: { from: '2026-09-24T00:00:00.000Z' },
+  },
+  {
+    aliases: ['gpt-5.6-terra'],
+    provider: 'openai',
+    pricingKey: 'openai:gpt-5.6-terra@2026-09-24',
+    ratesUsdMicrosPerMillion: {
+      input: rate('2'),
+      cachedRead: rate('0.2'),
+      cacheWrite: rate('2.5'),
+      output: rate('12'),
+    },
+    verifiedAt: '2026-09-24',
+    validCreatedAt: { from: '2026-09-24T00:00:00.000Z' },
+  },
+  {
+    aliases: ['gpt-5.6-luna'],
+    provider: 'openai',
+    pricingKey: 'openai:gpt-5.6-luna@2026-09-24',
+    ratesUsdMicrosPerMillion: {
+      input: rate('0.2'),
+      cachedRead: rate('0.02'),
+      cacheWrite: rate('0.25'),
+      output: rate('1.2'),
+    },
+    verifiedAt: '2026-09-24',
+    validCreatedAt: { from: '2026-09-24T00:00:00.000Z' },
   },
 ];
 

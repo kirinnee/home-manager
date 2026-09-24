@@ -326,7 +326,7 @@ export interface SessionState {
    *  session with no launchedAt must treat it as pending, never crashed. */
   launchedAt?: string;
   /** The model the harness ITSELF reported in its transcript usage records
-   *  (e.g. `glm-5.2` on a wrapper whose alias is `opus`). Ground truth for
+   *  (e.g. `glm-5.3` on a wrapper whose alias is `opus`). Ground truth for
    *  display; the configured alias is only a request. */
   observedModel?: string;
   /** When the harness last supplied model evidence (Claude usage or Codex

@@ -52,7 +52,7 @@ compose the Claude-side name), so pick it first with `kteam name`, then pass BOT
    callsign in `--name`. kteam composes the `[Hayden] Fix Transcript` Claude-side name itself:
 
    ```bash
-   kteam start -a claude-auto-kirin --model 'claude-opus-5[1m]' --mode interactive \
+   kteam start -a claude-auto-kirin --model 'claude-opus-5-5[1m]' --mode interactive \
      --teammate hayden --name "Fix Transcript" --cwd "$PWD"
    ```
 
@@ -67,8 +67,8 @@ compose the Claude-side name), so pick it first with `kteam name`, then pass BOT
 - **No prompt/task argument.** Interactive sessions start bare at the harness prompt —
   never inject an opening turn; the human types the first thing themselves. The task only
   names the session; it is not sent into the TUI.
-- **Wrapper**: default `claude-auto-kirin` with **Opus 5** for Claude —
-  `-a claude-auto-kirin --model 'claude-opus-5[1m]'`. (The fleet rule that bans
+- **Wrapper**: default `claude-auto-kirin` with **Opus 5.5** for Claude —
+  `-a claude-auto-kirin --model 'claude-opus-5-5[1m]'`. (The fleet rule that bans
   `claude-auto-kirin` is about AUTONOMOUS teammate work; these are the user's OWN hands-on
   sessions, so the personal account is the right one.) For Codex use a codex wrapper
   (e.g. `codex-auto-loge`); Codex has no RC flag, so RC applies to Claude only.

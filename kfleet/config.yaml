@@ -27,11 +27,13 @@ profiles:
     # kfleet ships its own (vetted) hooks, so trust them without the per-project
     # trust prompt — required for the non-interactive auto wrappers.
     flags: ['--dangerously-bypass-hook-trust']
-    # ChatGPT-backed codex has NO model aliases — bare "terra" 400s with
-    # "model is not supported". Real catalog IDs on these accounts:
-    # gpt-5.6-terra / gpt-5.6-sol / gpt-5.6-luna (+ gpt-5.5, gpt-5.4).
+    # ChatGPT-backed codex has NO model aliases — bare "sol" 400s with
+    # "model is not supported". Real catalog IDs on these accounts (2026-09-24, needs
+    # Codex CLI >= 0.156 — older clients are told the model "requires a newer version"):
+    # gpt-6-astra / gpt-6-sol / gpt-6-luna (+ gpt-5.6-sol/terra/luna, gpt-5.5).
+    # GPT-6 Sol replaced GPT-5.6-terra as the generic implementer/reviewer default.
     env:
-      KTEAM_MODEL: gpt-5.6-terra
+      KTEAM_MODEL: gpt-6-sol
   zai-a:
     env:
       ANTHROPIC_AUTH_TOKEN: $ZAI_API_KEY_A
@@ -50,8 +52,8 @@ profiles:
       ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
   # loge is now served by a LOCAL CLIProxyAPI (see `kloge`) at 127.0.0.1:8317 —
   # no gateway, no tailnet (the box isn't on the tailnet). Raw CLIProxyAPI does
-  # NOT alias model names, so real upstream IDs are used (claude-fable-5, not
-  # fable-5). Requires `kloge up` on whichever host runs these agents.
+  # NOT alias model names, so real upstream IDs are used (claude-fable-5-1, not
+  # fable-5-1). Requires `kloge up` on whichever host runs these agents.
   loge:
     env:
       ANTHROPIC_API_KEY: loge-internal
@@ -68,15 +70,19 @@ profiles:
       # rather than left pointing at capacity that cannot serve. The default
       # model falls back to Opus 5. Re-add ANTHROPIC_DEFAULT_FABLE_MODEL when the
       # pool's weekly limits recover (see kloge quota headers for reset times).
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
+      # 2026-09-24: opus -> Opus 5.5 by real id; the kloge image must carry it in
+      # models.overlay.json (see modules/kloge-ts/cliproxy-fork) — rebuild + `kloge up`.
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
       ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-4-5-20251001
-      KTEAM_MODEL: claude-opus-5[1m] # real ID: raw CLIProxyAPI has no aliases
+      KTEAM_MODEL: claude-opus-5-5[1m] # real ID: raw CLIProxyAPI has no aliases
     settings:
-      model: claude-opus-5[1m]
+      model: claude-opus-5-5[1m]
   loge-codex:
     env:
       OPENAI_API_KEY: loge-internal
+      # 2026-09-24: the kloge pool has NO Codex credentials (only claude-*.json), so this
+      # lane serves nothing right now; left on gpt-5.6-sol until creds exist — re-probe then.
       KTEAM_MODEL: gpt-5.6-sol # frontier codex keeps its pinned model, not terra
     settings:
       model: gpt-5.6-sol
@@ -123,9 +129,12 @@ sharedHistory:
 agents:
   # Anthropic-backed OAuth accounts: resolve the opus/fable aliases to the
   # 1M-context beta variants (`[1m]` suffix — verified live 2026-07-22).
+  # 2026-09-24: opus -> Opus 5.5 (claude-opus-5-5, released 2026-09-21) and fable ->
+  # Fable 5.1 (claude-fable-5-1). Opus 5.5 needs Claude Code >= 2.1.280 (older
+  # CLIs get a 400 "does not support this model"); the flake pins 2.1.281.
   # Scoped per-agent, NOT on the shared claude profile, so provider-backed
   # accounts (glm52/mm3/deepseek) never see the suffix their APIs would 400 on.
-  # opus → Opus 5 (claude-opus-5[1m], 1,000,000-token window). Verified live on
+  # opus → Opus 5.5 (claude-opus-5-5[1m], 1,000,000-token window). Opus 5 was verified live on
   # kirin/atomi 2026-07-24 and on liftoff + the loge pool 2026-07-25 — the whole
   # fleet is on Opus 5 now.
   - name: kirin
@@ -133,8 +142,8 @@ agents:
     profiles:
       - claude
     env: &anthropic-1m
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
   - name: liftoff
     kind: claude
     profiles:
@@ -145,16 +154,18 @@ agents:
     profiles:
       - claude
     env: *anthropic-1m
+  # z.ai coding plan: GLM-5.3 lineup since 2026-08-14 (glm-5.3 / glm-5.3-flash; glm-5.3-flashx is NOT in
+  # the plan — z.ai error 1311; sonnet stays on glm-5-turbo. Verified live 2026-09-24). Account names keep the glm52 slug.
   - name: glm52a
     kind: claude
     profiles:
       - claude
       - zai-a
     env: &a1
-      ANTHROPIC_DEFAULT_OPUS_MODEL: glm-5.2
+      ANTHROPIC_DEFAULT_OPUS_MODEL: glm-5.3
       ANTHROPIC_DEFAULT_SONNET_MODEL: glm-5-turbo
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: glm-4.7
-      ANTHROPIC_DEFAULT_FABLE_MODEL: glm-5.2
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: glm-5.3-flash
+      ANTHROPIC_DEFAULT_FABLE_MODEL: glm-5.3
   - name: glm52b
     kind: claude
     profiles:
@@ -171,6 +182,8 @@ agents:
       ANTHROPIC_DEFAULT_SONNET_MODEL: MiniMax-M3
       ANTHROPIC_DEFAULT_HAIKU_MODEL: MiniMax-M3
       ANTHROPIC_DEFAULT_FABLE_MODEL: MiniMax-M3
+  # DeepSeek 2026-09-24: `deepseek-flash` = V4.1 Flash (2026-09-10) — the canonical id;
+  # `deepseek-v4-flash` is only a temporary compat alias. V4 Pro unchanged (still banned).
   - name: dsv4p
     kind: claude
     profiles:
@@ -178,9 +191,9 @@ agents:
       - deepseek
     env:
       ANTHROPIC_DEFAULT_FABLE_MODEL: deepseek-v4-pro
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: deepseek-v4-flash
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: deepseek-flash
       ANTHROPIC_DEFAULT_OPUS_MODEL: deepseek-v4-pro
-      ANTHROPIC_DEFAULT_SONNET_MODEL: deepseek-v4-flash
+      ANTHROPIC_DEFAULT_SONNET_MODEL: deepseek-flash
   - name: dsv4f
     kind: claude
     profiles:
@@ -188,9 +201,9 @@ agents:
       - deepseek
     env:
       ANTHROPIC_DEFAULT_FABLE_MODEL: deepseek-v4-pro
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: deepseek-v4-flash
-      ANTHROPIC_DEFAULT_OPUS_MODEL: deepseek-v4-flash
-      ANTHROPIC_DEFAULT_SONNET_MODEL: deepseek-v4-flash
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: deepseek-flash
+      ANTHROPIC_DEFAULT_OPUS_MODEL: deepseek-flash
+      ANTHROPIC_DEFAULT_SONNET_MODEL: deepseek-flash
   # Direct external-token agents for the former kloge Claude pool. The shared
   # claude profile supplies KTEAM_MODEL=opus; each agent maps both Opus and
   # Fable to its 1M-context model. The pooled proxy's Fable mapping stays disabled.
@@ -202,8 +215,8 @@ agents:
       key: LOGE_CLAUDE_1_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_1_TOKEN
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
   - name: loge2
     kind: claude
     profiles: [claude]
@@ -212,8 +225,8 @@ agents:
       key: LOGE_CLAUDE_2_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_2_TOKEN
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
   - name: loge3
     kind: claude
     profiles: [claude]
@@ -222,8 +235,8 @@ agents:
       key: LOGE_CLAUDE_3_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_3_TOKEN
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
   - name: loge4
     kind: claude
     profiles: [claude]
@@ -232,8 +245,8 @@ agents:
       key: LOGE_CLAUDE_4_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_4_TOKEN
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
   - name: loge5
     kind: claude
     profiles: [claude]
@@ -242,8 +255,8 @@ agents:
       key: LOGE_CLAUDE_5_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_5_TOKEN
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
   - name: loge6
     kind: claude
     profiles: [claude]
@@ -252,8 +265,8 @@ agents:
       key: LOGE_CLAUDE_6_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_6_TOKEN
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5[1m]
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5[1m]
+      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
   - name: loge
     kind: claude
     profiles:
@@ -272,6 +285,10 @@ agents:
     kind: codex
     profiles:
       - codex
+    # 2026-09-24: this account has gpt-6-astra but NOT gpt-6-sol/luna yet (staggered
+    # rollout) — keep the previous default until a re-probe shows gpt-6-sol.
+    env:
+      KTEAM_MODEL: gpt-5.6-terra
   - name: ernest
     kind: codex
     profiles:

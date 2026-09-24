@@ -51,7 +51,7 @@ port is bound to `127.0.0.1` on whichever host it runs on.
 ## Usage
 
 ```bash
-kloge build                    # build the default maintained image with claude-opus-5
+kloge build                    # build the default maintained image (overlay adds claude-opus-5, claude-opus-5-5, claude-fable-5-1)
 kloge pull                     # pull creds + render config/compose (kubectl, ctx eks-llm-us-east-1)
 kloge pull -c <other-context>  # pull from a different kube context
 kloge up                       # start the container locally -> http://127.0.0.1:8317
@@ -63,13 +63,13 @@ kloge push user@box --no-up    # copy only; build/load the maintained image ther
 ```
 
 Point a client at it (real upstream model IDs — this CLIProxyAPI version does
-not alias to `fable-5`/`opus-4.8`):
+not alias to `fable-5-1`/`opus-5-5`):
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
 export ANTHROPIC_API_KEY=loge-internal
-# models: claude-fable-5, claude-opus-4-8, claude-sonnet-5, claude-haiku-4-5-20251001
-# codex/openai: gpt-5.5
+# models: claude-opus-5-5, claude-fable-5-1 (+ claude-opus-5, claude-fable-5, claude-opus-4-8, claude-sonnet-5, claude-haiku-4-5-20251001)
+# codex/openai: none — the pool has no Codex credentials (2026-09-24)
 ```
 
 To reach a box's proxy from here, tunnel it (it's bound to the box's localhost):

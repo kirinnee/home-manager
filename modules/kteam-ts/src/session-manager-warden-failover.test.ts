@@ -451,7 +451,7 @@ describe('escalation account failover', () => {
       at: '2026-07-28T15:16:17.456Z',
       wardenSessionId: 'warden-1',
       wrapper: 'claude-auto-glm52a',
-      model: 'glm-5.2',
+      model: 'glm-5.3',
       modelSource: 'wrapper',
       harness: 'claude',
       policy: 'fallback',

@@ -165,10 +165,10 @@ export const defaultWardenConfig = (): WardenConfig => ({
   enabled: false,
   // Wardens JUDGE sus sessions (A6): understand the task, deep-dive the process,
   // verdict leave/nudge/resume/kill. That verdict work is triage — the mechanical
-  // tier per CLAUDE.md's routing — so wardens default to GLM-5.2 to save tokens
+  // tier per CLAUDE.md's routing — so wardens default to GLM-5.3 to save tokens
   // rather than burning an Opus-class session per sweep.
   //
-  // GLM caveat: this account resolves the `opus`/`fable` aliases to `glm-5.2` via
+  // GLM caveat: this account resolves the `opus`/`fable` aliases to `glm-5.3` via
   // its own env; leave `model` UNSET so KTEAM_MODEL=opus resolves correctly. Never
   // pin `model` to a raw claude id here — a `claude-*`/`[1m]` suffix 400s the z.ai
   // API (kfleet/config.yaml documents this).
