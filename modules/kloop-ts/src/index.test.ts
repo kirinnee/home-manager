@@ -881,7 +881,7 @@ describe('validateAgentsOrThrow', () => {
     // Regression: default `kloop init` must not seed bare non-fleet names that pass
     // kloop validation then fail at `kteam start`. The template now uses real wrappers.
     const config = parseRawConfig(YAML.parse(buildDefaultConfigYaml()));
-    expect(() => validateAgentsOrThrow(config, ['claude-auto-liftoff', 'codex-auto-loio'])).not.toThrow();
+    expect(() => validateAgentsOrThrow(config, ['claude-auto-liftoff', 'codex-auto-loai'])).not.toThrow();
   });
 });
 

@@ -220,10 +220,6 @@ export const HARD_ACCOUNT_EXCLUSIONS = [
     binary: 'claude-auto-dsv4p',
     reason: 'DeepSeek V4 Pro is too expensive for its capability — routed manually only',
   },
-  {
-    binary: 'codex-auto-loge',
-    reason: 'the kloge proxy has no Codex credentials (2026-09-24) — the human said stop routing here',
-  },
 ] as const;
 
 export const ACCOUNT_SELECTION_POLICY = {
@@ -797,14 +793,6 @@ const ACCOUNTS: AccountSpec[] = [
   { match: /^claude-auto-mm3$/, options: [{ model: 'mm3' }] },
   { match: /^claude-auto-dsv4f$/, options: [{ model: 'dsv4f' }] },
   {
-    // BANNED 2026-09-24 (human decision): the CLIProxyAPI lane has no Codex
-    // credentials and serves nothing. Re-enable (with re-probed GPT-6 ids) only
-    // once `kloge status` lists Codex creds.
-    match: /^codex-auto-loge$/,
-    banned: 'kloge proxy has no Codex credentials — never route kteam work here',
-    options: [],
-  },
-  {
     // GPT-6 generation probed live on these accounts 2026-09-24.
     match: /^codex-auto-(loai|ernest|atomi|kirin)$/,
     options: [
@@ -813,12 +801,6 @@ const ACCOUNTS: AccountSpec[] = [
       { model: 'gpt6luna', flag: 'gpt-6-luna' },
       { model: 'terra', flag: 'gpt-5.6-terra' },
     ],
-  },
-  {
-    // GPT-6 is still rolling out here: only gpt-6-astra was served on
-    // 2026-09-24 (no gpt-6-sol / gpt-6-luna yet), so terra stays the default.
-    match: /^codex-auto-loio$/,
-    options: [{ model: 'terra' }, { model: 'astra', flag: 'gpt-6-astra' }],
   },
 ];
 

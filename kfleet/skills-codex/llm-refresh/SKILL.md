@@ -86,5 +86,5 @@ human's restart) — say it needs a restart in the report.
 
 Table of provider → old id → new id → verified how (smoke wrapper, date), the CLI versions,
 what could NOT be enabled and why (e.g. "GLM-5.3-FlashX is not in the z.ai plan: error 1311",
-"gpt-6-sol not rolled out to loio yet"), and what still needs the human (kteamd restart, `kloge up` on
+"gpt-6-sol not rolled out to account X yet"), and what still needs the human (kteamd restart, `kloge up` on
 the box).

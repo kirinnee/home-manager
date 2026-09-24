@@ -53,7 +53,7 @@ describe('server config pane', () => {
       '    claude-auto-liftoff: 1',
       'reviewer:',
       '  phases:',
-      '    - - codex-auto-loio',
+      '    - - codex-auto-loai',
       '  lenses: [general]',
     ].join('\n');
     const result = await applyConfigEdit({ yaml, note: 'switch reviewer' });

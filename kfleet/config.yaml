@@ -7,7 +7,7 @@ usage:
   cliProxy:
     - url: http://127.0.0.1:8317
       managementKeyFile: ~/.kloge/management-key
-      baseAgents: [claude-loge, codex-loge]
+      baseAgents: [claude-loge]
 
 profiles:
   claude:
@@ -78,21 +78,6 @@ profiles:
       KTEAM_MODEL: claude-opus-5-5[1m] # real ID: raw CLIProxyAPI has no aliases
     settings:
       model: claude-opus-5-5[1m]
-  loge-codex:
-    env:
-      OPENAI_API_KEY: loge-internal
-      # 2026-09-24: the kloge pool has NO Codex credentials (only claude-*.json), so this
-      # lane serves nothing right now; left on gpt-5.6-sol until creds exist — re-probe then.
-      KTEAM_MODEL: gpt-5.6-sol # frontier codex keeps its pinned model, not terra
-    settings:
-      model: gpt-5.6-sol
-      model_reasoning_effort: ultra # sol is the diligent implementer; always run it at ultra
-      model_provider: loge
-      model_providers:
-        loge:
-          name: Loge
-          base_url: http://127.0.0.1:8317/v1
-          env_key: OPENAI_API_KEY
 variants:
   default:
     memory: ./CLAUDE.md
@@ -272,25 +257,10 @@ agents:
     profiles:
       - claude
       - loge
-  # 2026-09-24: NOT routed by kteam (banned in kteam-ts) — the kloge pool has no Codex
-  # credentials. Wrapper kept so it can be re-enabled once creds exist.
-  - name: loge
-    kind: codex
-    profiles:
-      - codex
-      - loge-codex
   - name: loai
     kind: codex
     profiles:
       - codex
-  - name: loio
-    kind: codex
-    profiles:
-      - codex
-    # 2026-09-24: this account has gpt-6-astra but NOT gpt-6-sol/luna yet (staggered
-    # rollout) — keep the previous default until a re-probe shows gpt-6-sol.
-    env:
-      KTEAM_MODEL: gpt-5.6-terra
   - name: ernest
     kind: codex
     profiles:

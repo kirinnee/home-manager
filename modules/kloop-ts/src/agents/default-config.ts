@@ -63,9 +63,9 @@ maxIterations: 7                  # most important knob: max implement→review 
 # "claude" are rejected. List yours with "ls ~/.kfleet/bin" or "kteam recommend".
 pools:
   claude: { claude-auto-liftoff: 1 }
-  codex: { codex-auto-loio: 1 }
+  codex: { codex-auto-loai: 1 }
 # claude-pair: { claude-auto-liftoff: 1, claude-auto-kirin: 1 }
-# fast-codex:  { codex-auto-loio: 5, codex-auto-kirin: 1 }
+# fast-codex:  { codex-auto-loai: 5, codex-auto-kirin: 1 }
 
 # lensProfiles: the "what to scrutinize" text for each review lens (the matrix rows). The
 # full reviewer prompt is prompts.reviewer with the matching lens spliced in at {lensFocus}.
