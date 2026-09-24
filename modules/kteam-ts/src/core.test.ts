@@ -613,7 +613,7 @@ describe('recommendTeam: the top tier is not the answer to everything', () => {
 describe('recommendTeam: account rules', () => {
   test('never recommends the personal daily-driver accounts or DeepSeek V4 Pro', () => {
     const team = recommendTeam('Implement the billing reconciliation service', FLEET);
-    const banned = ['claude-auto-kirin', 'codex-auto-personal', 'claude-auto-dsv4p'];
+    const banned = ['claude-auto-kirin', 'codex-auto-personal', 'claude-auto-dsv4p', 'codex-auto-loge'];
     for (const binary of banned) {
       expect(everyone(team).some(option => option.binary === binary)).toBe(false);
       expect(team.exclusions.some(item => item.binary === binary)).toBe(true);
@@ -744,13 +744,13 @@ describe('recommendTeam: options, alternatives, and the handoff chain', () => {
     expect(planner.roles[0]!.primary.model).toBe('astra');
     expect(planner.roles[0]!.primary.modelFlag).toBe('gpt-6-astra');
 
-    // loio: GPT-6 rollout incomplete (astra only); loge: unverified, 5.6 ids.
+    // loio: GPT-6 rollout incomplete (astra only); loge: banned (no Codex creds).
     const thin = recommendTeam('Review the scheduler diff', ['codex-auto-loio', 'codex-auto-loge'], {
       roles: ['planner', 'implementer', 'reviewer'],
     });
     const models = everyone(thin).map(option => `${option.binary}:${option.model}`);
     expect(models.some(item => /:(gpt6sol|gpt6luna)$/.test(item))).toBe(false);
-    expect(models.some(item => /^codex-auto-loge:(astra|gpt6sol|gpt6luna)$/.test(item))).toBe(false);
+    expect(models.some(item => item.startsWith('codex-auto-loge:'))).toBe(false);
   });
 
   test('--budget max always plans and reviews; --budget cheap trims the shape', () => {

@@ -272,6 +272,8 @@ agents:
     profiles:
       - claude
       - loge
+  # 2026-09-24: NOT routed by kteam (banned in kteam-ts) — the kloge pool has no Codex
+  # credentials. Wrapper kept so it can be re-enabled once creds exist.
   - name: loge
     kind: codex
     profiles:

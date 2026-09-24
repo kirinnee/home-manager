@@ -79,7 +79,7 @@ BOTH `--teammate` and the plain `--name` in one `kteam start`.
   `-a claude-auto-kirin --model 'claude-opus-5-5[1m]'`. (The fleet rule that bans
   `claude-auto-kirin` is about AUTONOMOUS teammate work; these are the user's OWN hands-on
   sessions, so the personal account is the right one.) For Codex use a codex wrapper
-  (e.g. `codex-auto-loge`); Codex has no RC flag, so RC applies to Claude only.
+  (e.g. `codex-auto-atomi`); Codex has no RC flag, so RC applies to Claude only.
 - **Directory**: the current working directory unless the user gives another path. Never
   ask about or create worktrees.
 - `--no-rc` opts a single session out of remote control.
@@ -88,7 +88,7 @@ Codex example (still pass the plain `--name` and `--teammate`; no RC, no compose
 
 ```bash
 kteam name   # -> e.g. `marlon`
-kteam start -a codex-auto-loge --mode interactive \
+kteam start -a codex-auto-atomi --mode interactive \
   --teammate marlon --name "Codex Spike" --cwd "$PWD"
 ```
 

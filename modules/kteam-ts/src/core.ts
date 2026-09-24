@@ -220,6 +220,10 @@ export const HARD_ACCOUNT_EXCLUSIONS = [
     binary: 'claude-auto-dsv4p',
     reason: 'DeepSeek V4 Pro is too expensive for its capability — routed manually only',
   },
+  {
+    binary: 'codex-auto-loge',
+    reason: 'the kloge proxy has no Codex credentials (2026-09-24) — the human said stop routing here',
+  },
 ] as const;
 
 export const ACCOUNT_SELECTION_POLICY = {
@@ -574,8 +578,8 @@ const MODELS: Record<ModelKey, ModelSpec> = {
     implementerFit: { mechanical: 5, mid: 45, hard: 100 },
     note: 'codex frontier: plans like Fable, implements the hardest work @ ultra; very expensive',
   },
-  // Superseded by GPT-6 (2026-09-24). Kept only because codex-auto-loge (whose
-  // served ids are unverified) still points at it.
+  // Superseded by GPT-6 (2026-09-24); no account routes here any more. Kept as a
+  // named tier for `--model gpt-5.6-sol` overrides and old-session display.
   sol: {
     label: 'GPT-5.6-sol @ ultra',
     family: 'codex',
@@ -793,12 +797,12 @@ const ACCOUNTS: AccountSpec[] = [
   { match: /^claude-auto-mm3$/, options: [{ model: 'mm3' }] },
   { match: /^claude-auto-dsv4f$/, options: [{ model: 'dsv4f' }] },
   {
-    // UNVERIFIED / DEAD as of 2026-09-24: the CLIProxyAPI lane has no Codex
-    // credentials and serves nothing, so its GPT-6 availability is unknown.
-    // Options intentionally left on the 5.6 ids until it is re-probed.
+    // BANNED 2026-09-24 (human decision): the CLIProxyAPI lane has no Codex
+    // credentials and serves nothing. Re-enable (with re-probed GPT-6 ids) only
+    // once `kloge status` lists Codex creds.
     match: /^codex-auto-loge$/,
-    loge: true,
-    options: [{ model: 'sol' }, { model: 'terra', flag: 'gpt-5.6-terra' }, { model: 'gpt55', flag: 'gpt-5.5' }],
+    banned: 'kloge proxy has no Codex credentials — never route kteam work here',
+    options: [],
   },
   {
     // GPT-6 generation probed live on these accounts 2026-09-24.
