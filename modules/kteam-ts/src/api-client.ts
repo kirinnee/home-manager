@@ -12,7 +12,15 @@ import type {
   WardenRunView,
   WardenStatusView,
 } from './service';
-import type { KTeamEvent, SendDisposition, SendRequest, SignalKind, SignalOptions, StartSessionRequest } from './types';
+import type {
+  KTeamEvent,
+  SendDisposition,
+  SendRecord,
+  SendRequest,
+  SignalKind,
+  SignalOptions,
+  StartSessionRequest,
+} from './types';
 import type { KTeamPaths } from './paths';
 import { loadDaemonConfig } from './daemon-config';
 import { displayName } from './names';
@@ -414,6 +422,20 @@ export class ApiClient {
   }
   send(id: string, input: SendRequest) {
     return this.post<SessionView & { disposition?: SendDisposition }>(id, 'send', input);
+  }
+  /** The durable send ledger. `send` only reports ACCEPTANCE, so this is the
+   *  only way a caller can see what actually became of a message.
+   *
+   *  `timeoutMs` exists because the post-send warning calls this on the hot
+   *  path: `listSends` takes the RECIPIENT's session lock, the same lock the
+   *  send just queued behind, so an advisory read must never be able to outlive
+   *  the send it annotates. Interactive `kteam sends` keeps the full deadline. */
+  sends(id: string, all = false, timeoutMs?: number) {
+    return this.request<{ sends: SendRecord[] }>(
+      `/v1/sessions/${encodeURIComponent(id)}/sends${all ? '?all=1' : ''}`,
+      {},
+      timeoutMs,
+    ).then(response => response.sends ?? []);
   }
   answer(id: string, toolUseId: string, labels: string[], other?: string, responses?: string[]) {
     return this.post<SessionView>(id, 'answer', { toolUseId, labels, other, responses });

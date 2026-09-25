@@ -75,6 +75,11 @@ import { isBrowserError } from './browser-types';
 import { inheritStopReason, processStopIo, runBulkStop, type BulkStopOptions, type BulkStopSelector } from './stop-cli';
 
 const VERSION = KTEAM_VERSION;
+/** Deadline for the advisory "this recipient has unconfirmed sends" lookup that
+ *  runs after every `kteam send`. Short by design: it reads the recipient's
+ *  ledger behind that session's own lock, and a warning is never worth making
+ *  the caller wait on a busy seat. Timing out just drops the warning. */
+const SEND_WARNING_TIMEOUT_MS = 5_000;
 const paths = createPaths();
 process.env.PATH = [paths.kfleetBin, process.env.PATH ?? ''].join(path.delimiter);
 // Background/automation shells sometimes carry HTTP(S)_PROXY vars the
@@ -771,13 +776,36 @@ program
       else if (view.disposition === 'queued-for-revive')
         console.log('queued durably in the session inbox; explicit resume remains available');
       else if (view.disposition === 'revived') console.log('revived session with message');
-      else if (view.disposition === 'delivered') console.log('delivered');
+      // NOT "delivered". Every disposition above is ACCEPTANCE — the daemon has
+      // taken durable custody of the message, and delivery is only proven later,
+      // by the recipient's own transcript. Saying "delivered" here is what let 38
+      // messages vanish on 2026-08-05 while every sender read exit 0 and a
+      // success line. The word to the sender is now what the daemon can actually
+      // vouch for, and `kteam sends` is where the real fate lives.
+      else if (view.disposition === 'delivered') console.log('submitted to the idle prompt (delivery confirmed later)');
       else {
         const busy =
           !['waiting', 'awaiting_user', 'interrupted'].includes(view.state.status) && !view.state.promptReady;
         if (!options.now && busy)
           console.error('kteam send: session is busy — message queued for the next turn boundary');
       }
+      // The sender is the one party who can act on a recipient that is not
+      // consuming its messages, and it was the one party never told. Surface
+      // the recipient's UNACCOUNTED rows on the way out: a loud line naming the
+      // count, so a seat that is quietly swallowing input is visible at the
+      // first send after it starts rather than only in a post-mortem. Best
+      // effort by construction — a ledger read that fails must never turn an
+      // accepted send into a CLI error.
+      const unaccounted = await api.sends(id, false, SEND_WARNING_TIMEOUT_MS).then(
+        records => records.filter(record => record.fate === 'unaccounted' && record.withdrawn !== true),
+        () => [],
+      );
+      if (unaccounted.length)
+        console.error(
+          `kteam send: WARNING — ${unaccounted.length} earlier message(s) to this session were never confirmed ` +
+            `(most recent: ${unaccounted[0]!.unaccountedReason ?? 'unknown'}). They are retained durably; ` +
+            `run \`kteam sends ${id}\` to inspect them.`,
+        );
       // --ask: park the CALLER until the peer replies. Declared AFTER the send
       // lands, so a failed send never leaves this session waiting on a message
       // the peer was never given. The daemon ends the park the moment that peer
@@ -1179,6 +1207,37 @@ program
   .option('--turn <number>', '', Number)
   .action(async (id, options: { turn?: number }) => {
     process.stdout.write(await (await client()).logs(id, options.turn));
+  });
+program
+  .command('sends')
+  .description('what actually became of the messages sent to a session (the durable send ledger)')
+  .argument('<id>')
+  .option('--all', 'the full ledger, including delivered and withdrawn rows')
+  .option('--json')
+  .action(async (id: string, options: { all?: boolean; json?: boolean }) => {
+    const records = await (await client()).sends(id, options.all === true);
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify(records, undefined, 2)}\n`);
+      return;
+    }
+    if (!records.length) {
+      console.log('no sends on record');
+      return;
+    }
+    for (const record of records) {
+      // `fate` is the only honest word for a send: ACCEPTED means the daemon
+      // holds it, DELIVERED means the recipient's transcript proved it, and
+      // UNACCOUNTED means neither — which is exactly what a sender needs to see.
+      const detail = [
+        record.fate === 'unaccounted' ? (record.unaccountedReason ?? 'unknown') : undefined,
+        record.withdrawn ? 'withdrawn' : undefined,
+        record.payloadFile,
+      ].filter(Boolean);
+      console.log(
+        `${record.fate.toUpperCase().padEnd(12)} ${record.path.padEnd(14)} ${record.acceptedAt}  ` +
+          `${record.message.replace(/\s+/gu, ' ').slice(0, 60)}${detail.length ? `  [${detail.join('; ')}]` : ''}`,
+      );
+    }
   });
 program
   .command('events')

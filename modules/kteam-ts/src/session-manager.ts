@@ -621,6 +621,15 @@ const NATIVE_QUEUE_INLINE_MAX_CHARS = 1_000;
  * sends, part of a filename. Keep the accepted alphabet intentionally smaller
  * than a general HTTP header token; invalid/absent ids get a fresh UUID. */
 const SAFE_SEND_REQUEST_ID = /^[A-Za-z0-9_-]{1,128}$/;
+/** Derives the queue-file fallback's id from the injection it replaces, so a
+ *  repeated sweep re-accepts the SAME row (a no-op) instead of sending the
+ *  message twice. Kept inside SAFE_SEND_REQUEST_ID's charset and length: the
+ *  id also becomes `channel/queued-<id>.md` and the queue-file evidence tier. */
+const REQUEUED_SEND_ID_SUFFIX = '-requeued';
+
+function requeuedSendId(sendId: string): string {
+  return `${sendId.slice(0, 128 - REQUEUED_SEND_ID_SUFFIX.length)}${REQUEUED_SEND_ID_SUFFIX}`;
+}
 
 function sendRequestId(value: string | undefined): string {
   return value !== undefined && SAFE_SEND_REQUEST_ID.test(value) ? value : crypto.randomUUID();
@@ -1886,8 +1895,121 @@ export class SessionManager implements KTeamService {
         next.turn ?? view.config.turn,
         true,
       ).catch(() => undefined);
+      // A timed-out injection is the ONLY unaccounted class whose payload still
+      // has somewhere to go, so it falls back instead of stopping here.
+      await this.requeueTimedOutInjectionUnlocked(id, view, next);
     }
     return transitioned;
+  }
+
+  /** ACCEPTED must imply DURABLE. The idle-prompt routes (`direct`, and the
+   *  `turn-file` instruction) write a turn file, then type; `config.turn`
+   *  advances only after the keystrokes land. An injection that bounces off a
+   *  not-yet-ready harness therefore leaves a written file nobody was pointed
+   *  at and a turn that never moved — and the NEXT send, computing the same
+   *  turn, overwrites it. Before this the payload stopped at the UNACCOUNTED
+   *  event with no second attempt on any route.
+   *
+   *  Measured on msg863r4-456424b3 (2026-08-05): 48 unaccounted turn-file
+   *  sends naming just 19 distinct turn files — 19 payloads still present, 29
+   *  present in NO turn file at all. Fleet-wide at that snapshot: 641
+   *  attribution-only against 869 genuinely overwritten. File EXISTENCE is
+   *  what makes the first number look like the whole story; only comparing the
+   *  file's BYTES to the record separates them.
+   *
+   *  So an overwritten injection is re-delivered through the queue-file route:
+   *  a mode-0600 `channel/queued-<id>.md` written BEFORE any keystroke, plus
+   *  the short instruction that names it — the route the TUI's native queue
+   *  holds across a busy turn. The fallback is file-backed whatever its length
+   *  (the durable artifact is the point, and it earns the strongest
+   *  `queue-file-id` evidence tier). A payload that IS still the turn file's
+   *  content is left alone: it arrived, and only its attribution is missing.
+   *  Only injection paths are eligible, so a fallback that times out in turn is
+   *  never requeued again, and the derived id makes a repeated sweep idempotent
+   *  rather than duplicating the message. */
+  private async requeueTimedOutInjectionUnlocked(id: string, view: SessionView, record: SendRecord): Promise<void> {
+    if (record.path !== 'turn-file' && record.path !== 'direct') return;
+    try {
+      // A terminal session's leftover pane is never typed into; its own
+      // finalization path owns those records (and `revive` re-delivers).
+      if (terminalStatuses.includes(view.state.status)) return;
+      const pane = await this.tmux.state(view.config.tmuxSession);
+      if (!pane.alive || pane.dead) return;
+      const message = record.message.trim();
+      const attachmentBlock = await this.attachments.buildImageReferenceBlock(id, record.attachmentIds);
+      const payload = [message, attachmentBlock].filter(Boolean).join('\n\n');
+      if (!payload) return;
+      // MANY-SENDS-TO-ONE-TURN-FILE, and the reason this asks about BYTES
+      // rather than fate. `deliverToIdlePrompt` writes the turn file BEFORE it
+      // types, and advances `config.turn` only after the keystrokes land — so
+      // an injection that bounced ("harness did not become ready") leaves its
+      // file written, never pointed at, and the turn NOT advanced. The next
+      // send computes the same turn and OVERWRITES that file. Whichever
+      // payload finally survives there is the one the recipient actually read;
+      // every earlier one was destroyed by the daemon itself before anybody
+      // could read it. Measured on msg863r4-456424b3: 48 unaccounted sends
+      // naming 19 distinct turn files, 19 payloads present, 29 present in no
+      // turn file at all.
+      //
+      // So the surviving payload must NOT be resent (that is the collapse case
+      // — arrived, merely unattributable, and a resend would duplicate it),
+      // and the overwritten ones must be. `fate` cannot tell these apart:
+      // one-to-one evidence assignment may well credit the consumption to a
+      // record whose bytes were overwritten. The file itself can.
+      if (record.turn !== undefined) {
+        const landed = await readFile(turnPrompt(this.paths, id, record.turn), 'utf8').catch(() => undefined);
+        if (landed !== undefined && landed.trimEnd() === payload.trimEnd()) return;
+      }
+      const sendId = requeuedSendId(record.sendId);
+      const payloadFile = path.join(view.directory, 'channel', `queued-${sendId}.md`);
+      const accepted = await this.acceptSendUnlocked(id, view, {
+        sendId,
+        path: 'native-file',
+        message: record.message,
+        matchText: `Read the queued message file at ${payloadFile} completely now, then follow every instruction inside it.`,
+        attachmentIds: record.attachmentIds,
+        ...(record.from ? { from: record.from } : {}),
+        ...(record.fromName ? { fromName: record.fromName } : {}),
+        ...(record.replyExpected ? { replyExpected: true } : {}),
+        payloadFile,
+      });
+      if (!accepted.created) return;
+      await this.emit(
+        id,
+        'control.send_requeued',
+        { sendId, replaces: record.sendId, from: record.path, to: 'native-file', reason: 'timeout', payloadFile },
+        'daemon',
+        view.config.turn,
+        true,
+      ).catch(() => undefined);
+      await this.queueNativeSend(
+        id,
+        view,
+        {
+          message: record.message,
+          attachmentIds: record.attachmentIds,
+          ...(record.from ? { from: record.from, ...(record.fromName ? { fromName: record.fromName } : {}) } : {}),
+          ...(record.replyExpected ? { replyExpected: true } : {}),
+        },
+        sendId,
+        message,
+        payload,
+        true,
+      );
+    } catch (error) {
+      // The payload file is written before the keystrokes, so a composer
+      // failure still leaves the message durable and readable — exactly the
+      // property that was missing. Never let the fallback abort the sweep:
+      // one un-requeued record must not strand every other record's fate.
+      await this.emit(
+        id,
+        'control.send_requeue_failed',
+        { sendId: record.sendId, path: record.path, error: String(error) },
+        'daemon',
+        record.turn ?? view.config.turn,
+        true,
+      ).catch(() => undefined);
+    }
   }
 
   private async historicalObservedInputs(view: SessionView): Promise<ObservedHumanInput[]> {

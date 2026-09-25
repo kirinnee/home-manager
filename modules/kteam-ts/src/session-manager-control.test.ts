@@ -2703,6 +2703,202 @@ describe('durable send evidence reconciliation (B4)', () => {
     expect(harness.state().pendingNativeSends).toEqual([]);
   });
 
+  // The kteamd send-loss fallback (measured 2026-08-05: 38 messages accepted,
+  // every one `path=turn-file`, none delivered, senders told "delivered").
+  // evidenceHarness already owns a real on-disk ledger in a temp home; these
+  // add the two collaborators the queue-file route actually touches — the pane
+  // and the attachment store — and RECORD them, so every assertion below is
+  // about bytes that reached disk or keystrokes that reached the composer,
+  // never about the fallback merely having been called.
+  async function injectionHarness(
+    record: SendRecord,
+    options: { pane?: { alive: boolean; dead: boolean }; status?: string; typeThrows?: boolean } = {},
+  ) {
+    const harness = await evidenceHarness([record], options.status ? { status: options.status } : {});
+    const typed: string[] = [];
+    harness.manager.tmux = {
+      state: async () => options.pane ?? { alive: true, dead: false, promptReady: false },
+      typeIntoQueue: async (_session: string, text: string) => {
+        typed.push(text);
+        if (options.typeThrows === true) throw new Error('composer refused the keystrokes');
+      },
+    };
+    harness.manager.attachments = { buildImageReferenceBlock: async () => '' };
+    return { ...harness, typed, channel: (name: string) => path.join(harness.home, 's1', 'channel', name) };
+  }
+
+  function injection(id: string, message: string, overrides: Partial<SendRecord> = {}): SendRecord {
+    return newAcceptedSend({
+      sendId: id,
+      acceptedAt: '2026-07-27T02:00:32.000Z',
+      acceptedTurn: 3,
+      path: 'turn-file',
+      message,
+      matchText: 'Read the file /home/kirin/.kteam/s1/turns/turn-004.md now, then follow every instruction inside it.',
+      turn: 4,
+      attachmentIds: [],
+      ...overrides,
+    });
+  }
+
+  async function sweepAt(harness: { manager: Loose }, at: string): Promise<number> {
+    return await (
+      harness.manager as unknown as {
+        sweepSendFatesUnlocked: (
+          id: string,
+          view: SessionView,
+          context: { at: string; promptReady: boolean; frozen: boolean },
+        ) => Promise<number>;
+      }
+    ).sweepSendFatesUnlocked('s1', await (harness.manager.get as () => Promise<SessionView>)(), {
+      at,
+      promptReady: true,
+      frozen: false,
+    });
+  }
+
+  test('a timed-out turn-file injection falls back to the durable queue-file route', async () => {
+    const harness = await injectionHarness(
+      injection('q1', 'the message that was never read', {
+        from: 'peer-session',
+        fromName: 'norah',
+        replyExpected: true,
+      }),
+    );
+
+    expect(await sweepAt(harness, '2026-07-27T03:00:32.001Z')).toBe(1);
+
+    // The original injection keeps its honest fate; the fallback is a second,
+    // separately-tracked send rather than a rewrite of the first.
+    expect(harness.ledger.get('q1')).toMatchObject({ fate: 'unaccounted', unaccountedReason: 'timeout' });
+
+    const payloadFile = harness.channel('queued-q1-requeued.md');
+    expect(await readFile(payloadFile, 'utf8')).toBe('the message that was never read\n');
+    expect((await stat(payloadFile)).mode & 0o777).toBe(0o600);
+    expect(harness.ledger.get('q1-requeued')).toMatchObject({
+      path: 'native-file',
+      fate: 'accepted',
+      message: 'the message that was never read',
+      payloadFile,
+      // Peer attribution survives the transport change: a message that arrives
+      // unlabelled reads as the human speaking.
+      from: 'peer-session',
+      fromName: 'norah',
+      replyExpected: true,
+    });
+    expect(harness.typed).toEqual([
+      `Read the queued message file at ${payloadFile} completely now, then follow every instruction inside it.`,
+    ]);
+    expect(await readFile(harness.channel('inbox.jsonl'), 'utf8')).toContain('"queueId":"q1-requeued"');
+    expect(harness.state().pendingNativeSends).toEqual([expect.objectContaining({ id: 'q1-requeued', payloadFile })]);
+    expect(harness.events.filter(event => event.type === 'control.send_requeued')).toHaveLength(1);
+    expect(harness.events.filter(event => event.type === 'control.send_requeue_failed')).toHaveLength(0);
+  });
+
+  // MANY-SENDS-TO-ONE-TURN-FILE. When an injection bounces, its turn file is
+  // written but never pointed at and `config.turn` does not advance, so the next
+  // send overwrites the same file. Exactly one payload survives there — that one
+  // ARRIVED and must never be resent; the overwritten ones must be. `fate` is
+  // identical for both, so the guard reads the file.
+  test('a collapsed send whose payload IS the turn file content is not resent', async () => {
+    const harness = await injectionHarness(injection('q1', 'the payload that survived the overwrite'));
+    await writeFile(path.join(harness.home, 's1', 'turns', 'turn-004.md'), 'the payload that survived the overwrite\n');
+
+    expect(await sweepAt(harness, '2026-07-27T03:00:32.001Z')).toBe(1);
+
+    // Still honestly UNACCOUNTED — the daemon could not attribute it — but the
+    // content is demonstrably where the recipient was told to read.
+    expect(harness.ledger.get('q1')).toMatchObject({ fate: 'unaccounted', unaccountedReason: 'timeout' });
+    expect(harness.ledger.get('q1-requeued')).toBeUndefined();
+    expect(harness.typed).toEqual([]);
+    expect(harness.events.filter(event => event.type === 'control.send_requeued')).toHaveLength(0);
+  });
+
+  test('a collapsed send overwritten by a peer IS resent', async () => {
+    const harness = await injectionHarness(injection('q1', 'the payload that was overwritten'));
+    // The same turn file, holding somebody else's message: this record's bytes
+    // are gone and no route ever carried them.
+    await writeFile(path.join(harness.home, 's1', 'turns', 'turn-004.md'), 'a different peer got there last\n');
+
+    expect(await sweepAt(harness, '2026-07-27T03:00:32.001Z')).toBe(1);
+
+    expect(await readFile(harness.channel('queued-q1-requeued.md'), 'utf8')).toBe('the payload that was overwritten\n');
+    expect(harness.events.filter(event => event.type === 'control.send_requeued')).toHaveLength(1);
+  });
+
+  test('an injection still inside its window is untouched: no fallback file, no keystrokes', async () => {
+    const harness = await injectionHarness(injection('q1', 'still within the hour'));
+
+    expect(await sweepAt(harness, '2026-07-27T02:30:00.000Z')).toBe(0);
+
+    expect(harness.ledger.get('q1')?.fate).toBe('accepted');
+    expect(harness.ledger.get('q1-requeued')).toBeUndefined();
+    expect(harness.typed).toEqual([]);
+    expect(await readFile(harness.channel('queued-q1-requeued.md'), 'utf8').catch(() => 'absent')).toBe('absent');
+    expect(harness.events.filter(event => event.type === 'control.send_requeued')).toHaveLength(0);
+  });
+
+  test('a timed-out queue-file send is never requeued again', async () => {
+    const harness = await injectionHarness(
+      accepted('q1', 'already durable', 0, { path: 'native-file', payloadFile: '/tmp/queued-q1.md' }),
+    );
+
+    expect(await sweepAt(harness, '2026-07-27T03:00:32.001Z')).toBe(1);
+
+    expect(harness.ledger.get('q1')).toMatchObject({ fate: 'unaccounted', unaccountedReason: 'timeout' });
+    expect(harness.ledger.get('q1-requeued')).toBeUndefined();
+    expect(harness.typed).toEqual([]);
+  });
+
+  test('a repeated fallback re-accepts the same row instead of sending the message twice', async () => {
+    const harness = await injectionHarness(injection('q1', 'exactly once'));
+    await sweepAt(harness, '2026-07-27T03:00:32.001Z');
+
+    await (
+      harness.manager as unknown as {
+        requeueTimedOutInjectionUnlocked: (id: string, view: SessionView, record: SendRecord) => Promise<void>;
+      }
+    ).requeueTimedOutInjectionUnlocked(
+      's1',
+      await (harness.manager.get as () => Promise<SessionView>)(),
+      harness.ledger.get('q1')!,
+    );
+
+    expect(harness.ledger.all().filter(record => record.sendId === 'q1-requeued')).toHaveLength(1);
+    expect(harness.typed).toHaveLength(1);
+    expect(harness.events.filter(event => event.type === 'control.send_requeued')).toHaveLength(1);
+  });
+
+  test('a fallback whose keystrokes fail still leaves the payload durable and says so', async () => {
+    const harness = await injectionHarness(injection('q1', 'durable even so'), { typeThrows: true });
+
+    // The sweep still settles every fate: one record's failed fallback must not
+    // strand the rest.
+    expect(await sweepAt(harness, '2026-07-27T03:00:32.001Z')).toBe(1);
+
+    expect(await readFile(harness.channel('queued-q1-requeued.md'), 'utf8')).toBe('durable even so\n');
+    expect(harness.events.filter(event => event.type === 'control.send_requeue_failed')).toHaveLength(1);
+  });
+
+  test('a dead pane is never typed into; the injection stays unaccounted for revive', async () => {
+    const harness = await injectionHarness(injection('q1', 'pane is gone'), { pane: { alive: false, dead: true } });
+
+    expect(await sweepAt(harness, '2026-07-27T03:00:32.001Z')).toBe(1);
+
+    expect(harness.ledger.get('q1-requeued')).toBeUndefined();
+    expect(harness.typed).toEqual([]);
+    expect(await readFile(harness.channel('queued-q1-requeued.md'), 'utf8').catch(() => 'absent')).toBe('absent');
+  });
+
+  test('a terminal session keeps its own finalization path: no fallback keystrokes', async () => {
+    const harness = await injectionHarness(injection('q1', 'session already stopped'), { status: 'stopped' });
+
+    expect(await sweepAt(harness, '2026-07-27T03:00:32.001Z')).toBe(1);
+
+    expect(harness.ledger.get('q1-requeued')).toBeUndefined();
+    expect(harness.typed).toEqual([]);
+  });
+
   test('the first post-resume proof persists the freeze shift before evidence matching', async () => {
     const record = accepted('q1', 'quota-delayed input', 0, {
       acceptedAt: '2026-07-27T00:00:00.000Z',
