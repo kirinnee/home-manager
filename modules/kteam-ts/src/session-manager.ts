@@ -920,6 +920,7 @@ export class SessionManager implements KTeamService {
   private readonly monitors = new Map<string, MonitorHandle>();
   private readonly listeners = new Set<(event: KTeamEvent) => void>();
   private readonly queues = new Map<string, Promise<void>>();
+  private doneSignalWrites = new Map<string, Promise<SessionView>>();
   /** Keep model/effort gestures mutually exclusive while allowing the Codex
    * transcript reducer to take `queues` and publish the acknowledgement. */
   private readonly runtimeControlQueues = new Map<string, Promise<void>>();
@@ -4064,120 +4065,144 @@ export class SessionManager implements KTeamService {
           },
           'session.resuming',
         );
-        try {
-          await this.serializedBootstrap(async () => {
+        // Acquire the global bootstrap slot before reacquiring this session lock.
+        // Signals and stop remain responsive while other sessions launch.
+        return async () => {
+          const current = await this.get(id);
+          if (current.state.status !== 'starting' || current.config.turn !== turn)
+            throw new ResumeCancelled('session changed while resume waited for bootstrap');
+          try {
             await this.launchWithRetry(config);
             // The replacement pane demonstrably exists from here on. Refreshing
             // launchedAt gives the monitor the same durable launch evidence the
             // first-start path already records.
             await this.store.updateState<SessionState>(id, current => ({ ...current, launchedAt: now() }));
             if (!bareRelaunch) await this.tmux.send(config, this.promptInstruction(id, turn));
-          });
-          this.autoContinued.delete(id);
-          this.doneDeferred.delete(id);
-          await this.transition(
-            id,
-            {
-              status: 'running',
-              health: 'healthy',
-              reason: undefined,
-              finishedAt: undefined,
-              exitCode: undefined,
-              promptReady: false,
-              lastActivityAt: now(),
-              turnCompleted: false,
-            },
-            'session.resumed',
-            {},
-            // A monitor racing this relaunch may already have written a terminal
-            // status. The relaunch's proven success is the authoritative later
-            // observation and must not be suppressed by terminal preservation.
-            { force: true },
-          );
-          // launchWithRetry has proven that a replacement pane now exists, so
-          // the old unconfirmed picker is no longer capable of receiving input.
-          if (!effectivePolicy?.automatic) await this.clearNeedsHuman(id, { clearCodexPickerQuarantine: true });
-          // A watcher immediately replays persisted transcript bytes through the
-          // same per-session queue. Starting it while this queue is held would
-          // deadlock resume against its own transcript callback.
-          startMonitorAfterUnlock = true;
-        } catch (error) {
-          const firstFailureProbe = await this.tmux.state(config.tmuxSession).catch(
-            () =>
-              ({
-                alive: false,
-                dead: true,
-                promptReady: false,
-                pane: '',
-                visiblePane: '',
-              }) satisfies PaneState,
-          );
-          const exit = await this.confirmHarnessExit(config, firstFailureProbe, 'resume relaunch failure', 'daemon');
-          if (!exit.confirmed) {
-            // Readiness/injection reported an error, but the independent pane or
-            // process probe proves the harness survived. Preserve it, restore a
-            // steerable state, and hand it back to a fresh monitor instead of
-            // killing a healthy prompt-ready successor.
+            this.autoContinued.delete(id);
+            this.doneDeferred.delete(id);
             await this.transition(
               id,
               {
                 status: 'running',
-                health: exit.pane.promptReady ? 'healthy' : 'unknown',
+                health: 'healthy',
                 reason: undefined,
                 finishedAt: undefined,
                 exitCode: undefined,
-                promptReady: exit.pane.promptReady,
+                promptReady: false,
                 lastActivityAt: now(),
+                turnCompleted: false,
               },
-              'session.resume_false_terminal_averted',
-              { subprocessAlive: exit.subprocessAlive },
+              'session.resumed',
+              {},
+              // A monitor racing this relaunch may already have written a terminal
+              // status. The relaunch's proven success is the authoritative later
+              // observation and must not be suppressed by terminal preservation.
               { force: true },
             );
+            // launchWithRetry has proven that a replacement pane now exists, so
+            // the old unconfirmed picker is no longer capable of receiving input.
             if (!effectivePolicy?.automatic) await this.clearNeedsHuman(id, { clearCodexPickerQuarantine: true });
+            // A watcher immediately replays persisted transcript bytes through the
+            // same per-session queue. Starting it while this queue is held would
+            // deadlock resume against its own transcript callback.
             startMonitorAfterUnlock = true;
-            return await this.get(id);
-          }
-          await this.tmux.snapshot(config, true).catch(() => '');
-          await this.stopTmuxWithEvidence(config, 'failed resume cleanup');
-          const attempt = view.state.retryAttempt ?? 0;
-          const failureReason = this.resumeFailureReason(config, error, exit.pane);
-          if (automaticRetry && attempt < (config.retry?.transientAttempts ?? 0)) {
-            const nextAttempt = attempt + 1;
-            await this.transition(
-              id,
-              {
-                status: 'retrying',
-                health: 'crashed',
-                reason: failureReason,
-                retryAttempt: nextAttempt,
-                promptReady: false,
-              },
-              'retry.scheduled',
-              { attempt: nextAttempt, delaySeconds: 2 ** nextAttempt },
+          } catch (error) {
+            const firstFailureProbe = await this.tmux.state(config.tmuxSession).catch(
+              () =>
+                ({
+                  alive: false,
+                  dead: true,
+                  promptReady: false,
+                  pane: '',
+                  visiblePane: '',
+                }) satisfies PaneState,
             );
-            this.scheduleTransientRetry(id, nextAttempt);
-          } else {
-            await this.transition(
-              id,
-              {
-                status: 'failed',
-                health: 'crashed',
-                reason: failureReason,
-                finishedAt: now(),
-                promptReady: false,
-              },
-              'session.failed',
-            );
+            const exit = await this.confirmHarnessExit(config, firstFailureProbe, 'resume relaunch failure', 'daemon');
+            if (!exit.confirmed) {
+              // Readiness/injection reported an error, but the independent pane or
+              // process probe proves the harness survived. Preserve it, restore a
+              // steerable state, and hand it back to a fresh monitor instead of
+              // killing a healthy prompt-ready successor.
+              await this.transition(
+                id,
+                {
+                  status: 'running',
+                  health: exit.pane.promptReady ? 'healthy' : 'unknown',
+                  reason: undefined,
+                  finishedAt: undefined,
+                  exitCode: undefined,
+                  promptReady: exit.pane.promptReady,
+                  lastActivityAt: now(),
+                },
+                'session.resume_false_terminal_averted',
+                { subprocessAlive: exit.subprocessAlive },
+                { force: true },
+              );
+              if (!effectivePolicy?.automatic) await this.clearNeedsHuman(id, { clearCodexPickerQuarantine: true });
+              startMonitorAfterUnlock = true;
+              return await this.get(id);
+            }
+            await this.tmux.snapshot(config, true).catch(() => '');
+            await this.stopTmuxWithEvidence(config, 'failed resume cleanup');
+            const attempt = view.state.retryAttempt ?? 0;
+            const failureReason = this.resumeFailureReason(config, error, exit.pane);
+            if (automaticRetry && attempt < (config.retry?.transientAttempts ?? 0)) {
+              const nextAttempt = attempt + 1;
+              await this.transition(
+                id,
+                {
+                  status: 'retrying',
+                  health: 'crashed',
+                  reason: failureReason,
+                  retryAttempt: nextAttempt,
+                  promptReady: false,
+                },
+                'retry.scheduled',
+                { attempt: nextAttempt, delaySeconds: 2 ** nextAttempt },
+              );
+              this.scheduleTransientRetry(id, nextAttempt);
+            } else {
+              await this.transition(
+                id,
+                {
+                  status: 'failed',
+                  health: 'crashed',
+                  reason: failureReason,
+                  finishedAt: now(),
+                  promptReady: false,
+                },
+                'session.failed',
+              );
+            }
+            throw error;
           }
-          throw error;
-        }
-        return await this.get(id);
+          return await this.get(id);
+        };
       });
+      let result: SessionView;
+      if (typeof resumed === 'function') {
+        for (;;) {
+          const attempt = await this.serializedBootstrap(async () => {
+            // Never own the fleet-wide slot while waiting on another session
+            // operation (e.g. wedged transcript replay). Check and reserve the
+            // session queue without an intervening await; otherwise retry once
+            // that queue settles, OUTSIDE the global slot.
+            const pending = this.queues?.get(id);
+            if (pending) return { pending };
+            return { view: await this.serialized(id, resumed) };
+          });
+          if (attempt.pending) await attempt.pending;
+          else {
+            result = attempt.view!;
+            break;
+          }
+        }
+      } else result = resumed;
       if (startMonitorAfterUnlock) {
         await this.startMonitor(id);
         return await this.get(id);
       }
-      return resumed;
+      return result;
     } finally {
       if (this.launching.get(id)?.bootstrap === resumeLaunch) this.launching.delete(id);
       releaseResumeLaunch();
@@ -4575,45 +4600,121 @@ export class SessionManager implements KTeamService {
     }
   }
 
-  private doneMarkerForTurn(id: string, turn: number | undefined): boolean {
-    const markerTurn = this.doneMarkerTurn(id);
-    return markerTurn !== undefined && markerTurn === turn;
+  private doneMarkerForTurn(id: string, turn: number | undefined, startedAt?: string): boolean {
+    try {
+      const marker = JSON.parse(readFileSync(markerFile(this.paths, id, 'done'), 'utf8')) as {
+        turn?: number;
+        startedAt?: string | null;
+      };
+      return (
+        marker.turn !== undefined &&
+        marker.turn === turn &&
+        (marker.startedAt === undefined || marker.startedAt === (startedAt ?? null))
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** Persist completion evidence before joining the session queue. Transcript
+   * replay or a stuck control operation must not hold the caller hostage. The
+   * queued finisher and the monitor both require this exact turn's marker. */
+  private async acceptDoneSignal(
+    id: string,
+    message: string | undefined,
+    options: SignalOptions,
+  ): Promise<SessionView> {
+    const view = await this.get(id);
+    const turn = view.state.turn ?? view.config.turn;
+    const startedAt = view.state.startedAt;
+    if (
+      view.state.status === 'starting' ||
+      (options.turn !== undefined && (!Number.isSafeInteger(options.turn) || options.turn < 1 || options.turn !== turn))
+    ) {
+      const reason =
+        view.state.status === 'starting' ? 'turn has not started' : 'signal turn does not match current turn';
+      await this.emit(
+        id,
+        'session.done_rejected',
+        { reason, signalTurn: options.turn ?? null, currentTurn: turn },
+        'daemon',
+      );
+      throw new Error(`done rejected: ${reason}`);
+    }
+    if (terminalStatuses.includes(view.state.status)) {
+      if (view.state.status === 'completed' && this.doneMarkerForTurn(id, turn, startedAt)) return view;
+      const reason = `session is ${view.state.status}`;
+      await this.emit(
+        id,
+        'session.done_rejected',
+        { reason, signalTurn: options.turn ?? null, currentTurn: turn },
+        'daemon',
+      );
+      throw new Error(`done rejected: ${reason}`);
+    }
+    this.cancelRetry(id);
+    if (message) await writeFile(path.join(view.directory, 'summary.md'), `${message}\n`, { mode: 0o600 });
+    if (!existsSync(path.join(view.directory, 'summary.md')))
+      await writeFile(path.join(view.directory, 'summary.md'), 'Task completed; inspect chat and repository diff.\n', {
+        mode: 0o600,
+      });
+    // Never re-read the turn to stamp the marker after an await: resume/send
+    // may have advanced it while the summary was being written.
+    await atomicJson(markerFile(this.paths, id, 'done'), {
+      at: now(),
+      type: 'done',
+      turn,
+      startedAt: startedAt ?? null,
+    });
+    void this.serialized(id, async () => {
+      const current = await this.get(id);
+      if (
+        (current.state.turn ?? current.config.turn) !== turn ||
+        current.state.startedAt !== startedAt ||
+        current.state.status === 'starting' ||
+        terminalStatuses.includes(current.state.status) ||
+        !this.doneMarkerForTurn(id, turn, current.state.startedAt)
+      )
+        return;
+      void this.cancelQuotaWaiter(id);
+      await this.tmux.snapshot(current.config, true);
+      await this.stopManagedSession(current.config, 'completion');
+      await this.transition(
+        id,
+        { status: 'completed', health: 'idle', reason: 'done marker written', finishedAt: now(), promptReady: false },
+        'session.completed',
+      );
+    }).catch(error => {
+      // The marker is the durable retry. Even if teardown fails, the monitor
+      // can finish it on its next tick (or recovery after a daemon restart).
+      void this.emit(id, 'session.done_pending', { turn, reason: String(error) }, 'daemon').catch(() => undefined);
+    });
+    return view;
   }
 
   async signal(id: string, kind: SignalKind, message?: string, options: SignalOptions = {}): Promise<SessionView> {
     id = this.resolveRef(id);
+    if (kind === 'done') {
+      // Serialize only the short evidence writes, independently of controls
+      // and replay. An older summary/marker write must not overtake a newer
+      // accepted completion and erase its durable evidence.
+      const writes = (this.doneSignalWrites ??= new Map());
+      const previous = writes.get(id) ?? Promise.resolve();
+      const result = previous.catch(() => undefined).then(() => this.acceptDoneSignal(id, message, options));
+      writes.set(id, result);
+      try {
+        return await result;
+      } finally {
+        if (writes.get(id) === result) writes.delete(id);
+      }
+    }
     this.cancelRetry(id);
     return await this.serialized(id, async () => {
       const view = await this.get(id);
       if (kind === 'waiting' || kind === 'working') {
         return await this.applyWaitingSignal(view, kind, message, options);
       }
-      if (kind === 'done') {
-        void this.cancelQuotaWaiter(id);
-        if (message) await writeFile(path.join(view.directory, 'summary.md'), `${message}\n`, { mode: 0o600 });
-        if (!existsSync(path.join(view.directory, 'summary.md')))
-          await writeFile(
-            path.join(view.directory, 'summary.md'),
-            'Task completed; inspect chat and repository diff.\n',
-            { mode: 0o600 },
-          );
-        // The marker carries the turn it certifies: a marker from an OLDER turn
-        // must never complete a NEWER turn (send bumps the persisted turn at
-        // queue time, so a daemon death in the queue→delivery window would
-        // otherwise let stale evidence complete work that never ran).
-        await atomicJson(markerFile(this.paths, id, 'done'), {
-          at: now(),
-          type: 'done',
-          turn: view.state.turn ?? view.config.turn,
-        });
-        await this.tmux.snapshot(view.config, true);
-        await this.stopManagedSession(view.config, 'completion');
-        await this.transition(
-          id,
-          { status: 'completed', health: 'idle', reason: 'done marker written', finishedAt: now(), promptReady: false },
-          'session.completed',
-        );
-      } else {
+      {
         if (!message) throw new Error('help requires a question');
         await appendFile(
           path.join(view.directory, 'channel', 'outbox.jsonl'),
@@ -5357,7 +5458,9 @@ export class SessionManager implements KTeamService {
         this.scheduleQuotaWaiter(session.config.id);
       } else if (session.state.status === 'retrying' && (session.state.retryAttempt ?? 0) > 0) {
         this.scheduleTransientRetry(session.config.id, session.state.retryAttempt!);
-      } else if (this.doneMarkerForTurn(session.config.id, session.state.turn ?? session.config.turn)) {
+      } else if (
+        this.doneMarkerForTurn(session.config.id, session.state.turn ?? session.config.turn, session.state.startedAt)
+      ) {
         // The teammate signalled done for THIS turn but the pane died before
         // the status flipped (or the daemon restart interleaved). The work
         // FINISHED — marking it failed here would invite the warden to resume
@@ -5777,7 +5880,7 @@ export class SessionManager implements KTeamService {
           }
           const currentTurn = view.state.turn ?? view.config.turn;
           const doneMarkerExists = existsSync(markerFile(this.paths, id, 'done'));
-          const currentDoneMarker = this.doneMarkerForTurn(id, currentTurn);
+          const currentDoneMarker = this.doneMarkerForTurn(id, currentTurn, view.state.startedAt);
           if (doneMarkerExists && !currentDoneMarker) {
             const markerTurn = this.doneMarkerTurn(id);
             const fingerprint = `${markerTurn ?? 'invalid'}:${currentTurn ?? 'unknown'}`;
@@ -5815,21 +5918,37 @@ export class SessionManager implements KTeamService {
                 );
               }
             } else {
-              this.doneDeferred.delete(id);
-              await this.tmux.snapshot(view.config, true);
-              await this.stopTmuxWithEvidence(view.config, 'done marker');
-              await this.transition(
-                id,
-                {
-                  status: 'completed',
-                  health: 'idle',
-                  reason: 'done marker written',
-                  finishedAt: now(),
-                  promptReady: false,
-                },
-                'session.completed',
-              );
-              return;
+              const completed = await this.serialized(id, async () => {
+                const current = await this.get(id);
+                if (
+                  signal.aborted ||
+                  (current.state.turn ?? current.config.turn) !== currentTurn ||
+                  current.state.status === 'starting' ||
+                  !this.doneMarkerForTurn(id, currentTurn, current.state.startedAt)
+                )
+                  return false;
+                if (terminalStatuses.includes(current.state.status)) return true;
+                this.doneDeferred.delete(id);
+                await this.tmux.snapshot(current.config, true);
+                await this.stopTmuxWithEvidence(current.config, 'done marker');
+                await this.transition(
+                  id,
+                  {
+                    status: 'completed',
+                    health: 'idle',
+                    reason: 'done marker written',
+                    finishedAt: now(),
+                    promptReady: false,
+                  },
+                  'session.completed',
+                );
+                return true;
+              });
+              if (completed || signal.aborted) return;
+              // The snapshot predates a turn/launch change. Do not let its
+              // dead-pane or liveness observations classify the successor.
+              await interruptibleSleep(sleepSeconds * 1000, signal);
+              continue;
             }
           }
           if (existsSync(markerFile(this.paths, id, 'needs-help')) && !waitingStatuses.includes(view.state.status)) {
@@ -6110,7 +6229,7 @@ export class SessionManager implements KTeamService {
             } else if (
               view.config.mode === 'auto' &&
               !this.autoContinued.has(id) &&
-              !this.doneMarkerForTurn(id, view.state.turn ?? view.config.turn)
+              !this.doneMarkerForTurn(id, view.state.turn ?? view.config.turn, view.state.startedAt)
             ) {
               this.autoContinued.add(id);
               await this.emit(
@@ -8053,7 +8172,7 @@ export class SessionManager implements KTeamService {
       config: view.config,
       state: view.state,
       hasLiveMonitor: this.monitors.has(view.config.id),
-      hasDoneMarker: this.doneMarkerForTurn(view.config.id, view.state.turn ?? view.config.turn),
+      hasDoneMarker: this.doneMarkerForTurn(view.config.id, view.state.turn ?? view.config.turn, view.state.startedAt),
     }));
     // Detection acts only on `views`, but peer waits must distinguish a typo
     // from a peer that exists in terminal history and can never answer.
@@ -8061,7 +8180,7 @@ export class SessionManager implements KTeamService {
       config: view.config,
       state: view.state,
       hasLiveMonitor: this.monitors.has(view.config.id),
-      hasDoneMarker: this.doneMarkerForTurn(view.config.id, view.state.turn ?? view.config.turn),
+      hasDoneMarker: this.doneMarkerForTurn(view.config.id, view.state.turn ?? view.config.turn, view.state.startedAt),
     }));
     // One knob (`unattendedMinutes`) drives both the idle-question threshold and
     // the recent-terminal-wreckage window — an old failure that nobody handled

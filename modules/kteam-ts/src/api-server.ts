@@ -1157,16 +1157,23 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
               until?: string;
               condition?: string;
               peer?: string;
+              turn?: number;
             }>(request);
             if (!SIGNAL_KINDS.includes(input.kind))
               throw new HttpError(400, `kind must be one of ${SIGNAL_KINDS.join(', ')}`);
-            return await applyOnce(() =>
+            if (input.turn !== undefined && (!Number.isSafeInteger(input.turn) || input.turn < 1))
+              throw new HttpError(400, 'turn must be a positive integer');
+            const response = await applyOnce(() =>
               options.service.signal(id, input.kind, input.message, {
                 until: input.until,
                 condition: input.condition,
                 peer: input.peer,
+                turn: input.turn,
               }),
             );
+            return input.kind === 'done'
+              ? new Response(response.body, { status: 202, headers: response.headers })
+              : response;
           }
           if (action === 'snapshot' && request.method === 'GET') {
             // Default = the monitor's on-disk frame (fast, lock-free). ?live=true

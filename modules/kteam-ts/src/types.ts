@@ -545,6 +545,8 @@ export const SIGNAL_KINDS = ['done', 'help', 'waiting', 'working'] as const;
 export type SignalKind = (typeof SIGNAL_KINDS)[number];
 
 export interface SignalOptions {
+  /** The turn the caller worked on; never stamp an older signal with a new turn. */
+  turn?: number;
   /** Deadline for a declared wait: an ISO timestamp or a duration (`45m`, `2h`). */
   until?: string;
   /** What is being waited for — published in status, events, and heartbeats. */

@@ -456,7 +456,13 @@ export class ApiClient {
     return this.post<SessionView>(id, 'rename', { name, teammate, clearParent });
   }
   signal(id: string, kind: SignalKind, message?: string, options: SignalOptions = {}) {
-    return this.post<SessionView>(id, 'signal', { kind, message, ...options });
+    const knownTurn = process.env.KTEAM_TURN;
+    const turn = options.turn ?? (knownTurn ? Number(knownTurn) : undefined);
+    if (turn !== undefined && (!Number.isSafeInteger(turn) || turn < 1))
+      throw new Error('KTEAM_TURN must be a positive integer');
+    // request() accepts all successful responses, including 202: completion
+    // evidence is durable even when teardown is still queued in the daemon.
+    return this.post<SessionView>(id, 'signal', { kind, message, ...options, turn });
   }
   remove(id: string, purge = false, force = false) {
     return this.request<void>(`/v1/sessions/${encodeURIComponent(id)}?purge=${purge}&force=${force}`, {

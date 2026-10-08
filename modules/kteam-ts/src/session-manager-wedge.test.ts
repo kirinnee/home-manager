@@ -656,3 +656,189 @@ describe('a declined self-restart stays retryable', () => {
     expect(restarts).toBe(1);
   });
 });
+
+describe('completion signals during lock contention', () => {
+  async function signalHarness() {
+    const home = await temporaryHome();
+    const directory = path.join(home, 's1');
+    await mkdir(path.join(directory, 'markers'), { recursive: true });
+    const state = { id: 's1', status: 'running', turn: 1, startedAt: '2026-10-08T00:00:00Z' };
+    const config = { id: 's1', turn: 1 };
+    const events: string[] = [];
+    let kills = 0;
+    const loose = bareManager();
+    Object.assign(loose, {
+      paths: { home, sessions: home },
+      queues: new Map(),
+      deleting: new Set(),
+      resolveRef: (id: string) => id,
+      get: async () => ({ directory, config, state: { ...state } }),
+      cancelRetry: () => {},
+      cancelQuotaWaiter: async () => {},
+      emit: async (_id: string, type: string) => {
+        events.push(type);
+      },
+      tmux: { snapshot: async () => '' },
+      stopManagedSession: async () => {
+        kills++;
+      },
+      transition: async (_id: string, patch: object, type: string) => {
+        Object.assign(state, patch);
+        events.push(type);
+      },
+    });
+    return {
+      manager: loose as unknown as SessionManager,
+      loose,
+      state,
+      config,
+      events,
+      directory,
+      kills: () => kills,
+      locked: <T>(work: () => Promise<T>) =>
+        (loose as unknown as { serialized: (id: string, work: () => Promise<T>) => Promise<T> }).serialized('s1', work),
+    };
+  }
+
+  test('done persists and returns while the lock is held, then completes once it frees', async () => {
+    const h = await signalHarness();
+    let release = () => {};
+    const held = h.locked(
+      () =>
+        new Promise<void>(resolve => {
+          release = resolve;
+        }),
+    );
+    await Promise.resolve();
+    try {
+      const accepted = await Promise.race([
+        h.manager.signal('s1', 'done', 'verified output', { turn: 1 }),
+        Bun.sleep(500).then(() => {
+          throw new Error('signal waited on the session lock');
+        }),
+      ]);
+      expect(accepted.state.status).toBe('running');
+      expect(JSON.parse(await readFile(path.join(h.directory, 'markers/done.json'), 'utf8')).turn).toBe(1);
+      expect(await readFile(path.join(h.directory, 'summary.md'), 'utf8')).toBe('verified output\n');
+      expect(h.kills()).toBe(0);
+    } finally {
+      release();
+      await held;
+    }
+    await h.locked(async () => {});
+    expect(h.state.status).toBe('completed');
+    expect(h.kills()).toBe(1);
+  });
+
+  test('concurrent publications cannot overwrite a newer accepted marker', async () => {
+    const h = await signalHarness();
+    let releaseLock = () => {};
+    const held = h.locked(
+      () =>
+        new Promise<void>(resolve => {
+          releaseLock = resolve;
+        }),
+    );
+    let releaseRead = () => {};
+    const gate = new Promise<void>(resolve => {
+      releaseRead = resolve;
+    });
+    let reading = () => {};
+    const readStarted = new Promise<void>(resolve => {
+      reading = resolve;
+    });
+    const get = h.loose.get as () => Promise<object>;
+    let first = true;
+    h.loose.get = async () => {
+      const snapshot = await get();
+      if (first) {
+        first = false;
+        reading();
+        await gate;
+      }
+      return snapshot;
+    };
+    const older = h.manager.signal('s1', 'done', 'old', { turn: 1 });
+    await readStarted;
+    h.state.turn = 2;
+    h.config.turn = 2;
+    const newer = h.manager.signal('s1', 'done', 'new', { turn: 2 });
+    releaseRead();
+    await Promise.all([older, newer]);
+    expect(JSON.parse(await readFile(path.join(h.directory, 'markers/done.json'), 'utf8')).turn).toBe(2);
+    expect(await readFile(path.join(h.directory, 'summary.md'), 'utf8')).toBe('new\n');
+    releaseLock();
+    await held;
+    await h.locked(async () => {});
+    expect(h.kills()).toBe(1);
+  });
+
+  test('a queued completion cannot complete a newer resumed turn', async () => {
+    const h = await signalHarness();
+    let release = () => {};
+    const held = h.locked(
+      () =>
+        new Promise<void>(resolve => {
+          release = resolve;
+        }),
+    );
+    await Promise.resolve();
+    await h.manager.signal('s1', 'done', undefined, { turn: 1 });
+    h.state.turn = 2;
+    h.config.turn = 2;
+    release();
+    await held;
+    await h.locked(async () => {});
+    expect(h.state.status).toBe('running');
+    expect(h.kills()).toBe(0);
+    await expect(h.manager.signal('s1', 'done', undefined, { turn: 1 })).rejects.toThrow('turn does not match');
+    expect(h.events).toContain('session.done_rejected');
+  });
+
+  test('a same-turn relaunch invalidates an already accepted completion', async () => {
+    const h = await signalHarness();
+    let release = () => {};
+    const held = h.locked(
+      () =>
+        new Promise<void>(resolve => {
+          release = resolve;
+        }),
+    );
+    await Promise.resolve();
+    await h.manager.signal('s1', 'done', undefined, { turn: 1 });
+    h.state.startedAt = '2026-10-08T00:01:00Z';
+    release();
+    await held;
+    await h.locked(async () => {});
+    expect(h.state.status).toBe('running');
+    expect(h.kills()).toBe(0);
+    const matches = (
+      h.loose as unknown as {
+        doneMarkerForTurn: (id: string, turn: number, startedAt?: string) => boolean;
+      }
+    ).doneMarkerForTurn('s1', 1, h.state.startedAt);
+    expect(matches).toBe(false);
+  });
+
+  test('terminal signals reject, except an already-completed matching marker', async () => {
+    const h = await signalHarness();
+    for (const status of ['stopped', 'failed', 'completed']) {
+      h.state.status = status;
+      await expect(h.manager.signal('s1', 'done', undefined, { turn: 1 })).rejects.toThrow('session is ' + status);
+    }
+    h.state.status = 'running';
+    await h.manager.signal('s1', 'done', undefined, { turn: 1 });
+    await h.locked(async () => {});
+    await h.manager.signal('s1', 'done', undefined, { turn: 1 });
+    expect(h.kills()).toBe(1);
+  });
+
+  test('starting rejects done before writing a marker or summary', async () => {
+    const h = await signalHarness();
+    h.state.status = 'starting';
+    await expect(h.manager.signal('s1', 'done', 'stale summary', { turn: 1 })).rejects.toThrow('turn has not started');
+    await expect(readFile(path.join(h.directory, 'markers/done.json'))).rejects.toThrow();
+    await expect(readFile(path.join(h.directory, 'summary.md'))).rejects.toThrow();
+    expect(h.events).toEqual(['session.done_rejected']);
+  });
+});

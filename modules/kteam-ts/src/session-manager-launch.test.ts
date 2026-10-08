@@ -314,6 +314,46 @@ describe('done markers are turn-scoped in the live monitor', () => {
     expect(harness.recorded.map(item => item.type)).not.toContain('session.completed');
   });
 
+  test('a monitor observation cannot kill a turn advanced before it gets the lock', async () => {
+    const h = await monitorHarness({ status: 'running', launchInFlight: true, turn: 4, subprocessAlive: true });
+    const home = (h.manager.paths as { home: string }).home;
+    await mkdir(path.join(home, 's1', 'markers'), { recursive: true });
+    await writeFile(path.join(home, 's1', 'markers', 'done.json'), JSON.stringify({ turn: 4 }));
+    let kills = 0;
+    h.manager.stopTmuxWithEvidence = async () => {
+      kills++;
+    };
+    let observed = () => {};
+    const observation = new Promise<void>(resolve => {
+      observed = resolve;
+    });
+    let release = () => {};
+    const gate = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    (h.manager.tmux as Record<string, unknown>).state = async () => {
+      observed();
+      return { alive: false, dead: true, promptReady: false, pane: '', visiblePane: '' };
+    };
+    const held = (
+      h.manager as unknown as { serialized: (id: string, fn: () => Promise<void>) => Promise<void> }
+    ).serialized('s1', async () => {
+      await gate;
+      h.state.turn = 5;
+    });
+    const abort = new AbortController();
+    const loop = runMonitor(h.manager, abort.signal);
+    await observation;
+    release();
+    await held;
+    await Bun.sleep(20);
+    abort.abort();
+    await loop;
+    expect(kills).toBe(0);
+    expect(h.recorded.map(item => item.type)).not.toContain('session.completed');
+    expect(h.state.status).toBe('running');
+  });
+
   test('a marker for the current turn still completes the session', async () => {
     const harness = await monitorHarness({
       status: 'running',
@@ -806,5 +846,153 @@ describe('control actions queue behind a launch instead of hard-refusing', () =>
     const manager = bareManager();
     manager.launching = new Map();
     expect(await awaitLaunchSettled(manager, 5_000)).toBe(true);
+  });
+});
+
+describe('resume waiting for the global bootstrap slot', () => {
+  async function pendingResume() {
+    const home = await temporaryHome();
+    const directory = path.join(home, 's1');
+    await mkdir(path.join(directory, 'turns'), { recursive: true });
+    await mkdir(path.join(directory, 'markers'), { recursive: true });
+    let config: Record<string, unknown> = { id: 's1', turn: 1, mode: 'auto', harness: 'claude', tmuxSession: 's1' };
+    let state: Record<string, unknown> = { id: 's1', turn: 1, status: 'completed' };
+    let release = () => {};
+    const bootstrapChain = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    let prepared = () => {};
+    const ready = new Promise<void>(resolve => {
+      prepared = resolve;
+    });
+    let launches = 0;
+    let monitors = 0;
+    let kills = 0;
+    const loose = bareManager();
+    Object.assign(loose, {
+      paths: { home, sessions: home },
+      launching: new Map(),
+      queues: new Map(),
+      deleting: new Set(),
+      autoContinued: new Set(),
+      doneDeferred: new Set(),
+      bootstrapChain,
+      resolveRef: (id: string) => id,
+      cancelRetry: () => {},
+      clearNeedsHuman: async () => {},
+      get: async () => ({ directory, config, state }),
+      stopMonitor: async () => {},
+      startMonitor: async () => {
+        monitors++;
+      },
+      launchWithRetry: async () => {
+        launches++;
+      },
+      tmux: {
+        state: async () => ({ alive: false, dead: true }),
+        send: async () => {},
+        snapshot: async () => '',
+      },
+      stopManagedSession: async () => {
+        kills++;
+      },
+      emit: async () => {},
+      transition: async (_id: string, patch: object, type: string) => {
+        state = { ...state, ...patch };
+        if (type === 'session.resuming') prepared();
+      },
+      store: {
+        updateConfig: async (_id: string, fn: (v: typeof config) => typeof config) => (config = fn(config)),
+        updateState: async (_id: string, fn: (v: typeof state) => typeof state) => (state = fn(state)),
+      },
+    });
+    const manager = loose as unknown as SessionManager;
+    const resumed = manager.resume('s1', 'continue');
+    // Attach immediately: the cancellation test deliberately rejects this work.
+    void resumed.catch(() => {});
+    await ready;
+    return {
+      manager,
+      loose,
+      release,
+      resumed,
+      launches: () => launches,
+      monitors: () => monitors,
+      kills: () => kills,
+      locked: (fn: () => Promise<void>) =>
+        (loose as unknown as { serialized: (id: string, fn: () => Promise<void>) => Promise<void> }).serialized(
+          's1',
+          fn,
+        ),
+      stop: () => {
+        state = { ...state, status: 'stopped' };
+      },
+    };
+  }
+
+  test('releases the session lock while queued and rejects a previous-turn done', async () => {
+    const h = await pendingResume();
+    try {
+      await Promise.race([
+        h.locked(async () => {}),
+        Bun.sleep(500).then(() => {
+          throw new Error('resume retained the session lock');
+        }),
+      ]);
+      expect(h.launches()).toBe(0);
+      await expect(h.manager.signal('s1', 'done', undefined, { turn: 1 })).rejects.toThrow('turn has not started');
+    } finally {
+      h.release();
+    }
+    expect((await h.resumed).state.status).toBe('running');
+    expect(h.launches()).toBe(1);
+    expect(h.monitors()).toBe(1);
+    expect(h.kills()).toBe(0);
+    await expect(h.manager.signal('s1', 'done', undefined, { turn: 1 })).rejects.toThrow('turn does not match');
+    expect((await h.manager.get('s1')).state.status).toBe('running');
+  });
+
+  test('a blocked session queue cannot occupy the global bootstrap slot', async () => {
+    const h = await pendingResume();
+    let releaseLock = () => {};
+    const held = h.locked(
+      () =>
+        new Promise<void>(resolve => {
+          releaseLock = resolve;
+        }),
+    );
+    await Promise.resolve();
+    h.release();
+    await Bun.sleep(0);
+    // Queue an unrelated launch behind this resume on the REAL global chain.
+    const other = (
+      h.loose as unknown as { serializedBootstrap: (fn: () => Promise<string>) => Promise<string> }
+    ).serializedBootstrap(async () => 'other session launched');
+    try {
+      expect(
+        await Promise.race([
+          other,
+          Bun.sleep(500).then(() => {
+            throw new Error('resume wedged the global bootstrap slot');
+          }),
+        ]),
+      ).toBe('other session launched');
+      expect(h.launches()).toBe(0);
+    } finally {
+      releaseLock();
+      await held;
+    }
+    expect((await h.resumed).state.status).toBe('running');
+    expect(h.launches()).toBe(1);
+  });
+
+  test('a stop while bootstrap is queued prevents the later relaunch', async () => {
+    const h = await pendingResume();
+    await h.locked(async () => h.stop());
+    h.release();
+    await expect(h.resumed).rejects.toThrow('session changed while resume waited for bootstrap');
+    expect(h.launches()).toBe(0);
+    expect(h.monitors()).toBe(0);
+    expect((await h.manager.get('s1')).state.status).toBe('stopped');
   });
 });

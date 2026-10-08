@@ -3,6 +3,8 @@ import type { Server } from 'bun';
 import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { ApiClient } from './api-client';
+import type { SignalKind, SignalOptions } from './types';
 import { RecentRequestIds, startApiServer } from './api-server';
 import { currentActor } from './actor-context';
 import type { AttachmentView, KTeamService, SessionView, WardenAttentionView } from './service';
@@ -100,7 +102,7 @@ class FakeService implements KTeamService {
   };
   rename = async (_id: string, _name?: string, _teammate?: string, _clearParent?: boolean) => view;
   remove = async () => {};
-  signal = async () => view;
+  signal = async (_id: string, _kind: SignalKind, _message?: string, _options?: SignalOptions) => view;
   wardenMayStop = (_wardenId: string, _targetId: string) => false;
   snapshot = async () => 'pane';
   chatHistory = async () => ({ total: 0, offset: 0, records: [] });
@@ -2205,7 +2207,7 @@ describe('warden-scoped token authorization', () => {
       headers: scoped,
       body: JSON.stringify({ kind: 'done' }),
     });
-    expect(allowed.status).toBe(200);
+    expect(allowed.status).toBe(202);
   });
 });
 
@@ -2748,5 +2750,55 @@ describe('the human browser login window, mounted (#B31)', () => {
     });
     expect(response.status).toBe(404);
     expect(await response.json()).toMatchObject({ code: 'unknown_route', path: LOGIN });
+  });
+});
+
+describe('asynchronous completion acceptance', () => {
+  test('returns 202 for done, forwards its turn, and rejects invalid turns', async () => {
+    const service = new FakeService();
+    const turns: Array<number | undefined> = [];
+    service.signal = async (_id, _kind, _message, options) => {
+      turns.push(options?.turn);
+      if (options?.turn === 9) throw new Error('done rejected: signal turn does not match current turn');
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const post = (kind: string, turn: unknown) =>
+      fetch(server.url + 'v1/sessions/s1/signal', {
+        method: 'POST',
+        headers: { authorization: 'Bearer secret', 'content-type': 'application/json' },
+        body: JSON.stringify({ kind, turn }),
+      });
+    expect((await post('done', 1)).status).toBe(202);
+    expect((await post('working', 1)).status).toBe(200);
+    expect((await post('done', 9)).status).toBe(409);
+    for (const invalid of [0, -1, 1.5, '1', null]) expect((await post('done', invalid)).status).toBe(400);
+    expect(turns).toEqual([1, 1, 9]);
+  });
+
+  test('client sends KTEAM_TURN and accepts a 202 session view', async () => {
+    const previous = process.env.KTEAM_TURN;
+    const service = new FakeService();
+    const turns: Array<number | undefined> = [];
+    service.signal = async (_id, _kind, _message, options) => {
+      turns.push(options?.turn);
+      return view;
+    };
+    const server = startApiServer({ host: '127.0.0.1', port: 0, token: 'secret', service });
+    servers.push(server);
+    const client = new (ApiClient as unknown as new (url: string, token: string) => ApiClient)(
+      server.url.toString().replace(/\/$/, ''),
+      'secret',
+    );
+    try {
+      process.env.KTEAM_TURN = '3';
+      expect((await client.signal('s1', 'done')).config.id).toBe('s1');
+      await client.signal('s1', 'done', undefined, { turn: 4 });
+      expect(turns).toEqual([3, 4]);
+    } finally {
+      if (previous === undefined) delete process.env.KTEAM_TURN;
+      else process.env.KTEAM_TURN = previous;
+    }
   });
 });
