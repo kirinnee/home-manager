@@ -41,6 +41,7 @@ import type { KTeamEvent, SessionStatus, SignalKind } from './types';
 import { compactUsageQuota, fetchKfleetUsage, UsageFeed, usageQuotaLabel } from './usage';
 import { KTEAM_VERSION } from './version';
 import { waitForDaemonReady } from './daemon-wait';
+import { getWithRetry, WAIT_DAEMON_UNREACHABLE_EXIT } from './wait-retry';
 import { resolveKillTimeout, TIMEOUT_KILL_HELP, KILL_AFTER_SECONDS_HELP } from './start-timeout';
 import { isTaskError } from './tasks';
 import { parsePinCli, pinCliRequest, renderPinCli } from './pins-cli';
@@ -1272,7 +1273,10 @@ program
   .command('wait')
   .argument('<id>')
   .option('--json')
-  .option('--timeout <seconds>', 'give up after this many seconds (exit code 124, prints the current state)')
+  .option(
+    '--timeout <seconds>',
+    'give up after this many seconds (exit code 124, prints the current state); exit 3 = daemon unreachable for 120s, outcome unknown',
+  )
   .option(
     '--until-marker <file>',
     'only return once this file exists (deliverable gate) — `completed` alone is not trusted; non-completed terminal states exit 1',
@@ -1289,7 +1293,27 @@ program
     let notedMissingMarker = false;
     let notedDeclaredWait = false;
     while (true) {
-      const view = await api.get(id);
+      // A daemon blip (restart, re-adopt) must neither end the wait nor read as
+      // a finished session: retry for a bounded window, then exit 3.
+      const got = await getWithRetry(
+        () => api.get(id),
+        {
+          sleep: ms => Bun.sleep(ms),
+          now: Date.now,
+          onUnreachable: message =>
+            console.error(`kteam wait: daemon unreachable, retrying for up to 120s (${message})`),
+        },
+        deadline === undefined ? {} : { deadline },
+      );
+      if (got.kind === 'timed_out') {
+        console.error(`kteam wait: timed out after ${timeoutSec}s (daemon unreachable, session state unknown)`);
+        process.exit(124);
+      }
+      if (got.kind === 'unreachable') {
+        console.error(`kteam wait: outcome unknown, daemon unreachable (${got.error})`);
+        process.exit(WAIT_DAEMON_UNREACHABLE_EXIT);
+      }
+      const view = got.value;
       const print = () => {
         // Single-line by design: consumers (kloop) parse this from a pipe —
         // pretty-printed multi-line JSON broke line-oriented readers.

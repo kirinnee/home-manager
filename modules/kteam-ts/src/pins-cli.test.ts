@@ -5,6 +5,17 @@ import { PinError, type PinSnapshot, type Pin } from './pins-types';
 const SID = 'ms3g6a8p-71542ce1';
 
 describe('parsePinCli', () => {
+  test('help and verb-like first words are refused with usage, never pinned', () => {
+    for (const argv of [['help'], ['-h'], ['--help'], ['delete', 'x'], ['edit', 'p1'], ['ls', '--help']]) {
+      expect(() => parsePinCli(argv)).toThrow(PinError);
+    }
+    expect(() => parsePinCli(['help'])).toThrow('kteam pin <command>');
+    expect(() => parsePinCli(['delete', 'x'])).toThrow('unknown pin command "delete"');
+  });
+  test('add still pins a reserved word literally', () => {
+    expect(parsePinCli(['add', 'help'])).toEqual({ command: 'add', text: 'help' });
+    expect(parsePinCli(['help me remember'])).toEqual({ command: 'add', text: 'help me remember' });
+  });
   test('bare text is an add', () => {
     expect(parsePinCli(['PR is https://x/pull/1'])).toEqual({ command: 'add', text: 'PR is https://x/pull/1' });
   });

@@ -25,6 +25,8 @@ export const PIN_CLI_USAGE = `kteam pin <command>
   pin add "<text>"         same, explicit
   pin ls                   list this session's pins
   pin rm <pinId>           remove a pin by id
+  pin help                 show this (a verb-like first word such as delete or
+                           edit is refused, never pinned; pin add "<text>" pins it)
 
   [--session <id>]         target another session (the human's own board;
                            an agent may only pin to its own session)
@@ -41,6 +43,11 @@ const invalid = (message: string): never => {
   throw new PinError('invalid', `${message}\n\n${PIN_CLI_USAGE}`);
 };
 
+// A first word that reads like a verb is a typo or a probe (`pin help`,
+// `pin delete x`), never a note: pinning it would mutate the board silently.
+// `pin add "help"` still pins the literal word.
+const RESERVED_HEADS = new Set(['help', '-h', 'show', 'get', 'set', 'delete', 'del', 'clear', 'update', 'edit']);
+
 /** Parse `kteam pin …` argv (WITHOUT the leading `pin`). Throws
  *  PinError('invalid') whose message carries the usage block. */
 export function parsePinCli(argv: readonly string[]): PinCliCommand {
@@ -48,6 +55,10 @@ export function parsePinCli(argv: readonly string[]): PinCliCommand {
   const session = flags.get('session')?.at(-1);
   const target = session && session.trim().length > 0 ? session.trim() : undefined;
   const head = positional[0];
+  if (flags.has('help') || (head !== undefined && RESERVED_HEADS.has(head))) {
+    const asksHelp = flags.has('help') || head === 'help' || head === '-h';
+    return invalid(asksHelp ? 'usage:' : `unknown pin command "${head}" — to pin that text use: pin add "${head} …"`);
+  }
   if (head === 'ls' || head === 'list') return { command: 'ls', ...(target ? { session: target } : {}) };
   if (head === 'rm' || head === 'remove') {
     const id = positional[1];
