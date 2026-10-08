@@ -359,7 +359,9 @@ rec {
     done
   '';
 
-  home.activation.kfleet-apply = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+  # After load-secrets: apply skips secrets-file agents (loge1..6) whose token is
+  # absent from the freshly projected ~/.secrets, so the fleet follows upstream.
+  home.activation.kfleet-apply = lib.hm.dag.entryAfter [ "writeBoundary" "load-secrets" ] ''
     ${modules.kfleet}/bin/kfleet apply
   '';
 

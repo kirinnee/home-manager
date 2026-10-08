@@ -12,7 +12,7 @@ import { existsSync, readdirSync } from 'fs';
 import { stat } from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { inferHarness, modelHint } from './core';
+import { FABLE_ACCOUNTS, FABLE_PROXY_MODEL_ID, inferHarness, modelHint } from './core';
 import type { Harness, RuntimeModelOption } from './types';
 
 export interface WrapperInfo {
@@ -39,13 +39,13 @@ const ANTHROPIC_RUNTIME_MODELS: RuntimeModelOption[] = [
   { value: 'haiku', label: 'Haiku 5.5' },
 ];
 
-// Direct Anthropic OAuth just like the other first-party accounts. The human
-// explicitly restored Fable on loge1..6; these wrappers use native aliases,
-// unlike the bare pooled proxy below (which remains a separate real-ID branch).
-const LOGE_DIRECT_RUNTIME_MODELS = ANTHROPIC_RUNTIME_MODELS;
+// Fable is offered only on FABLE_ACCOUNTS (2026-10-08). The other direct
+// first-party accounts (kirin, atomi, loge1..6) keep native aliases minus Fable:
+// loge1..6 demand usage credits for it in the interactive TUI.
+const ANTHROPIC_NO_FABLE_RUNTIME_MODELS = ANTHROPIC_RUNTIME_MODELS.filter(model => model.value !== 'fable');
 
 const LOGE_RUNTIME_MODELS: RuntimeModelOption[] = [
-  { value: 'claude-fable-5-1[1m]', label: 'Fable 5.1 · 1M' },
+  { value: FABLE_PROXY_MODEL_ID, label: 'Fable 5.1 · 1M' },
   { value: 'claude-opus-5-5[1m]', label: 'Opus 5.5 · 1M' },
   { value: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
   { value: 'claude-haiku-5-5', label: 'Haiku 5.5' },
@@ -69,7 +69,9 @@ export function runtimeModelsForWrapper(binary: string): RuntimeModelOption[] {
   const name = path.basename(binary);
   let models: RuntimeModelOption[] | undefined;
   if (/^claude-auto-(kirin|liftoff|atomi|loge[1-6])$/.test(name)) {
-    models = /^claude-auto-loge[1-6]$/.test(name) ? LOGE_DIRECT_RUNTIME_MODELS : ANTHROPIC_RUNTIME_MODELS;
+    models = (FABLE_ACCOUNTS as readonly string[]).includes(name)
+      ? ANTHROPIC_RUNTIME_MODELS
+      : ANTHROPIC_NO_FABLE_RUNTIME_MODELS;
   } else if (name === 'claude-auto-loge') models = LOGE_RUNTIME_MODELS;
   else if (/^claude-auto-glm52[ab]$/.test(name)) models = GLM_RUNTIME_MODELS;
   else if (name === 'claude-auto-mm3') models = [{ value: 'MiniMax-M3', label: 'MiniMax M3' }];

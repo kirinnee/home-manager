@@ -218,6 +218,14 @@ export const LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT = 100 - LOGE_WEEKLY_REMAININ
  *  even for work the doctrine would otherwise send to Fable. */
 export const FABLE_MAX_WEEKLY_UTILIZATION_PERCENT = 50;
 
+/** The only Claude wrappers that offer Fable (2026-10-08): liftoff (native
+ *  `fable` alias, no usage-credit dialog) and the loge CLIProxyAPI lane (real
+ *  id, API billing). Direct loge1..6 hit the usage-credits dialog; kirin is the
+ *  human's daily driver and atomi is logged out. */
+export const FABLE_ACCOUNTS = ['claude-auto-liftoff', 'claude-auto-loge'] as const;
+/** The loge proxy has no aliases, so Fable is requested by its real 1M id. */
+export const FABLE_PROXY_MODEL_ID = 'claude-fable-5-1[1m]';
+
 export const PRODUCT_FACING_MODEL_GUARD = {
   rule: 'Never route product-facing work to MiniMax M3 or DeepSeek V4.',
   models: ['MiniMax M3', 'DeepSeek V4'],
@@ -256,6 +264,8 @@ export const ACCOUNT_SELECTION_POLICY = {
     `Fable is NOT applicable once an account is above ${FABLE_MAX_WEEKLY_UTILIZATION_PERCENT}% weekly utilization — ` +
       'it is the most expensive model in the fleet, so past that point choose a cheaper model even for work this ' +
       'doctrine would otherwise send to Fable.',
+    `Fable is offered ONLY on ${FABLE_ACCOUNTS.join(' and ')} (the loge proxy by its real id ` +
+      `${FABLE_PROXY_MODEL_ID}); direct loge1..6 need usage credits for it, so they are Opus/Sonnet/Haiku only.`,
     'Fable is also NOT applicable on an account marked "Fable unavailable": its interactive TUI demanded ' +
       'usage-credit consent, which kteam refuses to answer — pick Fable on another account or the next model.',
     'Unknown quota is unknown: do not invent utilization or silently treat it as zero.',
@@ -289,7 +299,8 @@ export interface RecommendationAccountState {
    *  in the fleet, so it is off the table above
    *  FABLE_MAX_WEEKLY_UTILIZATION_PERCENT weekly utilization. null means unknown
    *  weekly quota, so the caller must not assume either way. false also when the
-   *  account's interactive TUI demanded usage-credit consent for Fable. */
+   *  account does not offer Fable (FABLE_ACCOUNTS) or its interactive TUI
+   *  demanded usage-credit consent for Fable. */
   fableEligible: boolean | null;
   /** Why Fable is unavailable on this account regardless of quota (usage-credit
    *  consent seen by kteam), or null. */
@@ -435,11 +446,13 @@ export function recommendDecisionGuide(
       overageResetAt,
       logePreferenceEligible:
         pool !== 'loge' || logePoolPercent === null ? null : logePoolPercent < LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
-      fableEligible: feed?.fableUnavailable
-        ? false
-        : weeklyPercent === null
-          ? null
-          : weeklyPercent <= FABLE_MAX_WEEKLY_UTILIZATION_PERCENT,
+      // Accounts that do not offer Fable at all (see FABLE_ACCOUNTS) are never eligible.
+      fableEligible:
+        feed?.fableUnavailable || !offersFable(binary)
+          ? false
+          : weeklyPercent === null
+            ? null
+            : weeklyPercent <= FABLE_MAX_WEEKLY_UTILIZATION_PERCENT,
       fableUnavailableReason: feed?.fableUnavailable ?? null,
       probeError: usageProbed ? (feed?.error ?? null) : null,
     };
@@ -806,36 +819,30 @@ const ACCOUNTS: AccountSpec[] = [
   },
   {
     // The kloge proxy serves the whole Anthropic lineup by REAL id, not alias.
+    // Its KTEAM_MODEL default is Opus 5.5; Fable bills as API usage here and is
+    // served (verified 2026-10-08), so it is reachable by its real 1M id.
     match: /^claude-auto-loge$/,
     loge: true,
     options: [
-      { model: 'fable51' },
-      { model: 'opus55', flag: 'claude-opus-5-5' },
+      { model: 'opus55' },
+      { model: 'fable51', flag: FABLE_PROXY_MODEL_ID },
       { model: 'sonnet55', flag: 'claude-sonnet-5-5' },
     ],
   },
   {
     // Direct first-party Anthropic OAuth accounts: native aliases work here.
-    // Fable is restored on the six direct accounts only; the pooled proxy above
-    // remains governed separately by its real-ID configuration.
+    // No Fable: since 2026-10-08 their interactive TUI demands usage credits
+    // for it, and the human chose not to offer it (FABLE_ACCOUNTS below).
     match: /^claude-auto-loge[1-6]$/,
-    options: [
-      { model: 'opus55' },
-      { model: 'fable51', flag: 'fable' },
-      { model: 'sonnet55', flag: 'sonnet' },
-      { model: 'haiku', flag: 'haiku' },
-    ],
+    options: [{ model: 'opus55' }, { model: 'sonnet55', flag: 'sonnet' }, { model: 'haiku', flag: 'haiku' }],
   },
   {
+    // Logged out as of 2026-10-08; kept routable for when it is restored.
     match: /^claude-auto-atomi$/,
-    options: [
-      { model: 'opus55' },
-      { model: 'fable51', flag: 'fable' },
-      { model: 'sonnet55', flag: 'sonnet' },
-      { model: 'haiku', flag: 'haiku' },
-    ],
+    options: [{ model: 'opus55' }, { model: 'sonnet55', flag: 'sonnet' }, { model: 'haiku', flag: 'haiku' }],
   },
   {
+    // The one direct account where interactive Fable works without a dialog.
     match: /^claude-auto-liftoff$/,
     options: [
       { model: 'opus55' },
@@ -863,6 +870,9 @@ function accountFor(binary: string): AccountSpec | undefined {
   const base = path.basename(binary);
   return ACCOUNTS.find(entry => entry.match.test(base));
 }
+
+const offersFable = (binary: string): boolean =>
+  accountFor(binary)?.options.some(option => option.model === 'fable51') ?? false;
 
 // --- classification --------------------------------------------------------
 

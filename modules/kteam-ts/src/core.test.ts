@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  FABLE_ACCOUNTS,
   ACCOUNT_SELECTION_POLICY,
   HARD_ACCOUNT_EXCLUSIONS,
   LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
@@ -388,8 +389,8 @@ describe('recommendDecisionGuide: teaches the decision without making it', () =>
     expect(guide.accountSelection.fableMaxWeeklyUtilizationPercent).toBe(50);
     expect(byBinary.get('claude-auto-loge1')).toMatchObject({ logePreferenceEligible: true, fableEligible: false });
     expect(byBinary.get('claude-auto-loge2')).toMatchObject({ fableEligible: false });
-    // Unknown weekly quota stays unknown — never assume Fable is affordable.
-    expect(byBinary.get('claude-auto-atomi')).toMatchObject({ fableEligible: null });
+    // atomi does not offer Fable at all, whatever its quota.
+    expect(byBinary.get('claude-auto-atomi')).toMatchObject({ fableEligible: false });
     expect(byBinary.get('claude-auto-atomi')).toMatchObject({
       pool: 'own-fallback',
       usable: 'unknown',
@@ -672,14 +673,14 @@ describe('recommendTeam: account rules', () => {
     expect(team.exclusions.find(item => item.binary === 'claude-auto-loge')?.reason).toContain('monthly spend limit');
   });
 
-  test('direct loge accounts offer Fable through Anthropic aliases without inheriting proxy semantics', () => {
+  test('direct loge accounts use Anthropic aliases, offer no Fable, and do not inherit proxy semantics', () => {
     for (let n = 1; n <= 6; n += 1) {
       const binary = `claude-auto-loge${n}`;
       const team = recommendTeam('Research how the API pagination works', [binary], { roles: ['researcher'] });
       const options = everyone(team);
       expect(team.exclusions).toEqual([]);
       expect(options.every(option => option.binary === binary)).toBe(true);
-      expect(options.find(option => option.model === 'fable51')?.modelFlag).toBe('fable');
+      expect(options.some(option => option.model === 'fable51')).toBe(false);
       expect(options.find(option => option.model === 'opus55')?.modelFlag).toBeUndefined();
       expect(options.find(option => option.model === 'sonnet55')?.modelFlag).toBe('sonnet');
       expect(options.every(option => !option.command.includes('claude-opus-5-5'))).toBe(true);
@@ -693,8 +694,27 @@ describe('recommendTeam: account rules', () => {
     const proxy = recommendTeam('Research how the API pagination works', ['claude-auto-loge'], {
       roles: ['researcher'],
     });
-    expect(everyone(proxy).find(option => option.model === 'opus55')?.modelFlag).toBe('claude-opus-5-5');
-    expect(everyone(proxy).some(option => option.model === 'fable51')).toBe(true);
+    // Opus 5.5 is the proxy wrapper's KTEAM_MODEL default (no flag needed).
+    expect(everyone(proxy).find(option => option.model === 'opus55')?.modelFlag).toBeUndefined();
+  });
+
+  test('Fable is offered only on claude-auto-liftoff (alias) and the loge proxy (real id)', () => {
+    expect(FABLE_ACCOUNTS).toEqual(['claude-auto-liftoff', 'claude-auto-loge']);
+    const task = 'Plan a mission-critical, hard, risky architecture migration across the large codebase';
+    const fableOn = (binary: string) =>
+      everyone(recommendTeam(task, [binary], { roles: ['planner'] })).find(option => option.model === 'fable51');
+    expect(fableOn('claude-auto-liftoff')?.modelFlag).toBe('fable');
+    const proxy = fableOn('claude-auto-loge');
+    expect(proxy?.modelFlag).toBe('claude-fable-5-1[1m]');
+    expect(proxy?.command).toContain('--model claude-fable-5-1[1m]');
+    for (const binary of ['claude-auto-atomi', 'claude-auto-loge1', 'claude-auto-loge6']) {
+      expect(fableOn(binary)).toBeUndefined();
+    }
+    const guide = recommendDecisionGuide(task, ['claude-auto-liftoff', 'claude-auto-loge2'], { usageProbed: false });
+    const byBinary = new Map(guide.accounts.map(account => [account.binary, account]));
+    expect(byBinary.get('claude-auto-liftoff')?.fableEligible).toBeNull(); // unknown quota stays unknown
+    expect(byBinary.get('claude-auto-loge2')?.fableEligible).toBe(false);
+    expect(guide.accountSelection.rules.some(rule => rule.includes('Fable is offered ONLY on'))).toBe(true);
   });
 
   test('loge-first: same tier, the loge account wins', () => {
@@ -861,26 +881,26 @@ describe('Fable usage-credit consent marks (model-availability.ts → AgentUsage
   const reason = 'Fable needs usage credits on this account (interactive Claude Code asks to buy usage credits)';
 
   test('the decision guide takes Fable off a marked account even with --no-usage', () => {
-    const guide = recommendDecisionGuide('Plan the migration', ['claude-auto-loge3', 'claude-auto-loge1'], {
+    const guide = recommendDecisionGuide('Plan the migration', ['claude-auto-liftoff', 'claude-auto-loge'], {
       usageProbed: false,
-      usage: [{ binary: 'claude-auto-loge3', fableUnavailable: reason }],
+      usage: [{ binary: 'claude-auto-liftoff', fableUnavailable: reason }],
     });
     const byBinary = new Map(guide.accounts.map(account => [account.binary, account]));
-    expect(byBinary.get('claude-auto-loge3')).toMatchObject({ fableEligible: false, fableUnavailableReason: reason });
-    expect(byBinary.get('claude-auto-loge1')).toMatchObject({ fableEligible: null, fableUnavailableReason: null });
-    expect(renderRecommendationDecisionGuide(guide)).toContain(`claude-auto-loge3 [loge]`);
+    expect(byBinary.get('claude-auto-liftoff')).toMatchObject({ fableEligible: false, fableUnavailableReason: reason });
+    expect(byBinary.get('claude-auto-loge')).toMatchObject({ fableEligible: null, fableUnavailableReason: null });
+    expect(renderRecommendationDecisionGuide(guide)).toContain(`claude-auto-liftoff [own-fallback]`);
     expect(renderRecommendationDecisionGuide(guide)).toContain(`Fable unavailable: ${reason}`);
   });
 
   test('recommendTeam never offers Fable on a marked account but keeps its other models', () => {
     const task = 'Plan a mission-critical, hard, risky architecture migration across the large codebase';
-    const team = recommendTeam(task, ['claude-auto-loge3'], {
-      usage: [{ binary: 'claude-auto-loge3', fableUnavailable: reason }],
+    const team = recommendTeam(task, ['claude-auto-liftoff'], {
+      usage: [{ binary: 'claude-auto-liftoff', fableUnavailable: reason }],
     });
-    const options = everyone(team).filter(option => option.binary === 'claude-auto-loge3');
+    const options = everyone(team).filter(option => option.binary === 'claude-auto-liftoff');
     expect(options.length).toBeGreaterThan(0);
     expect(options.some(option => option.model === 'fable51')).toBe(false);
-    const unmarked = everyone(recommendTeam(task, ['claude-auto-loge3']));
+    const unmarked = everyone(recommendTeam(task, ['claude-auto-liftoff']));
     expect(unmarked.some(option => option.model === 'fable51')).toBe(true);
   });
 });

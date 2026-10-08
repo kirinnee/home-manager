@@ -1,6 +1,7 @@
 // Low-level credential access shared by usage probing (core/usage.ts) and
-// fleet login/sync (core/login.ts).
+// fleet login/sync (core/login.ts), and the apply-time secrets-file check.
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 
 /** First 8 hex of sha256(absolute config-dir path) — the suffix Claude Code uses
  *  for its keychain item name `Claude Code-credentials-<suffix>`. */
@@ -59,5 +60,36 @@ export function jwtExpMs(token: string | undefined): number | undefined {
     return typeof json.exp === 'number' ? json.exp * 1000 : undefined;
   } catch {
     return undefined;
+  }
+}
+
+const READ_SECRETS_FILE_KEYS = `
+set -a
+. "$1" >/dev/null 2>&1 || exit 1
+shift
+exec "$1" -e 'const out = {}; for (const k of process.argv.slice(1)) if (process.env[k]) out[k] = true; process.stdout.write(JSON.stringify(out))' "$@"
+`;
+
+/** Which of `keys` hold a non-empty value in the generated `~/.secrets` shell
+ *  file. Only the FILE counts (not the caller's ambient env): it is what
+ *  load-secrets just projected from upstream, so a key a stale shell still
+ *  exports is still treated as gone. Values never leave the child process.
+ *  A missing file means no keys; null means the file could not be read, so the
+ *  caller must not conclude anything is absent. */
+export function secretsFileKeysPresent(keys: string[], file: string): Set<string> | null {
+  if (!keys.length || !existsSync(file)) return new Set();
+  const child = Bun.spawnSync({
+    cmd: ['/bin/sh', '-c', READ_SECRETS_FILE_KEYS, 'kfleet-read-secrets', file, process.execPath, ...keys],
+    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: process.env.HOME ?? '' },
+    stdin: 'ignore',
+    stdout: 'pipe',
+    stderr: 'ignore',
+    timeout: 5_000,
+  });
+  if (!child.success) return null;
+  try {
+    return new Set(Object.keys(JSON.parse(child.stdout.toString()) as Record<string, true>));
+  } catch {
+    return null;
   }
 }

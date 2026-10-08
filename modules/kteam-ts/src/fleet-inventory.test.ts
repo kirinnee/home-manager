@@ -46,12 +46,17 @@ test('listWrappers marks harness + auto/interactive and sorts launchable-first',
 });
 
 test('runtime model choices are account-aware and never leak Anthropic ids to provider wrappers', () => {
-  expect(runtimeModelsForWrapper('claude-auto-atomi').map(model => model.value)).toEqual([
+  // Fable only where it works without a usage-credits dialog (2026-10-08):
+  // liftoff by alias, the loge proxy by real id. kirin/atomi/loge1..6 drop it.
+  expect(runtimeModelsForWrapper('claude-auto-liftoff').map(model => model.value)).toEqual([
     'fable',
     'opus',
     'sonnet',
     'haiku',
   ]);
+  for (const name of ['claude-auto-atomi', 'claude-auto-kirin']) {
+    expect(runtimeModelsForWrapper(name).map(model => model.value)).toEqual(['opus', 'sonnet', 'haiku']);
+  }
   expect(runtimeModelsForWrapper('/fleet/bin/claude-auto-glm52a').map(model => model.value)).toEqual([
     'glm-5.3',
     'glm-5-turbo',
@@ -63,11 +68,11 @@ test('runtime model choices are account-aware and never leak Anthropic ids to pr
     'deepseek-v4-pro',
   ]);
 
-  const directLogeAliases = ['fable', 'opus', 'sonnet', 'haiku'];
+  const directLogeAliases = ['opus', 'sonnet', 'haiku'];
   for (let n = 1; n <= 6; n += 1) {
     const choices = runtimeModelsForWrapper(`/fleet/bin/claude-auto-loge${n}`).map(model => model.value);
     expect(choices).toEqual(directLogeAliases);
-    expect(choices).toContain('fable');
+    expect(choices).not.toContain('fable');
   }
   // The bare proxy remains a separate real-ID account; widening its branch
   // would send unsupported aliases through raw CLIProxyAPI.

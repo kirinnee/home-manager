@@ -451,3 +451,49 @@ export function prune(agents: ResolvedAgent[], commands: CommandDef[] = []): str
   }
   return removed;
 }
+
+/** An agent left out of this apply because its declared token is absent upstream. */
+export interface SkippedAgent {
+  /** Base agent name (one entry per agent, however many variants it has). */
+  agent: string;
+  key: string;
+  /** Every wrapper the agent's variants would have produced. */
+  wrappers: string[];
+}
+
+/** Upstream-following accounts: an agent whose `secrets-file` credential key is
+ *  absent/empty gets no wrappers, so the fleet tracks however many tokens
+ *  upstream currently hands out. `present` null = the secrets file could not be
+ *  read; then nothing is skipped rather than wiping wrappers on a parse error. */
+export function partitionByCredential(
+  agents: ResolvedAgent[],
+  present: Set<string> | null,
+): { agents: ResolvedAgent[]; skipped: SkippedAgent[] } {
+  if (!present) return { agents, skipped: [] };
+  const kept: ResolvedAgent[] = [];
+  const skipped = new Map<string, SkippedAgent>();
+  for (const a of agents) {
+    const key = a.credential?.source === 'secrets-file' ? a.credential.key : undefined;
+    if (!key || present.has(key)) {
+      kept.push(a);
+      continue;
+    }
+    const base = a.base ?? a.name;
+    const entry = skipped.get(base) ?? { agent: base, key, wrappers: [] };
+    entry.wrappers.push(wrapperName(a));
+    skipped.set(base, entry);
+  }
+  return { agents: kept, skipped: [...skipped.values()] };
+}
+
+/** Remove the named wrappers if kfleet generated them. Returns removed names. */
+export function removeManagedWrappers(names: string[]): string[] {
+  const wanted = new Set(names);
+  const removed: string[] = [];
+  for (const f of listManagedWrappers()) {
+    if (!wanted.has(f)) continue;
+    rmSync(path.join(binDir, f), { force: true });
+    removed.push(f);
+  }
+  return removed;
+}

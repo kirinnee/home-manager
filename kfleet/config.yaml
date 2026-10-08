@@ -70,6 +70,8 @@ profiles:
       # rather than left pointing at capacity that cannot serve. The default
       # model falls back to Opus 5. Re-add ANTHROPIC_DEFAULT_FABLE_MODEL when the
       # pool's weekly limits recover (see kloge quota headers for reset times).
+      # 2026-10-08: Fable is served again here by REAL id (`--model claude-fable-5-1[1m]`,
+      # API billing; verified served claude-fable-5-1) — kteam offers it that way.
       # 2026-09-24: opus -> Opus 5.5 by real id; the kloge image must carry it in
       # models.overlay.json (see modules/kloge-ts/cliproxy-fork) — rebuild + `kloge up`.
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
@@ -196,8 +198,14 @@ agents:
       ANTHROPIC_DEFAULT_OPUS_MODEL: deepseek-flash
       ANTHROPIC_DEFAULT_SONNET_MODEL: deepseek-flash
   # Direct external-token agents for the former kloge Claude pool. The shared
-  # claude profile supplies KTEAM_MODEL=opus; each agent maps both Opus and
-  # Fable to its 1M-context model. The pooled proxy's Fable mapping stays disabled.
+  # claude profile supplies KTEAM_MODEL=opus; each agent maps Opus/Sonnet to its
+  # 1M-context model. Upstream-following: `kfleet apply` only generates wrappers
+  # for the logeN whose LOGE_CLAUDE_N_TOKEN is in ~/.secrets (load-secrets projects
+  # whatever `kloge pull` fetched), so keep all six here — more tokens upstream =
+  # more accounts. 2026-10-08: no ANTHROPIC_DEFAULT_FABLE_MODEL — Fable needs usage
+  # credits on these direct accounts (interactive dialog) and the human chose
+  # "don't offer it"; Fable lives on claude-auto-liftoff and the claude-auto-loge
+  # proxy (claude-fable-5-1[1m]).
   - name: loge1
     kind: claude
     profiles: [claude]
@@ -206,7 +214,6 @@ agents:
       key: LOGE_CLAUDE_1_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_1_TOKEN
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
       ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5-5[1m]
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-5-5
@@ -218,7 +225,6 @@ agents:
       key: LOGE_CLAUDE_2_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_2_TOKEN
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
       ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5-5[1m]
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-5-5
@@ -230,7 +236,6 @@ agents:
       key: LOGE_CLAUDE_3_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_3_TOKEN
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
       ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5-5[1m]
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-5-5
@@ -242,7 +247,6 @@ agents:
       key: LOGE_CLAUDE_4_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_4_TOKEN
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
       ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5-5[1m]
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-5-5
@@ -254,7 +258,6 @@ agents:
       key: LOGE_CLAUDE_5_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_5_TOKEN
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
       ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5-5[1m]
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-5-5
@@ -266,7 +269,6 @@ agents:
       key: LOGE_CLAUDE_6_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_6_TOKEN
-      ANTHROPIC_DEFAULT_FABLE_MODEL: claude-fable-5-1[1m]
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
       ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5-5[1m]
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-5-5
