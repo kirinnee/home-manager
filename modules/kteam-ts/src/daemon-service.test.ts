@@ -125,6 +125,46 @@ describe('macOS launchd service', () => {
 
     expect(calls.some(argv => argv[0] === 'launchctl' && argv[1] === 'bootstrap')).toBe(true);
   });
+
+  test('retries bootstrap while launchd is still tearing down the old job', async () => {
+    const home = await temporaryHome();
+    let bootstraps = 0;
+    const runner = async (argv: string[]) => {
+      if (argv[1] !== 'bootstrap') return { code: 0, stdout: '', stderr: '' };
+      bootstraps += 1;
+      return bootstraps < 3
+        ? { code: 5, stdout: '', stderr: 'Bootstrap failed: 5: Input/output error' }
+        : { code: 0, stdout: '', stderr: '' };
+    };
+    const service = new DaemonService(createPaths(path.join(home, '.kteam')), '/usr/local/bin/kteamd', {
+      platform: 'darwin',
+      home,
+      runner,
+      sleep: async () => {},
+    });
+
+    await service.install();
+    expect(bootstraps).toBe(3);
+  });
+
+  test('does not retry a bootstrap failure other than the teardown race', async () => {
+    const home = await temporaryHome();
+    let bootstraps = 0;
+    const runner = async (argv: string[]) => {
+      if (argv[1] !== 'bootstrap') return { code: 0, stdout: '', stderr: '' };
+      bootstraps += 1;
+      return { code: 1, stdout: '', stderr: 'Bootstrap failed: 1: Operation not permitted' };
+    };
+    const service = new DaemonService(createPaths(path.join(home, '.kteam')), '/usr/local/bin/kteamd', {
+      platform: 'darwin',
+      home,
+      runner,
+      sleep: async () => {},
+    });
+
+    await expect(service.install()).rejects.toThrow('Operation not permitted');
+    expect(bootstraps).toBe(1);
+  });
 });
 
 describe('supervises(pid) — the gate on self-restart', () => {

@@ -14,6 +14,8 @@ export interface DaemonServiceOptions {
   platform?: NodeJS.Platform;
   home?: string;
   runner?: Runner;
+  /** Injectable delay for the launchd bootstrap retry (tests pass a no-op). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** `StandardOutput=` / `StandardError=` take a FILE SPECIFIER, not a quotable
@@ -61,6 +63,7 @@ export class DaemonService {
   private readonly platform: NodeJS.Platform;
   private readonly home: string;
   private readonly runner: Runner;
+  private readonly sleep: (ms: number) => Promise<void>;
   /** True when the caller pinned a home (a test) instead of using the real one. */
   private readonly pinnedHome: boolean;
 
@@ -90,6 +93,7 @@ export class DaemonService {
     this.pinnedHome = options.home !== undefined;
     this.home = options.home ?? os.homedir();
     this.runner = options.runner ?? run;
+    this.sleep = options.sleep ?? (ms => Bun.sleep(ms));
   }
 
   private plist(): string {
@@ -166,9 +170,27 @@ WantedBy=default.target
 </dict></plist>\n`;
     await writeFile(this.plist(), xml, { mode: 0o600 });
     await this.runner(['launchctl', 'bootout', this.domain()]);
-    const domain = this.domain().replace(`/${LABEL}`, '');
-    const result = await this.runner(['launchctl', 'bootstrap', domain, this.plist()]);
+    const result = await this.launchdBootstrap();
     if (result.code !== 0) throw new Error(result.stderr.trim() || 'launchctl bootstrap failed');
+  }
+
+  /** `launchctl bootout` returns before launchd has finished tearing the job
+   *  down, so an immediate `bootstrap` fails with "Bootstrap failed: 5:
+   *  Input/output error" (2026-10-08: `kteam daemon install` left kteamd down;
+   *  `restart` = bootout + 500ms + bootstrap hits the same race). Retry while
+   *  launchd reports that transient error. */
+  private async launchdBootstrap(): Promise<Awaited<ReturnType<Runner>>> {
+    const domain = this.domain().replace(`/${LABEL}`, '');
+    let result = await this.runner(['launchctl', 'bootstrap', domain, this.plist()]);
+    for (
+      let attempt = 1;
+      attempt < 10 && result.code !== 0 && /\b5: Input\/output error/.test(result.stderr);
+      attempt++
+    ) {
+      await this.sleep(500);
+      result = await this.runner(['launchctl', 'bootstrap', domain, this.plist()]);
+    }
+    return result;
   }
 
   async uninstall(): Promise<void> {
@@ -193,7 +215,7 @@ WantedBy=default.target
       const result =
         loaded.code === 0
           ? await this.runner(['launchctl', 'kickstart', '-k', this.domain()])
-          : await this.runner(['launchctl', 'bootstrap', this.domain().replace(`/${LABEL}`, ''), this.plist()]);
+          : await this.launchdBootstrap();
       if (result.code !== 0) throw new Error(result.stderr.trim() || 'could not start launchd service');
       return;
     }
