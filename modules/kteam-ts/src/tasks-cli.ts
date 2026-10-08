@@ -69,7 +69,8 @@ export const TASK_CLI_USAGE = `kteam task <command>
   order  <id> <n|--none>
 
   [--session <id>]       target a session explicitly; otherwise use
-                         KTEAM_SESSION_ID (an agent may only write its own)
+                         KTEAM_SESSION_ID (an agent may only write its own;
+                         'file' may claim on another session's task)
   list --all             fleet-wide aggregate READ
 
 Every status/phase/reopen action REQUIRES --reason; creating blocked or dropped does too.

@@ -583,8 +583,13 @@ export class TaskService {
       );
       scope = await this.resolveScope(sessionId, actor, boardAction, { assignedSessionId });
     }
+    // Legacy scope: an advisory file claim may come from any authenticated
+    // session (a teammate claiming the file its lead granted it). The caller is
+    // stamped as the actor; removing a claim stays limited to claimant/owner.
     const provenance =
-      scope.kind === 'board' ? provenanceFromBoard(scope.authorization) : await this.authorize(sessionId, actor);
+      scope.kind === 'board'
+        ? provenanceFromBoard(scope.authorization)
+        : await this.authorize(sessionId, actor, { allowForeignSession: input.action === 'file' });
     const outcome = await this.graphQueue.run('__task_graph__', async () => {
       const allTasks = await this.graphTasks();
       let satisfactionChanged = false;
@@ -761,6 +766,17 @@ export class TaskService {
             const exists = next.files.includes(path);
             if (remove && !exists) throw new TaskError('invalid', `${current.task.id} does not claim ${path}`);
             if (!remove && exists) throw new TaskError('invalid', `${current.task.id} already claims ${path}`);
+            if (remove && provenance.session !== null && provenance.session !== sessionId) {
+              const claimant = [...current.activity]
+                .reverse()
+                .find(item => item.type === 'file' && item.data.path === path && item.data.operation === 'add')?.actor;
+              if (claimant !== provenance.session) {
+                throw new TaskError(
+                  'forbidden',
+                  `only the claimant or the owning session may remove the claim on ${path} from ${current.task.id}`,
+                );
+              }
+            }
             if (!remove && next.files.length >= MAX_TASK_FILES) {
               throw new TaskError(
                 'too-long',
@@ -1156,10 +1172,14 @@ export class TaskService {
     }
   }
 
-  private async authorize(sessionId: string, actor: TaskActor): Promise<Provenance> {
+  private async authorize(
+    sessionId: string,
+    actor: TaskActor,
+    options: { allowForeignSession?: boolean } = {},
+  ): Promise<Provenance> {
     this.assertSessionId(sessionId);
     const provenance = provenanceOf(actor);
-    if (provenance.session !== null && provenance.session !== sessionId) {
+    if (provenance.session !== null && provenance.session !== sessionId && options.allowForeignSession !== true) {
       throw new TaskError('forbidden', 'an agent may only change tasks in its own session');
     }
     const views = await this.deps.list().catch(() => [] as TaskAssigneeView[]);

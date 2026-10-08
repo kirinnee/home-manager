@@ -1027,6 +1027,59 @@ describe('session ownership, provenance, and live convergence', () => {
     expect((await service.sessionTaskList('ms-other')).tasks).toEqual([]);
   });
 
+  test('a teammate may claim a file on another session task, stamped as itself, but not move it', async () => {
+    fleet.push(session({ id: 'ms-mate', teammate: 'fredricka' }));
+    await created({ files: ['src/lead.ts'] });
+    const mate = { actor: 'ms-mate', actorName: 'fredricka' };
+    const claimed = await service.sessionTaskAct('ms-lead', 'F1', { action: 'file', path: 'src/row.tsx' }, mate);
+    expect(claimed.files).toEqual(['src/lead.ts', 'src/row.tsx']);
+    const entry = (await service.taskDetail('F1'))?.activity.find(item => item.type === 'file');
+    expect(entry).toMatchObject({ actor: 'ms-mate', actorName: 'fredricka', data: { path: 'src/row.tsx' } });
+
+    await expect(
+      service.sessionTaskAct('ms-lead', 'F1', { action: 'status', status: 'in_progress', reason: 'go' }, mate),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(
+      service.sessionTaskAct('ms-lead', 'F1', { action: 'phase', phase: 'build', reason: 'go' }, mate),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(
+      service.sessionTaskAct('ms-lead', 'F1', { action: 'note', text: 'forged note' }, mate),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    expect((await service.taskDetail('F1'))?.task.status).toBe('todo');
+  });
+
+  test('a foreign file claim is removable only by its claimant or the owning session', async () => {
+    fleet.push(session({ id: 'ms-mate', teammate: 'fredricka' }), session({ id: 'ms-third', teammate: 'otto' }));
+    await created({ files: ['src/lead.ts'] });
+    const mate = { actor: 'ms-mate', actorName: 'fredricka' };
+    const third = { actor: 'ms-third', actorName: 'otto' };
+    await service.sessionTaskAct('ms-lead', 'F1', { action: 'file', path: 'src/a.ts' }, mate);
+    await service.sessionTaskAct('ms-lead', 'F1', { action: 'file', path: 'src/b.ts' }, mate);
+
+    // Neither a third session nor the claimant may drop a claim it did not file.
+    await expect(
+      service.sessionTaskAct('ms-lead', 'F1', { action: 'file', path: 'src/a.ts', remove: true }, third),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(
+      service.sessionTaskAct('ms-lead', 'F1', { action: 'file', path: 'src/lead.ts', remove: true }, mate),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+
+    const byClaimant = await service.sessionTaskAct(
+      'ms-lead',
+      'F1',
+      { action: 'file', path: 'src/a.ts', remove: true },
+      mate,
+    );
+    expect(byClaimant.files).toEqual(['src/lead.ts', 'src/b.ts']);
+    const byOwner = await service.sessionTaskAct(
+      'ms-lead',
+      'F1',
+      { action: 'file', path: 'src/b.ts', remove: true },
+      { actor: 'ms-lead', actorName: 'zelda' },
+    );
+    expect(byOwner.files).toEqual(['src/lead.ts']);
+  });
+
   test('human provenance is derived server-side and does not accept body actor fields', async () => {
     const task = await service.sessionTaskCreate(
       'ms-lead',
