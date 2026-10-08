@@ -1672,8 +1672,12 @@ export class TmuxController {
       if (stable >= 2) return;
       await Bun.sleep(750);
     }
+    // Carry the whole last visible frame: readiness misreads (1M-context status
+    // lines, the /rc banner) have only ever been reported as a cursor position,
+    // which is not enough to build a promptReady fixture from.
+    const frame = lastState?.visiblePane.trimEnd();
     const diagnostic = lastState
-      ? `; last frame: promptReady=${lastState.promptReady}, cursor=${lastState.cursorX ?? '?'}:${lastState.cursorY ?? '?'}`
+      ? `; last frame: promptReady=${lastState.promptReady}, cursor=${lastState.cursorX ?? '?'}:${lastState.cursorY ?? '?'}${frame ? `\n--- last visible frame ---\n${frame}` : ''}`
       : '';
     throw new Error(`interactive harness did not become ready within ${Math.round(timeoutMs / 1000)}s${diagnostic}`);
   }
@@ -2321,8 +2325,10 @@ export class TmuxController {
     if (panePid !== undefined) {
       try {
         const records = await this.processTable();
+        // A root pid already absent from the process table is proof the
+        // harness died (e.g. it exited before a daemon restart or resume), not
+        // ambiguity: keep only the pane pid tracked and let teardown succeed.
         if (records.some(record => record.pid === panePid)) trackedPids = this.processTreePids(panePid, records);
-        else captureProblem = `pane pid ${panePid} was absent from the process table before tmux teardown`;
       } catch (error) {
         captureProblem = `process tree capture failed before tmux teardown: ${String(error)}`;
       }

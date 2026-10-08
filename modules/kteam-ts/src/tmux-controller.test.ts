@@ -676,7 +676,10 @@ describe('stop() confirms the harness process tree is gone', () => {
     readonly signals: Array<{ pid: number; signal: 'SIGTERM' | 'SIGKILL' }> = [];
     private tmuxAlive = true;
 
-    constructor(private readonly tables: ProcessRecord[][]) {
+    constructor(
+      private readonly tables: Array<ProcessRecord[] | Error>,
+      private readonly pid: number | null = 4_100,
+    ) {
       super(createPaths('/tmp/kteam-stop-test'), 'http://127.0.0.1:7337');
     }
 
@@ -685,11 +688,13 @@ describe('stop() confirms the harness process tree is gone', () => {
     }
 
     protected async panePid(): Promise<number | undefined> {
-      return 4_100;
+      return this.pid ?? undefined;
     }
 
     protected async processTable(): Promise<ProcessRecord[]> {
-      return this.tables.shift() ?? [];
+      const table = this.tables.shift() ?? [];
+      if (table instanceof Error) throw table;
+      return table;
     }
 
     protected async killSession(): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -729,6 +734,66 @@ describe('stop() confirms the harness process tree is gone', () => {
   test('a process tree surviving SIGKILL fails loudly with the surviving pids', async () => {
     const controller = new StopHarness([tree, tree, tree, tree]);
     await expect(controller.stop('kteam-a4-ghost-test-agent')).rejects.toThrow(/survived SIGKILL.*4100.*4101/);
+  });
+
+  test('a pane pid already absent from the process table counts as confirmed dead', async () => {
+    // Restart recovery / resume over a harness that exited on its own: the
+    // missing root pid is proof of death, not a reason to report kill_failed.
+    const controller = new StopHarness([[{ pid: 9_999, ppid: 1 }], []]);
+    await controller.stop('kteam-w1a-already-dead-test-agent');
+    expect(controller.signals).toEqual([]);
+  });
+
+  test('a process-table capture failure still refuses to confirm death', async () => {
+    const controller = new StopHarness([new Error('ps exploded'), []]);
+    await expect(controller.stop('kteam-w1a-capture-fail-test-agent')).rejects.toThrow(
+      /death could not be confirmed: process tree capture failed.*ps exploded/,
+    );
+  });
+
+  test('an unknown pane pid still refuses to confirm death', async () => {
+    const controller = new StopHarness([], null);
+    await expect(controller.stop('kteam-w1a-no-pid-test-agent')).rejects.toThrow(
+      /death could not be confirmed: pane pid was unavailable/,
+    );
+  });
+});
+
+describe('waitReady() timeout diagnostics', () => {
+  class NeverReady extends TmuxController {
+    constructor(private readonly frame: string) {
+      super(createPaths('/tmp/kteam-ready-timeout-test'), 'http://127.0.0.1:7337');
+    }
+    override async state() {
+      return {
+        alive: true,
+        dead: false,
+        promptReady: false,
+        pane: this.frame,
+        visiblePane: this.frame,
+        cursorX: 2,
+        cursorY: 43,
+      };
+    }
+  }
+
+  test('the timeout error carries the full last visible frame for a fixture', async () => {
+    // Shape of the unreproduced 735k-token relaunch (cursor=2:43) and the /rc
+    // banner misread: the frame itself is what the next report needs.
+    const frame = [
+      '╭───────────────────────────────────────╮',
+      '│ ✻ Remote Control active · /rc to stop │',
+      '╰───────────────────────────────────────╯',
+      '> ',
+      '  Opus 5.5 · 74% (735k/1M) · ? for shortcuts',
+      '',
+      '',
+    ].join('\n');
+    const error = (await new NeverReady(frame).waitReady('kteam-w1a-never-ready-agent', 600).catch(e => e)) as Error;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain('did not become ready within 1s; last frame: promptReady=false, cursor=2:43');
+    expect(error.message).toContain(`--- last visible frame ---\n${frame.trimEnd()}`);
+    expect(error.message.endsWith('? for shortcuts')).toBe(true);
   });
 });
 
