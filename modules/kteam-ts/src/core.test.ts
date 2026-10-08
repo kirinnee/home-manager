@@ -856,3 +856,31 @@ describe('psStatusLabel', () => {
     );
   });
 });
+
+describe('Fable usage-credit consent marks (model-availability.ts → AgentUsage.fableUnavailable)', () => {
+  const reason = 'Fable needs usage credits on this account (interactive Claude Code asks to buy usage credits)';
+
+  test('the decision guide takes Fable off a marked account even with --no-usage', () => {
+    const guide = recommendDecisionGuide('Plan the migration', ['claude-auto-loge3', 'claude-auto-loge1'], {
+      usageProbed: false,
+      usage: [{ binary: 'claude-auto-loge3', fableUnavailable: reason }],
+    });
+    const byBinary = new Map(guide.accounts.map(account => [account.binary, account]));
+    expect(byBinary.get('claude-auto-loge3')).toMatchObject({ fableEligible: false, fableUnavailableReason: reason });
+    expect(byBinary.get('claude-auto-loge1')).toMatchObject({ fableEligible: null, fableUnavailableReason: null });
+    expect(renderRecommendationDecisionGuide(guide)).toContain(`claude-auto-loge3 [loge]`);
+    expect(renderRecommendationDecisionGuide(guide)).toContain(`Fable unavailable: ${reason}`);
+  });
+
+  test('recommendTeam never offers Fable on a marked account but keeps its other models', () => {
+    const task = 'Plan a mission-critical, hard, risky architecture migration across the large codebase';
+    const team = recommendTeam(task, ['claude-auto-loge3'], {
+      usage: [{ binary: 'claude-auto-loge3', fableUnavailable: reason }],
+    });
+    const options = everyone(team).filter(option => option.binary === 'claude-auto-loge3');
+    expect(options.length).toBeGreaterThan(0);
+    expect(options.some(option => option.model === 'fable51')).toBe(false);
+    const unmarked = everyone(recommendTeam(task, ['claude-auto-loge3']));
+    expect(unmarked.some(option => option.model === 'fable51')).toBe(true);
+  });
+});

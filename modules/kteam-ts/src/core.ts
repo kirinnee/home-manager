@@ -108,6 +108,10 @@ export interface AgentUsage {
   weeklyPercent?: number | null;
   fiveHourResetAt?: number | null;
   weeklyResetAt?: number | null;
+  /** Set (to the reason) when kteam saw this account's interactive TUI demand
+   *  usage-credit consent for Fable (model-availability.ts). Not from kfleet:
+   *  `claude -p` serves Fable on such accounts, so only the TUI reveals it. */
+  fableUnavailable?: string;
 }
 
 /** How "spent" an account is: the tighter of its 5h and weekly windows. */
@@ -241,6 +245,8 @@ export const ACCOUNT_SELECTION_POLICY = {
     `Fable is NOT applicable once an account is above ${FABLE_MAX_WEEKLY_UTILIZATION_PERCENT}% weekly utilization — ` +
       'it is the most expensive model in the fleet, so past that point choose a cheaper model even for work this ' +
       'doctrine would otherwise send to Fable.',
+    'Fable is also NOT applicable on an account marked "Fable unavailable": its interactive TUI demanded ' +
+      'usage-credit consent, which kteam refuses to answer — pick Fable on another account or the next model.',
     'Unknown quota is unknown: do not invent utilization or silently treat it as zero.',
   ],
 } as const;
@@ -267,8 +273,12 @@ export interface RecommendationAccountState {
   /** Whether Fable may be selected on this account at all: it is the priciest model
    *  in the fleet, so it is off the table above
    *  FABLE_MAX_WEEKLY_UTILIZATION_PERCENT weekly utilization. null means unknown
-   *  weekly quota, so the caller must not assume either way. */
+   *  weekly quota, so the caller must not assume either way. false also when the
+   *  account's interactive TUI demanded usage-credit consent for Fable. */
   fableEligible: boolean | null;
+  /** Why Fable is unavailable on this account regardless of quota (usage-credit
+   *  consent seen by kteam), or null. */
+  fableUnavailableReason: string | null;
   probeError: string | null;
 }
 
@@ -395,7 +405,12 @@ export function recommendDecisionGuide(
       weeklyResetAtIso: weeklyResetAt === null ? null : new Date(weeklyResetAt).toISOString(),
       logePreferenceEligible:
         pool !== 'loge' || weeklyPercent === null ? null : weeklyPercent < LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
-      fableEligible: weeklyPercent === null ? null : weeklyPercent <= FABLE_MAX_WEEKLY_UTILIZATION_PERCENT,
+      fableEligible: feed?.fableUnavailable
+        ? false
+        : weeklyPercent === null
+          ? null
+          : weeklyPercent <= FABLE_MAX_WEEKLY_UTILIZATION_PERCENT,
+      fableUnavailableReason: feed?.fableUnavailable ?? null,
       probeError: usageProbed ? (feed?.error ?? null) : null,
     };
   });
@@ -471,7 +486,8 @@ export function renderRecommendationDecisionGuide(guide: RecommendationDecisionG
       return (
         `  - ${account.binary} [${account.pool}]: usability ${account.usable}; ` +
         `5h ${formatQuotaPercent(account.fiveHourPercent)}; weekly ${formatQuotaPercent(account.weeklyPercent)} ` +
-        `(remaining ${remaining}); weekly reset ${reset}${preference}; ${account.usabilityReason}`
+        `(remaining ${remaining}); weekly reset ${reset}${preference}; ${account.usabilityReason}` +
+        (account.fableUnavailableReason ? `; Fable unavailable: ${account.fableUnavailableReason}` : '')
       );
     }),
     '',
@@ -1026,6 +1042,8 @@ function candidatesFor(
     const account = accountFor(binary);
     if (!account || account.banned) continue;
     for (const option of account.options) {
+      // The interactive TUI demanded usage-credit consent for Fable here.
+      if (option.model === 'fable51' && usageByBinary.get(binary)?.fableUnavailable) continue;
       const spec = MODELS[option.model];
       const base = role === 'implementer' ? spec.implementerFit[classification.complexity] : spec.score[role];
       if (base === undefined || base === 0) continue;

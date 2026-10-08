@@ -1,0 +1,23 @@
+ ▐▛███▛█   Claude Code v2.1.281
+▝▜██████▀  Fable 5.1 · Claude API
+  ▝▝ ▝▝    ~/.config/home-manager
+
+  Updated to latest. Got 63 features, 354 bugfixes, and 151 other changes.
+  code.claude.com/docs/en/changelog for details
+
+
+❯ Read the file /Users/erng/.kteam/muztj9py-3e6527ca/turns/turn-001.md now, then carefully follow every instruction inside it. This is your complete task for
+  this turn.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Fable 5.1 now uses usage credits
+
+  Fable 5.1 runs on usage credits, purchased separately from your plan.
+
+  Learn more: https://support.claude.com/en/articles/12429409-extra-usage-for-paid-claude-plans
+
+  ❯ Switch to claude-sonnet-5-5[1m] and continue
+    Continue with Fable 5.1
+
+
+  Enter to confirm · Esc to cancel

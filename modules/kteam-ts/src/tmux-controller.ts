@@ -208,6 +208,55 @@ export function paneShowsModelSelector(frame: string): boolean {
   return /Select Model and Effort|Select Reasoning Level for/i.test(frame);
 }
 
+/** The last `count` non-blank rows of a frame. Modals render in the TUI's live
+ *  region at the bottom; matching only there keeps a model's own output (which
+ *  can quote dialog text) from reading as an open modal. */
+function frameTail(frame: string, count: number): string {
+  return frame
+    .split('\n')
+    .filter(line => line.trim() !== '')
+    .slice(-count)
+    .join('\n');
+}
+
+/** Claude Code's paid-model consent selector (fixture
+ *  claude-usage-credits-consent.txt, keelin 2026-10-08): "Fable 5.1 now uses
+ *  usage credits / ❯ Switch to claude-sonnet-5-5[1m] and continue / Continue
+ *  with Fable 5.1 / Enter to confirm · Esc to cancel". It opens when the FIRST
+ *  prompt is submitted. Both answers are wrong for kteam to make — continuing
+ *  spends money, switching silently downgrades — so it is never answered.
+ *  Returns the model named in the heading. */
+export function paneModelConsentDialog(frame: string): { model: string } | undefined {
+  const tail = frameTail(frame, 20);
+  const heading = tail.match(/^\s*(\S.*?)\s+now uses usage credits\s*$/im);
+  if (!heading) return undefined;
+  if (!/continue with|enter to confirm/i.test(tail)) return undefined;
+  return { model: heading[1]!.trim() };
+}
+
+/** A selector/modal is up in the live region: the paid-model consent dialog,
+ *  Codex's model picker, or any Claude select footer ("Enter to confirm · Esc
+ *  to cancel"). Such a frame has a `❯` row that looks exactly like the composer
+ *  prompt, so it must never read as ready, and no reflex keystroke may be sent
+ *  into it — the next Enter picks an option. */
+export function paneShowsSelectorModal(frame: string): boolean {
+  if (paneModelConsentDialog(frame) || paneShowsModelSelector(frameTail(frame, 20))) return true;
+  const footer = frameTail(frame, 6).toLowerCase();
+  return /enter to (confirm|select)/.test(footer) && /esc to (cancel|go back|exit)/.test(footer);
+}
+
+/** The pane is blocked on Claude Code's usage-credits consent selector. The
+ *  message omits the account: the caller (which knows the wrapper) adds it. */
+export class ModelConsentRequiredError extends Error {
+  constructor(readonly model: string) {
+    super(
+      `${model.split(/\s+/)[0]} needs usage credits on this account: Claude Code showed "${model} now uses usage credits" ` +
+        '(continue = spend usage credits, or switch to a cheaper model); kteam chose neither and typed nothing into it',
+    );
+    this.name = 'ModelConsentRequiredError';
+  }
+}
+
 export interface PaneWorkCounters {
   elapsedSeconds?: number;
   tokens?: number;
@@ -1399,6 +1448,9 @@ export class TmuxController {
   promptReady(pane: string, cursorY?: number, cursorX?: number): boolean {
     const lower = pane.toLowerCase();
     if (STARTUP_BLOCKERS.some(marker => lower.includes(marker))) return false;
+    // A selector's highlighted `❯ Switch to … and continue` row matches the
+    // composer pattern below; typing there lands in the modal, not the input.
+    if (paneShowsSelectorModal(pane)) return false;
     // Spinners/token counters can render ABOVE an idle-looking input box (slow
     // models mid-turn) — an actively-working pane is never prompt-ready.
     if (paneShowsActiveWork(pane)) return false;
@@ -1669,6 +1721,9 @@ export class TmuxController {
             ? 'interactive harness exited; exit code unavailable (single-probe)'
             : `interactive harness exited (${current.exitCode})`,
         );
+      // Never answered (either choice costs the user), and waiting cannot clear it.
+      const consent = paneModelConsentDialog(current.visiblePane);
+      if (consent) throw new ModelConsentRequiredError(consent.model);
       const action = handleStartupDialogs ? startupDialogAction(current.visiblePane, dialogOptions) : undefined;
       if (action) {
         const attempts = (dialogAttempts.get(action.kind) ?? 0) + 1;
@@ -1724,6 +1779,12 @@ export class TmuxController {
         await Bun.sleep(this.injectionPollMs);
         const current = await this.state(name);
         if (!current.alive || current.dead || paneShowsActiveWork(current.visiblePane)) return 'turn-started';
+
+        // Claude Code opens its usage-credits consent selector when the first
+        // prompt is SUBMITTED (keelin, 2026-10-08). The prompt is held behind
+        // it; another Enter would accept the highlighted downgrade.
+        const consent = paneModelConsentDialog(current.visiblePane);
+        if (consent) throw new ModelConsentRequiredError(consent.model);
 
         // Exact `/model` opens Codex's native model+effort selector. The pane
         // often retains `› /model` above it, which composerHolds() cannot
@@ -1810,6 +1871,7 @@ export class TmuxController {
         resumeMenuChoice: config.resumeMenuChoice,
       },
     ).catch(async error => {
+      if (error instanceof ModelConsentRequiredError) throw error;
       const refuseUndelivered = (): never => {
         if (error instanceof PromptReadyTimeoutError)
           error.message = `message NOT delivered; run \`kteam interrupt\` then resend; ${error.message}`;
@@ -1828,6 +1890,8 @@ export class TmuxController {
       // Genuinely mid-turn is a different case with a different answer (the
       // caller's native-queue path) — never type over live work.
       if (paneShowsActiveWork(state.visiblePane)) refuseUndelivered();
+      // A selector is not a stale draft: C-u + typing would land in the modal.
+      if (paneShowsSelectorModal(state.visiblePane)) refuseUndelivered();
       await this.keys(config.tmuxSession, 'C-u');
       await Bun.sleep(200);
     });
@@ -1853,7 +1917,12 @@ export class TmuxController {
     // submitting here would create an untracked normal turn.
     if (current.promptReady) throw new NativeQueuePreKeystrokeError('native queue pane became ready before typing');
     const frame = current.visiblePane;
-    if (startupDialogAction(frame) || liveMenuBlock(frame)?.cursorRow !== undefined || paneShowsModelSelector(frame))
+    if (
+      startupDialogAction(frame) ||
+      liveMenuBlock(frame)?.cursorRow !== undefined ||
+      paneShowsModelSelector(frame) ||
+      paneShowsSelectorModal(frame)
+    )
       throw new NativeQueuePreKeystrokeError('native queue composer is blocked by a modal');
     const lines = frame.split('\n');
     while (lines.length > 0 && lines[lines.length - 1]!.trim() === '') lines.pop();

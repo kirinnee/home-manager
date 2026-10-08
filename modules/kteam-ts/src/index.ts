@@ -74,6 +74,7 @@ import {
   renderBrowserCli,
 } from './browser-cli';
 import { isBrowserError } from './browser-types';
+import { applyModelAvailability, readModelUnavailable } from './model-availability';
 import { inheritStopReason, processStopIo, runBulkStop, type BulkStopOptions, type BulkStopSelector } from './stop-cli';
 
 const VERSION = KTEAM_VERSION;
@@ -299,7 +300,12 @@ program
       return;
     }
     const available = discoverAutoAgents(paths.kfleetBin);
-    const usage = options.usage === false ? [] : await fetchAgentUsage();
+    // Local TUI-observed Fable consent verdicts apply even with --no-usage: they
+    // are a kteam record, not a quota probe.
+    const usage = applyModelAvailability(
+      options.usage === false ? [] : await fetchAgentUsage(),
+      await readModelUnavailable(paths),
+    );
     const guide = recommendDecisionGuide(task, available, {
       usage,
       usageProbed: options.usage !== false,

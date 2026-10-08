@@ -150,6 +150,14 @@ import type { AgentUsage } from './core';
 import { chatEventFingerprint, EventStore, type IndexedSession, type JsonValue, type SessionEvent } from './storage';
 import { KTEAM_VERSION } from './version';
 import {
+  consentModelFamily,
+  findModelUnavailable,
+  markModelUnavailable,
+  modelAvailabilityFile,
+  MODEL_UNAVAILABLE_TTL_MS,
+  readModelUnavailable,
+} from './model-availability';
+import {
   authFailureRemedy,
   fetchKfleetUsage,
   providerUnavailableDetail,
@@ -164,8 +172,11 @@ import {
   contextPercentUsed,
   backgroundTerminalCount,
   foldStallLiveness,
+  ModelConsentRequiredError,
   paneActivityLine,
+  paneModelConsentDialog,
   paneShowsActiveWork,
+  paneShowsSelectorModal,
   StructuredQuestionDriveError,
   INTERACTIVE_READY_TIMEOUT_MS,
   TmuxController,
@@ -554,6 +565,9 @@ const terminalStatuses: SessionStatus[] = ['completed', 'failed', 'stalled', 'st
 const protectedStatuses: SessionStatus[] = [...terminalStatuses, 'kill_failed'];
 const waitingStatuses: SessionStatus[] = ['waiting', 'awaiting_question', 'awaiting_user', 'rate_limited'];
 const CODEX_PICKER_QUARANTINE_KIND = 'codex_picker_cleanup';
+// needsHuman kinds for a pane blocked on a selector kteam must not answer.
+const MODEL_CONSENT_KIND = 'model_consent_required';
+const UNCLASSIFIED_MODAL_KIND = 'unclassified_modal';
 
 function rejectKillFailedPaneInput(): never {
   throw new Error(
@@ -2495,6 +2509,10 @@ export class SessionManager implements KTeamService {
       const reset = preflightQuota.resetAt ? ` (resets ${new Date(preflightQuota.resetAt).toISOString()})` : '';
       throw new Error(`wrapper ${binary} is at its usage limit${reset}; pick another account`);
     }
+    // Preflight 3 — interactive model consent: this account's TUI recently
+    // demanded usage-credit consent for this model. kteam never answers that
+    // selector, so the launch could only fail again after a full boot.
+    await this.assertModelConsentNotRequired(binary, harness, model);
 
     const id = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
     const directory = sessionDir(this.paths, id);
@@ -2806,6 +2824,9 @@ export class SessionManager implements KTeamService {
         console.error(`kteamd: launch of ${id} found its tmux session already live; leaving it to its owner`);
         return;
       }
+      // Fail loudly, account named; the cleanup below kills the pane without
+      // a keystroke, so neither consent option is ever chosen.
+      if (error instanceof ModelConsentRequiredError) error = await this.recordModelConsentRequired(config, error);
       await hooks.onBootstrapFailure?.().catch(cleanupError => {
         console.error(`kteamd: start-hook cleanup failed for ${id}: ${String(cleanupError)}`);
       });
@@ -6842,6 +6863,36 @@ export class SessionManager implements KTeamService {
               return;
             }
           }
+          // A selector on the pane blocks the turn until someone chooses, and
+          // any reflex keystroke chooses for them: the nudge's Escape/Enter on
+          // the usage-credits consent dialog accepts the Sonnet downgrade
+          // (keelin, 2026-10-08). The consent dialog escalates at once (and
+          // marks the account); any other selector escalates instead of the
+          // nudge below. Nudge and stall kill are held while it is up.
+          const consent = paneModelConsentDialog(pane.visiblePane);
+          const modalBlocked = consent !== undefined || paneShowsSelectorModal(pane.visiblePane);
+          if (consent && view.state.needsHumanKind !== MODEL_CONSENT_KIND) {
+            const error = await this.recordModelConsentRequired(
+              view.config,
+              new ModelConsentRequiredError(consent.model),
+            );
+            await this.store.updateState<SessionState>(id, current => ({
+              ...current,
+              needsHuman: `${error.message}; the pane is waiting on that selector — kteam will not answer it`,
+              needsHumanKind: MODEL_CONSENT_KIND,
+            }));
+            view = await this.get(id);
+          } else if (
+            !modalBlocked &&
+            (view.state.needsHumanKind === MODEL_CONSENT_KIND || view.state.needsHumanKind === UNCLASSIFIED_MODAL_KIND)
+          ) {
+            await this.store.updateState<SessionState>(id, current => ({
+              ...current,
+              needsHuman: undefined,
+              needsHumanKind: undefined,
+            }));
+            view = await this.get(id);
+          }
           // A6 reflex rule (locked): life-signs at this layer are transcript
           // growth, ANY pane change, and subprocess activity — it only catches
           // totally-frozen agents. Zero life-signs for nudgeAfterSeconds → one
@@ -6896,7 +6947,7 @@ export class SessionManager implements KTeamService {
           // late observation must never end a session.
           const killConfirmation = confirmReflexKill(
             reflexGuard,
-            waiting || guard.lagged ? 'alive' : assessment.verdict,
+            waiting || guard.lagged || modalBlocked ? 'alive' : assessment.verdict,
           );
           reflexGuard = killConfirmation.state;
           if (waiting || assessment.verdict === 'alive') {
@@ -6910,6 +6961,21 @@ export class SessionManager implements KTeamService {
             }
           } else if (guard.lagged) {
             // Host starved this tick: neither nudge nor kill (the anchor moved).
+          } else if (modalBlocked) {
+            // Neither nudge nor kill into a selector: escalate once instead.
+            // nudgedAt stays unset, so the kill verdict cannot arm either.
+            if (view.state.needsHuman === undefined) {
+              const reason =
+                `no life-signs for ${Math.floor(assessment.zeroSeconds)}s and the pane shows a selector kteam does ` +
+                'not recognise; the stall nudge was withheld (Escape/Enter would choose an option) — answer it in the pane';
+              await this.store.updateState<SessionState>(id, current => ({
+                ...current,
+                needsHuman: reason,
+                needsHumanKind: UNCLASSIFIED_MODAL_KIND,
+              }));
+              await this.emit(id, 'session.nudge_withheld', { reason, ledger, secondsSince }, 'watcher');
+              view = await this.get(id);
+            }
           } else if (assessment.verdict === 'nudge') {
             await this.store.updateState<SessionState>(id, current => ({ ...current, nudgedAt: now() }));
             await this.emit(
@@ -8399,6 +8465,42 @@ export class SessionManager implements KTeamService {
    *  single fresh pane reliably recovers — without this, the whole session
    *  fails on a boot hiccup. Only the startup-timeout shape retries; a dead
    *  pane or tmux error stays fatal on the first attempt. */
+  private async assertModelConsentNotRequired(binary: string, harness: Harness, model?: string): Promise<void> {
+    if (harness !== 'claude') return;
+    const blocked = findModelUnavailable(await readModelUnavailable(this.paths), binary, model);
+    if (!blocked) return;
+    throw new Error(
+      `wrapper ${path.basename(binary)}: ${blocked.reason} (seen ${blocked.at}; ${modelAvailabilityFile(this.paths)} ` +
+        `expires it after ${MODEL_UNAVAILABLE_TTL_MS / 3_600_000}h); pick another account or model`,
+    );
+  }
+
+  /** The usage-credits consent selector is up on this account's TUI. Record the
+   *  account as unavailable for that model (start preflight 3 and `kteam
+   *  recommend` read it) and return the account-named error to fail with. */
+  private async recordModelConsentRequired(config: SessionConfig, error: ModelConsentRequiredError): Promise<Error> {
+    const binary = path.basename(config.binary);
+    const name = error.model.split(/\s+/)[0]!;
+    const family = consentModelFamily(error.model) ?? name.toLowerCase();
+    const reason =
+      `${name} needs usage credits on this account (interactive Claude Code asks to buy usage credits ` +
+      'or switch to a cheaper model)';
+    await markModelUnavailable(this.paths, { binary, family, model: error.model, reason, at: now() }).catch(cause => {
+      console.error(`kteamd: could not record ${family} as unavailable on ${binary}: ${String(cause)}`);
+    });
+    await this.emit(
+      config.id,
+      'session.model_consent_required',
+      { binary, model: error.model, requestedModel: config.model, reason },
+      'daemon',
+    ).catch(() => undefined);
+    return new Error(
+      `${binary}: ${error.message}; ${family} is now marked unavailable on ${binary} for interactive starts — ` +
+        'pick another account or model',
+      { cause: error },
+    );
+  }
+
   private async launchWithRetry(config: SessionConfig): Promise<void> {
     await this.assertAutoHarnessHealthy(config.binary, config.harness, config.mode);
     try {

@@ -14,7 +14,10 @@ import {
   freeTextPageShowsQuestion,
   freeTextQuestionRegion,
   liveMenuBlock,
+  ModelConsentRequiredError,
   NativeQueuePreKeystrokeError,
+  paneModelConsentDialog,
+  paneShowsSelectorModal,
   PromptReadyTimeoutError,
   questionRowIndex,
   paneShowsModelSelector,
@@ -2461,5 +2464,114 @@ describe('all evidence is bound to ONE live menu block', () => {
         promptReady: false,
       }),
     ).toMatchObject({ ok: false, reason: 'block_missing', block: null });
+  });
+});
+
+describe('Claude Code usage-credits consent selector (keelin, 2026-10-08)', () => {
+  // Real capture: the dialog opened when turn 1 was submitted; the prompt line
+  // is stranded above it and the highlighted `❯ Switch to …` row looks exactly
+  // like a composer prompt.
+  const fixture = () => Bun.file(path.join(import.meta.dir, 'fixtures', 'claude-usage-credits-consent.txt')).text();
+  const paths = createPaths('/tmp/kteam-consent-test');
+  // After the downgrade was (wrongly) accepted: an ordinary idle frame that
+  // merely MENTIONS usage credits in scrollback.
+  const afterFallback = [
+    '❯ Read the file /tmp/turn-001.md now.',
+    '',
+    '⏺ Switched to claude-sonnet-5-5[1m] for this session · Fable 5.1 requires usage credits · /model to change',
+    '',
+    '────────────────────────────────────',
+    '❯ ',
+    '────────────────────────────────────',
+    '  ? for shortcuts',
+  ].join('\n');
+
+  test('the real frame is detected as a consent selector naming the model', async () => {
+    const pane = await fixture();
+    expect(paneModelConsentDialog(pane)).toEqual({ model: 'Fable 5.1' });
+    expect(paneShowsSelectorModal(pane)).toBe(true);
+    expect(paneModelConsentDialog(afterFallback)).toBeUndefined();
+    expect(paneShowsSelectorModal(afterFallback)).toBe(false);
+  });
+
+  test('it is never prompt-ready, whatever row the cursor sits on', async () => {
+    const pane = await fixture();
+    const controller = new TmuxController(paths, 'http://127.0.0.1:7337');
+    const switchRow = pane.split('\n').findIndex(line => line.includes('❯ Switch to'));
+    expect(switchRow).toBeGreaterThan(0);
+    expect(controller.promptReady(pane, switchRow, 2)).toBe(false);
+    expect(controller.promptReady(pane)).toBe(false);
+    // Sanity: the composer frame that follows the dialog is still ready.
+    expect(controller.promptReady(afterFallback)).toBe(true);
+  });
+
+  test('no startup-dialog action ever answers it', async () => {
+    expect(startupDialogAction(await fixture())).toBeUndefined();
+  });
+
+  class ConsentPane extends TmuxController {
+    readonly sent: string[][] = [];
+    protected readonly composerPollMs = 0;
+    protected readonly injectionPollMs = 0;
+    constructor(
+      private readonly frames: string[],
+      private readonly captures: string[] = frames,
+    ) {
+      super(paths, 'http://127.0.0.1:7337');
+    }
+    private stateIndex = 0;
+    private captureIndex = 0;
+    override async state() {
+      const pane = this.frames[Math.min(this.stateIndex++, this.frames.length - 1)]!;
+      return { alive: true, dead: false, promptReady: this.promptReady(pane), pane, visiblePane: pane };
+    }
+    override async captureVisible(): Promise<string> {
+      return this.captures[Math.min(this.captureIndex++, this.captures.length - 1)]!;
+    }
+    protected override async keys(_name: string, ...keys: string[]) {
+      this.sent.push(keys);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+  }
+
+  test('waitReady fails fast with ModelConsentRequiredError and sends no keystroke', async () => {
+    const controller = new ConsentPane([await fixture()]);
+    const started = Date.now();
+    const error = await controller.waitReady('kteam-x-agent', 20_000, true).catch(e => e);
+    expect(error).toBeInstanceOf(ModelConsentRequiredError);
+    expect(error.model).toBe('Fable 5.1');
+    expect(error.message).toContain('Fable needs usage credits on this account');
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(controller.sent).toEqual([]);
+  });
+
+  test('the dialog opening on submit fails the inject after exactly one Enter', async () => {
+    const pane = await fixture();
+    const idle = ['❯ ', '  ? for shortcuts'].join('\n');
+    const filled = ['❯ go', '  ? for shortcuts'].join('\n');
+    const controller = new ConsentPane([pane], [idle, filled]);
+    await expect(controller.inject('kteam-x-agent', 'go')).rejects.toBeInstanceOf(ModelConsentRequiredError);
+    expect(controller.sent.filter(keys => keys[0] === 'Enter')).toHaveLength(1);
+  });
+
+  test('an interactive send never clears or types into a selector', async () => {
+    const controller = new ConsentPane([await fixture()]);
+    // waitReady itself refuses first; with a generic selector the fallback
+    // path (stale-draft clear) must refuse too.
+    await expect(
+      controller.send({ tmuxSession: 'kteam-x-agent', mode: 'interactive' } as SessionConfig, 'hi'),
+    ).rejects.toBeInstanceOf(ModelConsentRequiredError);
+    const generic = ['  Pick one', '  ❯ Option A', '    Option B', '', '  Enter to confirm · Esc to cancel'].join('\n');
+    const other = new (class extends ConsentPane {
+      override async waitReady(): Promise<void> {
+        throw new PromptReadyTimeoutError('interactive harness did not become ready within 10s');
+      }
+    })([generic]);
+    await expect(
+      other.send({ tmuxSession: 'kteam-x-agent', mode: 'interactive' } as SessionConfig, 'hi'),
+    ).rejects.toThrow(/did not become ready/);
+    expect(other.sent).toEqual([]);
+    expect(paneShowsSelectorModal(generic)).toBe(true);
+    expect(new TmuxController(paths, 'x').promptReady(generic, 1, 2)).toBe(false);
   });
 });
