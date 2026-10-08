@@ -133,6 +133,6 @@ rec {
   # binaries) into the store on every eval. node_modules lives at the loctl checkout,
   # so bun resolves deps there; assets.ts resolves assets from the source tree.
   loctl = nixpkgs.writeShellScriptBin "loctl" ''
-    exec ${nixpkgs.bun}/bin/bun run /Users/erng/Workspace/work/vungle/loctl/src/index.ts "$@"
+    exec ${nixpkgs.bun}/bin/bun run "$HOME/Workspace/work/vungle/loctl/src/index.ts" "$@"
   '';
 }

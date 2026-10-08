@@ -326,6 +326,37 @@ rec {
     '';
   };
 
+  # Nightly WAL checkpoint for the shared kfleet codex sqlite (Linux boxes
+  # only). Concurrent fleet codex sessions grow the WAL unchecked until a cold
+  # start times out opening it and codex reports the DB as damaged — see
+  # scripts/kfleet/codex-db-maint.sh. Off the 03:00 backup slot.
+  xdg.configFile."systemd/user/kfleet-codex-db.service" = {
+    enable = profile.kernel == "linux";
+    text = ''
+      [Unit]
+      Description=kfleet codex sqlite WAL checkpoint
+
+      [Service]
+      Type=oneshot
+      ExecStart=%h/.config/home-manager/scripts/kfleet/codex-db-maint.sh
+    '';
+  };
+  xdg.configFile."systemd/user/kfleet-codex-db.timer" = {
+    enable = profile.kernel == "linux";
+    text = ''
+      [Unit]
+      Description=Nightly kfleet codex sqlite maintenance
+
+      [Timer]
+      OnCalendar=*-*-* 04:17:00
+      Persistent=true
+      RandomizedDelaySec=10m
+
+      [Install]
+      WantedBy=timers.target
+    '';
+  };
+
   # Continuous Obsidian Sync for the HQ vault (Linux boxes only; inert on
   # darwin, where the Obsidian desktop app does this itself). `ob` is
   # atomi.obsidian_headless, installed via home.packages below.
@@ -377,6 +408,7 @@ rec {
         wants="$HOME/.config/systemd/user/timers.target.wants"
         mkdir -p "$wants"
         ln -sf "$HOME/.config/systemd/user/box-backup.timer" "$wants/box-backup.timer"
+        ln -sf "$HOME/.config/systemd/user/kfleet-codex-db.timer" "$wants/kfleet-codex-db.timer"
         "$sctl" --user daemon-reload || true
         "$sctl" --user start box-backup.timer || true
       fi
@@ -564,6 +596,8 @@ rec {
 
       # liftoff
       awscli2
+      terraform # loctl runs the binary directly; nix keeps it on PATH
+      vault # vault login -method=... for vault.ops.vungle.io
       pkgs-unstable.acli
       # gimme-aws-creds 2.8.2 requires okta >=2.9.0,<3.0.0, but nixpkgs 26.05
       # ships okta 3.1.0 (APIClient -> ApiClient, restructured SDK), which breaks
