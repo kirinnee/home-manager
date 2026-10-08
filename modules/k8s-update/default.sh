@@ -20,7 +20,14 @@ append_cluster_once() {
 
 for region in $REGIONS; do
   echo "Discovering EKS clusters in $region"
-  clusters="$(aws eks list-clusters --region "$region" --query 'clusters[]' --output text)"
+  # Roles that can use a cluster but not list them (e.g. the devbox instance
+  # role) still get the K8S_EKS_EXTRA_CLUSTER_SPECS entries below.
+  if ! clusters="$(aws eks list-clusters --region "$region" --query 'clusters[]' --output text)"; then
+    echo "Could not list EKS clusters in $region; using extra cluster specs only" >&2
+    clusters=""
+  fi
+  # `--output text` separates names with tabs; append_cluster_once matches on spaces.
+  clusters="${clusters//$'\t'/ }"
 
   for spec in $EXTRA_CLUSTER_SPECS; do
     spec_region="${spec%%:*}"
@@ -39,12 +46,14 @@ for region in $REGIONS; do
 
   for cluster in $clusters; do
     echo "Updating EKS kubeconfig $cluster ($region)"
-    aws eks update-kubeconfig \
+    if ! aws eks update-kubeconfig \
       --region "$region" \
       --name "$cluster" \
       --alias "$cluster" \
       --user-alias "$cluster" \
-      --kubeconfig "$DIRECTORY/$cluster.yaml" >/dev/null
+      --kubeconfig "$DIRECTORY/$cluster.yaml" >/dev/null; then
+      echo "Failed to update kubeconfig for $cluster ($region); skipping" >&2
+    fi
   done
 done
 

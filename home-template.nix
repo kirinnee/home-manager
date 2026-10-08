@@ -618,7 +618,7 @@ rec {
     CU_TEAM_ID = "9018863174";
     OCI_CLI_REGION = "us-ashburn-1";
     COMPARTMENT_ID = "ocid1.compartment.oc1..aaaaaaaaqcssiaa6caj3wc4p64r4kdko5szck4kkak2tajgslduij4kzeyhq";
-    K8S_EKS_EXTRA_CLUSTER_SPECS = "us-east-1:eks-llm-us-east-1";
+    K8S_EKS_EXTRA_CLUSTER_SPECS = "us-east-1:eks-llm-us-east-1 us-east-1:eks-db-us-east-1b";
     OCI_OKE_ENDPOINT = "PUBLIC_ENDPOINT";
     OCI_OKE_CONTROL_PLANE_NSG_ID = "ocid1.networksecuritygroup.oc1.iad.aaaaaaaa2zqs4wmn6h7wl4mux3zqbwukb6ya3cxq6i76mdhxpxqyfbnepydq";
 
