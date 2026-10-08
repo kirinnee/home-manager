@@ -6,29 +6,12 @@
 // against the configured context (kubeconfig + AWS auth must already be valid;
 // the LLM cluster only authorizes the DevOps role). This copies SHARED
 // PRODUCTION credentials onto this machine — see README for the risk note.
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import {
-  authDir,
-  CLAUDE_KEY_RE,
-  CODEX_KEY_RE,
-  dataDir,
-  decryptedSecretsFile,
-  decryptSecretsScript,
-  encryptSecretsScript,
-  kfleetConfigFile,
-  resolvePort,
-} from './paths';
+import { authDir, CLAUDE_KEY_RE, CODEX_KEY_RE, dataDir, resolvePort } from './paths';
 import { renderArtifacts } from './render';
-import {
-  claudeCredentialDestinations,
-  claudeSopsEnvTokens,
-  hasDirectClaudeCredential,
-  normalizeClaudeTokenJson,
-  normalizeCodexTokenJson,
-  type ClaudeSopsEnvToken,
-} from './tokens';
-import { die, log, must, need, ok, run, type RunOpts, warn } from './exec';
+import { normalizeClaudeTokenJson, normalizeCodexTokenJson } from './tokens';
+import { die, log, must, need, ok, run, warn } from './exec';
 
 export interface PullOpts {
   context: string; // kube context
@@ -39,57 +22,6 @@ export interface PullOpts {
 
 interface K8sSecret {
   data?: Record<string, string>;
-}
-
-type CommandRunner = (cmd: string[], opts?: RunOpts) => Promise<unknown>;
-
-function secretsYamlSetCommand(): string[] {
-  // The key and value travel in the short-lived yq environment, never argv.
-  return ['yq', '--inplace', '.env[strenv(KLOGE_SECRET_KEY)] = strenv(KLOGE_SECRET_VALUE)', decryptedSecretsFile];
-}
-
-/** Edit the decrypted source of truth without exposing token values in argv. */
-export async function materializeClaudeSopsEnv(
-  tokens: readonly ClaudeSopsEnvToken[],
-  runCommand: CommandRunner,
-): Promise<void> {
-  for (const token of tokens) {
-    await runCommand(secretsYamlSetCommand(), {
-      env: {
-        KLOGE_SECRET_KEY: token.destination,
-        KLOGE_SECRET_VALUE: token.value,
-      },
-    });
-  }
-}
-
-interface SecretSyncDeps {
-  fileExists: (file: string) => boolean;
-  requireTool: (tool: string) => Promise<void>;
-  runCommand: CommandRunner;
-}
-
-/** Follow the repository's required secrets workflow exactly: ensure a
- *  decrypted working copy, edit it, then invoke the canonical encrypt script. */
-export async function syncClaudeSopsEnv(
-  tokens: readonly ClaudeSopsEnvToken[],
-  overrides: Partial<SecretSyncDeps> = {},
-): Promise<void> {
-  if (tokens.length === 0) return;
-  const deps: SecretSyncDeps = {
-    fileExists: existsSync,
-    requireTool: need,
-    runCommand: (cmd, opts) => must(cmd, opts),
-    ...overrides,
-  };
-  await deps.requireTool('sops');
-  await deps.requireTool('yq');
-  if (!deps.fileExists(decryptedSecretsFile)) await deps.runCommand([decryptSecretsScript]);
-  if (!deps.fileExists(decryptedSecretsFile)) {
-    throw new Error(`decrypted secrets file was not created at ${decryptedSecretsFile}`);
-  }
-  await materializeClaudeSopsEnv(tokens, deps.runCommand);
-  await deps.runCommand([encryptSecretsScript]);
 }
 
 export async function pull(opts: PullOpts): Promise<void> {
@@ -110,11 +42,6 @@ export async function pull(opts: PullOpts): Promise<void> {
 
   const decode = (b64: string): string => Buffer.from(b64, 'base64').toString('utf8');
   const decoded = Object.fromEntries(Object.entries(data).map(([key, value]) => [key, decode(value)]));
-  // Codex-only and proxy-only pulls retain their old behavior and do not need a
-  // home-manager checkout. Read kfleet config only when slots 1..6 are present.
-  const claudeSopsTokens = hasDirectClaudeCredential(decoded)
-    ? claudeSopsEnvTokens(decoded, claudeCredentialDestinations(readFileSync(kfleetConfigFile, 'utf8')))
-    : [];
 
   // Start from a clean auth dir so removed credentials don't linger.
   if (existsSync(authDir)) rmSync(authDir, { recursive: true, force: true });
@@ -142,14 +69,20 @@ export async function pull(opts: PullOpts): Promise<void> {
 
   const port = opts.port ?? resolvePort();
   renderArtifacts(port);
-  await syncClaudeSopsEnv(claudeSopsTokens);
+  // Deliberately NOT synced into sops any more. These are rotating third-party
+  // credentials; writing them into secrets.enc.yaml put them in the permanent
+  // history of a PUBLIC repo. They now reach other hosts the same way the codex
+  // pool always has — `kloge push` rsyncs ~/.kloge, which lives outside the
+  // repo — and load-secrets projects auth/claude-N.json into ~/.secrets
+  // (generated, 0600, gitignored) as LOGE_CLAUDE_N_TOKEN.
+  //
+  // Removing the call is the whole fix: leaving it meant every `kloge pull`
+  // silently re-added the keys and re-encrypted, undoing the migration.
   // Lock down the dir — it holds live provider credentials.
   chmodSync(dataDir, 0o700);
 
   ok(`wrote ${written} credential file(s) (${claude} claude, ${codex} codex) to ${authDir}`);
-  if (claudeSopsTokens.length > 0) {
-    ok(`synced ${claudeSopsTokens.length} Claude credential(s) to declared secrets-file keys and re-encrypted`);
-  }
+  ok('claude tokens stay in ~/.kloge only (transit); not written to sops');
   ok(`rendered config.yaml + compose.yaml (port ${port})`);
   log('next: `kloge up` (local) or `kloge push <user@host>`');
 }

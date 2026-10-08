@@ -54,8 +54,16 @@ rec {
     export PATH="${nixpkgs.lib.makeBinPath [ nixpkgs.bash nixpkgs.gitMinimal nixpkgs.jq nixpkgs.rsync nixpkgs.openssh nixpkgs.curl nixpkgs.coreutils ]}:$PATH"
     set -euo pipefail
 
+    NO_PULL=0
+    if [ "''${1:-}" = "--no-pull" ]; then NO_PULL=1; shift; fi
+
     if [ "$#" -eq 0 ]; then
-      echo "usage: kloge-deploy <host> [host...]     e.g. kloge-deploy box kirin@pebox" >&2
+      echo "usage: kloge-deploy [--no-pull] <host> [host...]" >&2
+      echo "  e.g. kloge-deploy box kirin@pebox" >&2
+      echo "" >&2
+      echo "  Pulls the loge pool from the LLM cluster, then for each host:" >&2
+      echo "  build image -> push creds -> start container -> refresh ~/.secrets." >&2
+      echo "  --no-pull reuses the pool already in ~/.kloge." >&2
       exit 64
     fi
 
@@ -63,23 +71,53 @@ rec {
     # docker (with its compose v2 plugin) must still win over nothing at all.
     REMOTE_PATH='export PATH="$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH"'
 
+    # 1. Refresh the pool from the cluster. Only this machine can: the LLM
+    #    cluster authorizes the DevOps role and the boxes have no kubectl access.
+    #    That asymmetry is the whole reason the pool travels by rsync.
+    if [ "$NO_PULL" = "0" ]; then
+      echo "==> pulling loge pool from the cluster"
+      kloge pull
+    else
+      echo "==> skipping pull (--no-pull); using the pool already in ~/.kloge"
+    fi
+
+    # 2. Local container, so the Mac serves the same tokens it hands out.
+    echo "==> [local] restarting CLIProxyAPI"
+    kloge up
+
     for host in "$@"; do
       echo "==> [$host] building patched image"
       ssh "$host" "''${REMOTE_PATH}; cd ~/.config/home-manager && kloge build"
 
       echo "==> [$host] pushing auth + config + compose"
       # --no-up: with the patched tag, the default (start) path hard-fails.
-      kloge push "$host" --no-up
+      # Upstream is the source of truth: let the push drop remote-only creds.
+      kloge push "$host" --no-up --yes
 
       echo "==> [$host] starting container"
       ssh "$host" "''${REMOTE_PATH}; cd ~/.kloge && docker compose up -d"
 
+      # 3. THE STEP THAT IS EASY TO MISS. Pushing the pool updates ~/.kloge but
+      #    NOT ~/.secrets: load-secrets only projects auth/claude-N.json into
+      #    LOGE_CLAUDE_N_TOKEN during home-manager activation. Without this a
+      #    rotated token reaches the box yet every claude-auto-loge* agent keeps
+      #    authenticating with the previous one, which looks like a credential
+      #    bug rather than a stale-activation one.
+      echo "==> [$host] refreshing ~/.secrets (home-manager activation)"
+      ssh "$host" "''${REMOTE_PATH}; cd ~/.config/home-manager && hms"
+
       echo "==> [$host] verifying"
       ssh "$host" "''${REMOTE_PATH}; docker ps --format '{{.Names}} {{.Image}} {{.Status}}' | grep -i kloge || { echo 'NO kloge container on $host' >&2; exit 1; }"
+      # Prove the tokens actually landed, rather than trusting that hms ran.
+      # `grep -c` prints 0 AND exits 1 on no-match, so a naive `|| echo 0`
+      # emits "0\n0" and the numeric test then dies on a two-line value.
+      ssh "$host" "''${REMOTE_PATH}; n=\$( { grep -c LOGE_CLAUDE \"\$HOME/.secrets\" 2>/dev/null; true; } | head -1 ); s=\$( { grep -c LOGE_CLAUDE \"\$HOME/.config/home-manager/secrets.enc.yaml\" 2>/dev/null; true; } | head -1 ); n=\''${n:-0}; s=\''${s:-0}; echo \"    ~/.secrets: \$n loge token(s) | sops: \$s (must be 0)\"; [ \"\$n\" -gt 0 ] && [ \"\$s\" -eq 0 ]"
       echo "✓ $host"
     done
 
-    echo "✓ all hosts deployed"
+    echo ""
+    echo "✓ all hosts deployed. NOTE: this machine's own ~/.secrets is refreshed"
+    echo "  by \`hms\` (needs sudo on darwin), so run that separately if the pool changed."
   '';
   # kfleet: run-from-source wrapper. Generates the claude/codex/gemini/opencode
   # account wrappers + config dirs from ~/.kfleet/config.yaml (replaces the old

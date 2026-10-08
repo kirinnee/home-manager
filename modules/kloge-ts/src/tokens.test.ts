@@ -1,5 +1,4 @@
 import { describe, expect, test } from 'bun:test';
-import { materializeClaudeSopsEnv, syncClaudeSopsEnv } from './pull';
 import { decryptSecretsScript, encryptSecretsScript } from './paths';
 import {
   claudeCredentialDestinations,
@@ -107,51 +106,5 @@ describe('normalizeClaudeOAuthAccessToken', () => {
     expect(() => normalizeClaudeOAuthAccessToken('api-key', JSON.stringify({ api_key: 'sk-ant-api-key' }))).toThrow(
       /does not contain a Claude OAuth access token/,
     );
-  });
-});
-
-describe('materializeClaudeSopsEnv', () => {
-  test('edits decrypted secrets.yaml with credentials absent from command arguments', async () => {
-    const calls: Array<{ cmd: string[]; env?: Record<string, string> }> = [];
-
-    await materializeClaudeSopsEnv(
-      [{ source: 'CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_1', destination: 'LOGE_CLAUDE_1_TOKEN', value: 'test-token' }],
-      async (cmd, opts) => {
-        calls.push({ cmd, env: opts?.env });
-      },
-    );
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.cmd[0]).toBe('yq');
-    expect(calls[0]?.cmd).toContain('--inplace');
-    expect(calls[0]?.cmd).not.toContain('test-token');
-    expect(calls[0]?.env).toEqual({
-      KLOGE_SECRET_KEY: 'LOGE_CLAUDE_1_TOKEN',
-      KLOGE_SECRET_VALUE: 'test-token',
-    });
-  });
-
-  test('decrypts when needed, edits, then runs the canonical encrypt script', async () => {
-    let decrypted = false;
-    const required: string[] = [];
-    const commands: string[][] = [];
-    await syncClaudeSopsEnv(
-      [{ source: 'CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_1', destination: 'LOGE_CLAUDE_1_TOKEN', value: 'test-token' }],
-      {
-        fileExists: () => decrypted,
-        requireTool: async tool => {
-          required.push(tool);
-        },
-        runCommand: async cmd => {
-          commands.push(cmd);
-          if (cmd[0] === decryptSecretsScript) decrypted = true;
-        },
-      },
-    );
-
-    expect(required).toEqual(['sops', 'yq']);
-    expect(commands[0]).toEqual([decryptSecretsScript]);
-    expect(commands.at(-1)).toEqual([encryptSecretsScript]);
-    expect(commands.flat()).not.toContain('test-token');
   });
 });
