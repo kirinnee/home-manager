@@ -14,7 +14,10 @@ claude*)
   if printf '%s' "$out" | jq -e '.is_error == false' >/dev/null 2>&1; then
     printf '%s' "$out" | jq -r '"OK  served=" + (.modelUsage | to_entries | map(.key + " (ctx " + ((.value.contextWindow // "?")|tostring) + ")") | join(", "))'
   else
-    printf 'FAIL %s\n' "$(printf '%s' "$out" | jq -r '.result // empty' 2>/dev/null || printf '%s' "$out" | tail -c 400)"
+    msg="$(printf '%s' "$out" | jq -r '.result // empty' 2>/dev/null || printf '%s' "$out" | tail -c 400)"
+    printf 'FAIL %s\n' "$msg"
+    # An auth failure says nothing about the model — retry on another account.
+    case "$msg" in *OAuth* | *authenticate* | *"Invalid API key"*) echo "     (account login problem, not a model problem: retry on claude-auto-loge1 / claude-auto-liftoff)" ;; esac
   fi
   ;;
 codex*)

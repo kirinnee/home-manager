@@ -68,7 +68,7 @@ not alias to `fable-5-1`/`opus-5-5`):
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
 export ANTHROPIC_API_KEY=loge-internal
-# models (trimmed by models.keep.json): claude-opus-5-5, claude-fable-5-1, claude-sonnet-5, claude-haiku-4-5-20251001
+# models (trimmed by models.keep.json): claude-opus-5-5, claude-fable-5-1, claude-sonnet-5-5, claude-haiku-5-5
 # codex/openai: none — the pool has no Codex credentials (2026-09-24)
 ```
 

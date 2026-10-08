@@ -590,7 +590,7 @@ version of **every** artifact; confirm the file(s) exist before presenting.
 brief (its path or contents) plus the two inputs it needs: the `path` that `revise`
 returned and the Read URL (`revise`'s `url`) to use verbatim as the source link.
 Spawn with the `Task` tool (`subagent_type: general-purpose`). On Codex, explicitly
-delegate this visual renderer to a **Sonnet 5** subagent. It should use the
+delegate this visual renderer to a **Sonnet 5.5** subagent. It should use the
 `frontend-design` skill if available, else apply the brief's principles directly.
 
 ## The per-revision review loop (the approval gate)

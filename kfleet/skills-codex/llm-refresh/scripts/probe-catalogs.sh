@@ -33,7 +33,7 @@ tok="${ANTHROPIC_PROBE_TOKEN:-${LOGE_CLAUDE_1_TOKEN:-${CLAUDE_CODE_OAUTH_TOKEN:-
 if [[ -n $tok ]]; then
   curl -s -m 20 'https://api.anthropic.com/v1/models?limit=100' \
     -H "Authorization: Bearer $tok" -H 'anthropic-beta: oauth-2025-04-20' -H 'anthropic-version: 2023-06-01' |
-    jq -r 'if .data then (.data[] | [.id, .display_name, (.max_input_tokens|tostring), .created_at] | @tsv) else . end'
+    jq -r 'if .data then (.data[] | [.id, .display_name, "in=" + (.max_input_tokens|tostring), "out=" + (.max_tokens|tostring), .created_at] | @tsv) else . end'
 else
   echo "no token (set ANTHROPIC_PROBE_TOKEN or LOGE_CLAUDE_1_TOKEN in ~/.secrets)"
 fi

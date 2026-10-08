@@ -33,6 +33,40 @@
         "zero_allowed": true,
         "levels": ["low", "medium", "high", "xhigh", "max"]
       }
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "object": "model",
+      "created": 1790553600,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Sonnet 5.5",
+      "description": "Balanced model for everyday coding and agentic work",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": ["low", "medium", "high", "xhigh", "max"]
+      }
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "object": "model",
+      "created": 1791396000,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Haiku 5.5",
+      "description": "Fastest, cheapest model for lightweight tasks",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 128000,
+        "zero_allowed": true,
+        "levels": ["low", "medium", "high", "xhigh", "max"]
+      }
     }
   ]
 }

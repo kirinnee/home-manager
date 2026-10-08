@@ -4,7 +4,7 @@ This is the full design brief for the sub-agent that renders an artifact version
 (`vN.md`) into a standalone `vN.html`. The controller passes the sub-agent: the
 `path` that `kautopilot revise` returned, and the Read URL (`revise`'s returned
 `url`) to use verbatim as the source link. On Codex, delegate this renderer to a
-**Sonnet 5** subagent when model selection is available; if it is not, use the
+**Sonnet 5.5** subagent when model selection is available; if it is not, use the
 strongest available visual/code-writing subagent. Tell the sub-agent to **use the
 `frontend-design` skill if available** — and if that skill isn't installed, to apply
 the same accessible visual-design principles directly (don't fail).
