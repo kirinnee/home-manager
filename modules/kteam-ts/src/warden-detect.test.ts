@@ -391,10 +391,10 @@ describe('A6 sus list (alive but weird — assigned-warden anomalies)', () => {
           hasLiveMonitor: true,
           state: {
             startedAt: iso(60 * 60_000),
-            lastTranscriptAt: iso(5_000),
+            lastTranscriptAt: iso(20 * 60_000),
             lastSubprocessAt: iso(5_000),
             subprocessSince: iso(20 * 60_000),
-            lastPaneAt: iso(5_000),
+            lastPaneAt: iso(20 * 60_000),
           },
         }),
       ],
@@ -405,6 +405,25 @@ describe('A6 sus list (alive but weird — assigned-warden anomalies)', () => {
     expect(result.anomalies[0]!.kind).toBe('sus_subprocess');
     expect(result.anomalies[0]!.assignedWarden).toBe(true);
     expect(result.anomalies[0]!.idleMinutes).toBe(20);
+  });
+
+  test('a long subprocess with advancing transcript does not assign a warden', () => {
+    const result = detectAnomalies(
+      [
+        view('tool_running', {
+          state: {
+            startedAt: iso(60 * 60_000),
+            lastTranscriptAt: iso(5_000),
+            lastSubprocessAt: iso(5_000),
+            subprocessSince: iso(20 * 60_000),
+            lastPaneAt: iso(20 * 60_000),
+          },
+        }),
+      ],
+      NOW,
+      OPTIONS,
+    );
+    expect(result.anomalies).toHaveLength(0);
   });
 
   test('all-fresh signals produce no sus anomaly', () => {

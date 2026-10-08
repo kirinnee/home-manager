@@ -287,7 +287,8 @@ export function detectAnomalies(
 
     // A6 sus list: alive-but-weird sessions the dumb reflex must not touch —
     // a long silent think (counters advancing, no transcript) or a long
-    // continuous background subprocess. Each gets ONE assigned warden that
+    // continuous background subprocess with no transcript or pane progress.
+    // Each gets ONE assigned warden that
     // investigates the actual work and verdicts leave/nudge/resume/kill.
     if (ACTIVE_MONITORED.includes(state.status)) {
       const ledger: LivenessLedger = {

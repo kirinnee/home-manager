@@ -125,13 +125,29 @@ describe('sus classifiers (alive but weird)', () => {
 
   test('sus_subprocess: a continuous episode longer than the threshold', () => {
     const findings = susFindings(
-      { lastSubprocessAt: iso(5), subprocessSince: iso(1000), lastTranscriptAt: iso(5) },
+      {
+        lastSubprocessAt: iso(5),
+        subprocessSince: iso(1000),
+        lastTranscriptAt: iso(1000),
+        lastPaneChangeAt: iso(1000),
+      },
       T0,
       OPTS,
     );
     expect(findings).toHaveLength(1);
     expect(findings[0]!.kind).toBe('sus_subprocess');
     expect(findings[0]!.forSeconds).toBe(1000);
+  });
+
+  test('a long subprocess with advancing transcript or pane is not sus', () => {
+    const stalled = {
+      lastSubprocessAt: iso(5),
+      subprocessSince: iso(1000),
+      lastTranscriptAt: iso(1000),
+      lastPaneChangeAt: iso(1000),
+    };
+    expect(susFindings({ ...stalled, lastTranscriptAt: iso(5) }, T0, OPTS)).toHaveLength(0);
+    expect(susFindings({ ...stalled, lastPaneChangeAt: iso(5) }, T0, OPTS)).toHaveLength(0);
   });
 
   test('a short or finished subprocess episode is not sus', () => {

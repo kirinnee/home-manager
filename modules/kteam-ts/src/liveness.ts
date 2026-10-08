@@ -9,7 +9,7 @@
  *
  *  SUS LIST (daemon sweep, smart): alive-but-weird sessions — thinking with
  *  counters active but no transcript growth for susThinkingSeconds, or a
- *  subprocess running continuously for susSubprocessSeconds — get ONE
+ *  subprocess running continuously without transcript or pane progress — get ONE
  *  assigned warden each to investigate and deliver a verdict
  *  (leave / nudge / resume / kill).
  */
@@ -155,8 +155,9 @@ export interface SusFinding {
  *      NOT tokensClimbing (token counter seen climbing within 2 ticks —
  *      null-safe: no token field = not climbing) AND the conversation has not
  *      grown for susThinkingSeconds (or never).
- *  (b) sus_subprocess: a subprocess is running NOW (seen within 2 ticks) and
- *      its continuous episode is at least susSubprocessSeconds old. */
+ *  (b) sus_subprocess: a subprocess is running NOW (seen within 2 ticks),
+ *      its continuous episode is at least susSubprocessSeconds old, and both
+ *      transcript and pane have been unchanged for susThinkingSeconds. */
 export function susFindings(
   ledger: LivenessLedger,
   nowMs: number,
@@ -186,7 +187,13 @@ export function susFindings(
     });
   }
   const since = parseMs(ledger.subprocessSince);
-  if (ages.subprocess <= activeWithin && since > 0 && nowMs - since >= options.susSubprocessSeconds * 1000) {
+  if (
+    ages.subprocess <= activeWithin &&
+    since > 0 &&
+    nowMs - since >= options.susSubprocessSeconds * 1000 &&
+    ages.transcript >= options.susThinkingSeconds &&
+    ages.paneChange >= options.susThinkingSeconds
+  ) {
     const forSeconds = Math.floor((nowMs - since) / 1000);
     findings.push({
       kind: 'sus_subprocess',
