@@ -3,8 +3,18 @@
 // proxy to 127.0.0.1 on its own host, so you "access it locally" on whichever
 // machine it runs on.
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { authDir, composeFile, dataDir, internalApiKey, localUrl, PATCHED_IMAGE, resolvePort } from './paths';
-import { die, dockerCompose, log, need, ok, run, warn } from './exec';
+import { posix } from 'node:path';
+import {
+  authDir,
+  composeFile,
+  containerName,
+  dataDir,
+  internalApiKey,
+  localUrl,
+  PATCHED_IMAGE,
+  resolvePort,
+} from './paths';
+import { die, dockerCompose, log, need, ok, run, warn, type RunOpts, type RunResult } from './exec';
 
 function requireRendered(): void {
   if (!existsSync(composeFile)) die(`no compose file at ${composeFile} — run \`kloge pull\` first`);
@@ -22,6 +32,55 @@ export async function up(): Promise<void> {
   if (r.code !== 0) die(`docker compose up failed:\n${r.stderr.trim()}`);
   ok(`up — ${localUrl()}`);
   await probe();
+}
+
+interface RestartDeps {
+  runCommand: (cmd: string[], opts?: RunOpts) => Promise<RunResult>;
+  compose: (args: string[], opts?: RunOpts) => Promise<RunResult>;
+  sleep: (ms: number) => Promise<unknown>;
+}
+
+/** Refresh a running proxy after pull replaced its mounted auth directory. */
+export async function restartIfRunning(overrides: Partial<RestartDeps> = {}): Promise<void> {
+  const deps: RestartDeps = { runCommand: run, compose: dockerCompose, sleep: Bun.sleep, ...overrides };
+  let inspected: RunResult;
+  try {
+    inspected = await deps.runCommand(['docker', 'inspect', '--format', '{{.State.Running}}', containerName]);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; // pull also works without Docker installed
+    throw error;
+  }
+  if (inspected.code !== 0) {
+    if (/No such (object|container)/i.test(inspected.stderr)) return;
+    throw new Error(`could not inspect local proxy: ${inspected.stderr.trim() || inspected.stdout.trim()}`);
+  }
+  if (inspected.stdout.trim() !== 'true') return;
+
+  log('recreating running CLIProxyAPI to load the pulled credentials…');
+  const recreated = await deps.compose(['-f', composeFile, 'up', '-d', '--force-recreate'], { cwd: dataDir });
+  if (recreated.code !== 0) throw new Error(`docker compose recreate failed:\n${recreated.stderr.trim()}`);
+
+  const url = `${localUrl()}/v1/models`;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const response = await deps.runCommand([
+      'curl',
+      '-fsS',
+      '-m',
+      '5',
+      '-H',
+      `Authorization: Bearer ${internalApiKey}`,
+      url,
+    ]);
+    if (response.code === 0) {
+      const models = extractModelIds(response.stdout);
+      if (models.length > 0) {
+        ok(`serving ${models.length} model(s): ${models.slice(0, 8).join(', ')}${models.length > 8 ? '…' : ''}`);
+        return;
+      }
+    }
+    if (attempt < 29) await deps.sleep(1000);
+  }
+  throw new Error(`proxy was recreated, but ${url} did not serve any models within 30 seconds`);
 }
 
 export async function down(): Promise<void> {
@@ -82,6 +141,30 @@ export interface PushOpts {
   host: string; // user@host (an ssh target)
   remoteDir: string; // remote path for the ~/.kloge mirror
   start: boolean; // run `docker compose up -d` on the box after copying
+  yes?: boolean; // allow rsync to delete remote-only credential files
+}
+
+/** Inspect remote auth before rsync --delete can remove credentials. */
+export async function remoteCredentialLoss(
+  opts: Pick<PushOpts, 'host' | 'remoteDir'>,
+  localFiles: readonly string[],
+  runCommand: (cmd: string[]) => Promise<RunResult> = run,
+): Promise<string[]> {
+  const remoteAuth = posix.join(opts.remoteDir, 'auth');
+  const command = `if test -d ${shq(remoteAuth)}; then LC_ALL=C ls -1A ${shq(remoteAuth)}; fi`;
+  const result = await runCommand(['ssh', '-o', 'ClearAllForwardings=yes', opts.host, command]);
+  if (result.code !== 0) throw new Error(`could not list remote credentials on ${opts.host}: ${result.stderr.trim()}`);
+  const local = new Set(localFiles.filter(file => file.endsWith('.json')));
+  return result.stdout.split('\n').filter(file => file.endsWith('.json') && !local.has(file));
+}
+
+export function requirePushConfirmation(losses: readonly string[], yes: boolean): void {
+  if (losses.length > 0 && !yes) {
+    throw new Error(
+      `push would delete ${losses.length} remote-only credential file(s): ${losses.join(', ')}. ` +
+        'Pass --yes to confirm, or add those credentials locally before pushing.',
+    );
+  }
 }
 
 export function composeUsesPatchedImage(contents: string): boolean {
@@ -133,6 +216,12 @@ export async function push(opts: PushOpts): Promise<void> {
     `sudo -n chown -R "$(id -un)":"$(id -gn)" ${shq(opts.remoteDir)} 2>/dev/null || true`;
   const mk = await run([...SSH, opts.host, prep]);
   if (mk.code !== 0) die(`ssh prep failed on ${opts.host}:\n${mk.stderr.trim()}`);
+
+  const losses = await remoteCredentialLoss(opts, readdirSync(authDir));
+  requirePushConfirmation(losses, Boolean(opts.yes));
+  if (losses.length > 0) {
+    warn(`--yes confirmed deletion of ${losses.length} remote-only credential file(s): ${losses.join(', ')}`);
+  }
 
   log(`syncing ${dataDir}/ -> ${opts.host}:${opts.remoteDir}/`);
   // Trailing slash on source copies contents. --delete keeps the box a mirror

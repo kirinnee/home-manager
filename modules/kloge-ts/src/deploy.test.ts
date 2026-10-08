@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { buildRemoteStartCommand } from './deploy';
+import { buildRemoteStartCommand, remoteCredentialLoss, requirePushConfirmation, restartIfRunning } from './deploy';
 
 const tempDirs: string[] = [];
 
@@ -68,5 +68,77 @@ describe('buildRemoteStartCommand', () => {
   test('keeps inherited system Docker and docker-compose v1 as fallbacks', () => {
     expect(runRemoteStart({ docker: 'with-compose' }).code).toBe(0);
     expect(runRemoteStart({ dockerCompose: true }).code).toBe(0);
+  });
+});
+
+describe('pull restart', () => {
+  test('recreates a running proxy and waits for served models', async () => {
+    const calls: string[][] = [];
+    let probes = 0;
+    await restartIfRunning({
+      runCommand: async cmd => {
+        calls.push(cmd);
+        if (cmd[0] === 'docker') return { code: 0, stdout: 'true\n', stderr: '' };
+        probes += 1;
+        return {
+          code: 0,
+          stdout: JSON.stringify({ data: probes === 1 ? [] : [{ id: 'claude-fable-5-1' }] }),
+          stderr: '',
+        };
+      },
+      compose: async args => {
+        calls.push(args);
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      sleep: async () => {},
+    });
+    expect(calls.some(call => call.includes('--force-recreate'))).toBe(true);
+    expect(probes).toBe(2);
+  });
+
+  test('leaves an absent container stopped', async () => {
+    let composeCalled = false;
+    await restartIfRunning({
+      runCommand: async () => ({ code: 1, stdout: '', stderr: 'No such object: kloge-cliproxy' }),
+      compose: async () => {
+        composeCalled = true;
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    });
+    expect(composeCalled).toBe(false);
+  });
+});
+
+describe('push credential deletion guard', () => {
+  test('reports only remote credential files absent locally', async () => {
+    const calls: string[][] = [];
+    const losses = await remoteCredentialLoss(
+      { host: 'example.test', remoteDir: '.kloge' },
+      ['claude-1.json', 'config.yaml'],
+      async cmd => {
+        calls.push(cmd);
+        return { code: 0, stdout: 'claude-1.json\nclaude-2.json\nlogs\n', stderr: '' };
+      },
+    );
+    expect(calls[0]).toEqual([
+      'ssh',
+      '-o',
+      'ClearAllForwardings=yes',
+      'example.test',
+      "if test -d '.kloge/auth'; then LC_ALL=C ls -1A '.kloge/auth'; fi",
+    ]);
+    expect(losses).toEqual(['claude-2.json']);
+    expect(() => requirePushConfirmation(losses, false)).toThrow('delete 1 remote-only credential file');
+    expect(() => requirePushConfirmation(losses, true)).not.toThrow();
+  });
+
+  test('fails closed when remote auth cannot be inspected', async () => {
+    expect(
+      remoteCredentialLoss({ host: 'example.test', remoteDir: '.kloge' }, [], async () => ({
+        code: 255,
+        stdout: '',
+        stderr: 'ssh unavailable',
+      })),
+    ).rejects.toThrow('ssh unavailable');
   });
 });

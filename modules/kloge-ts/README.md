@@ -52,14 +52,16 @@ port is bound to `127.0.0.1` on whichever host it runs on.
 
 ```bash
 kloge build                    # build the maintained image (overlay adds claude-opus-5-5 + claude-fable-5-1; models.keep.json trims the catalog to the fleet set)
-kloge pull                     # pull creds + render config/compose (kubectl, ctx eks-llm-us-east-1)
+kloge pull                     # pull creds + render; recreate a running local proxy and wait for models
 kloge pull -c <other-context>  # pull from a different kube context
+kloge pull --no-restart        # pull + render without recreating the local proxy
 kloge up                       # start the container locally -> http://127.0.0.1:8317
 kloge status                   # data dir, creds, container state, served models
 kloge logs -f                  # follow container logs
 kloge down                     # stop the local container
 
 kloge push user@box --no-up    # copy only; build/load the maintained image there, then start it
+kloge push user@box --yes      # confirm deletion of remote-only auth files during sync
 ```
 
 Point a client at it (real upstream model IDs — this CLIProxyAPI version does
@@ -160,3 +162,6 @@ remote host. Build or load `kloge-cliproxy:patched` on that host first, use
   byte-compatible with what loge renders. If loge changes, update `src/tokens.ts`.
 - The pulled snapshot drifts: raw `sk-ant-oat…` Claude tokens don't refresh and
   expire; re-run `kloge pull` (and `kloge push`) to refresh.
+- `kloge push` checks the box's auth directory before `rsync --delete`. If it
+  contains credential files absent locally, the command lists them and requires
+  `--yes` before deleting them.

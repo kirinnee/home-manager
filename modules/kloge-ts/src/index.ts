@@ -10,7 +10,7 @@
 import { Command } from 'commander';
 import { DEFAULT_PORT, resolvePort } from './paths';
 import { pull, renderOnly } from './pull';
-import { down, logs, push, status, up } from './deploy';
+import { down, logs, push, restartIfRunning, status, up } from './deploy';
 import { buildPatchedImage } from './build';
 
 const program = new Command();
@@ -23,6 +23,7 @@ program
   .option('-n, --namespace <ns>', 'secret namespace', 'loge')
   .option('-s, --secret <name>', 'secret name', 'loge-credentials')
   .option('-p, --port <port>', 'listen port', String(DEFAULT_PORT))
+  .option('--no-restart', 'leave an already-running local container untouched')
   .action(async o => {
     await pull({
       context: o.context,
@@ -30,6 +31,7 @@ program
       secret: o.secret,
       port: Number.parseInt(o.port, 10),
     });
+    if (o.restart) await restartIfRunning();
   });
 
 program
@@ -82,8 +84,9 @@ program
   .description('rsync ~/.kloge to a box and start CLIProxyAPI there (docker)')
   .option('-d, --dir <path>', 'remote dir (relative to remote home)', '.kloge')
   .option('--no-up', 'copy only; do not start the container on the box')
+  .option('-y, --yes', 'confirm deletion of remote-only credential files')
   .action(async (host, o) => {
-    await push({ host, remoteDir: o.dir, start: o.up });
+    await push({ host, remoteDir: o.dir, start: o.up, yes: Boolean(o.yes) });
   });
 
 program.parseAsync().catch(err => {
