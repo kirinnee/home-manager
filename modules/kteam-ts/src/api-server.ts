@@ -186,6 +186,7 @@ async function wardenScopeDenial(
   url: URL,
   service: KTeamService,
   stopCapability: string | undefined,
+  callerSessionId?: string,
 ): Promise<Response | undefined> {
   const forbidden = (what: string) => json({ error: `the warden-scoped token may not ${what}` }, 403);
   const pathname = url.pathname;
@@ -227,10 +228,14 @@ async function wardenScopeDenial(
       // A warden completes its own turn with `kteam signal done`; permit signal
       // ONLY when the target resolves to a warden-labelled session, so it can
       // never mark another teammate's work done or ask for help on its behalf.
+      // Every warden pane shares the scoped token, so the label alone would let
+      // warden A complete warden B: the caller's own session id must also be
+      // the resolved target (aliases resolve before the comparison).
       const id = decodeURIComponent(match[1]!);
       const target = await service.get(id).catch(() => undefined);
-      if (target?.config.label === WARDEN_LABEL) return undefined;
-      return forbidden('signal a non-warden session');
+      if (target?.config.label !== WARDEN_LABEL) return forbidden('signal a non-warden session');
+      if (callerSessionId && target.config.id === callerSessionId) return undefined;
+      return forbidden('signal another warden (a warden may only signal itself)');
     }
     if (action === 'stop') {
       // ASSIGNED wardens may stop exactly their assigned session, proven by
@@ -543,6 +548,7 @@ export function startApiServer(options: ApiServerOptions): Server<SocketData> {
           url,
           options.service,
           request.headers.get('x-kteam-stop-capability') ?? undefined,
+          request.headers.get('x-kteam-session-id')?.trim() || undefined,
         );
         if (denial) {
           // The login route's no-store policy is per-ROUTE, not per-branch:

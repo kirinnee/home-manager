@@ -1,6 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import path from 'node:path';
-import { ledgerAges, reflexAssess, renderLivenessYaml, susFindings, type LivenessLedger } from './liveness';
+import {
+  confirmReflexKill,
+  ledgerAges,
+  reflexAssess,
+  reflexLoadGuard,
+  renderLivenessYaml,
+  susFindings,
+  type LivenessLedger,
+  type ReflexGuardState,
+} from './liveness';
 import { backgroundTerminalCount, foldStallLiveness, type StallLivenessState } from './tmux-controller';
 
 const T0 = Date.parse('2026-07-22T12:00:00.000Z');
@@ -303,5 +312,91 @@ describe('fixture pair → ledger (the 2026-07-22 wrongful stall-kill)', () => {
     fold = foldStallLiveness(fold, b, T0 - 60_000);
     fold = foldStallLiveness(fold, b, T0);
     expect(fold.lastWorkAdvanceAt).toBe(0);
+  });
+});
+
+describe('reflex load guard (2026-07-29 launch-storm false stall-kill)', () => {
+  const TICK = 30_000;
+  const quiet: LivenessLedger = { lastTranscriptAt: iso(9999), lastPaneChangeAt: iso(9999) };
+
+  test('lag above the threshold with zero life-signs defers the kill and restarts the silence clock', () => {
+    // A frozen-looking session already nudged long ago: unguarded, this kills.
+    const nudgedAtMs = T0 - 400_000;
+    expect(reflexAssess({ ledger: quiet, nowMs: T0, ...KNOBS, nudgedAtMs }).verdict).toBe('kill');
+    // But the monitor's previous tick was 90s ago on a 30s cadence: 60s late.
+    const guard = reflexLoadGuard({
+      state: { lastTickAtMs: T0 - 90_000, killTicks: 1 },
+      nowMs: T0,
+      expectedTickMs: TICK,
+      eventLoopLagMs: 0,
+    });
+    expect(guard.lagged).toBe(true);
+    expect(guard.reason).toMatch(/60s late/);
+    expect(guard.state).toEqual({ lastTickAtMs: T0, lagAnchorMs: T0, killTicks: 0 });
+    const assessed = reflexAssess({
+      ledger: quiet,
+      nowMs: T0,
+      anchorMs: guard.state.lagAnchorMs,
+      ...KNOBS,
+      nudgedAtMs,
+    });
+    expect(assessed.verdict).toBe('alive');
+    expect(confirmReflexKill(guard.state, 'alive').kill).toBe(false);
+  });
+
+  test('daemon event-loop lag and host overload also defer; a normal tick does not', () => {
+    const state: ReflexGuardState = { lastTickAtMs: T0 - TICK, killTicks: 0 };
+    expect(reflexLoadGuard({ state, nowMs: T0, expectedTickMs: TICK, eventLoopLagMs: 45_000 }).lagged).toBe(true);
+    expect(reflexLoadGuard({ state, nowMs: T0, expectedTickMs: TICK, eventLoopLagMs: 0, loadPerCpu: 6 }).lagged).toBe(
+      true,
+    );
+    const normal = reflexLoadGuard({ state, nowMs: T0, expectedTickMs: TICK, eventLoopLagMs: 1_000, loadPerCpu: 1 });
+    expect(normal.lagged).toBe(false);
+    expect(normal.state).toEqual({ lastTickAtMs: T0, killTicks: 0 });
+    // First tick of a monitor has no previous tick to be late against.
+    expect(
+      reflexLoadGuard({ state: { killTicks: 0 }, nowMs: T0, expectedTickMs: TICK, eventLoopLagMs: 0 }).lagged,
+    ).toBe(false);
+  });
+
+  test('a kill needs two consecutive stale ticks; any other verdict resets the streak', () => {
+    let state: ReflexGuardState = { killTicks: 0 };
+    let step = confirmReflexKill(state, 'kill');
+    expect(step.kill).toBe(false);
+    state = step.state;
+    step = confirmReflexKill(state, 'alive');
+    expect(step.kill).toBe(false);
+    expect(step.state.killTicks).toBe(0);
+    step = confirmReflexKill(confirmReflexKill(step.state, 'kill').state, 'kill');
+    expect(step.kill).toBe(true);
+  });
+
+  test('a real wedge is still killed once the host recovers', () => {
+    const nudgedAtMs = T0 - 400_000;
+    // Lagged tick at T0 restarts the clock...
+    let state = reflexLoadGuard({
+      state: { lastTickAtMs: T0 - 120_000, killTicks: 0 },
+      nowMs: T0,
+      expectedTickMs: TICK,
+      eventLoopLagMs: 0,
+    }).state;
+    // ...then normal ticks every 30s with still zero life-signs.
+    let killed = false;
+    for (let now = T0 + TICK; now <= T0 + 600_000 && !killed; now += TICK) {
+      const guard = reflexLoadGuard({ state, nowMs: now, expectedTickMs: TICK, eventLoopLagMs: 0 });
+      expect(guard.lagged).toBe(false);
+      const verdict = reflexAssess({
+        ledger: quiet,
+        nowMs: now,
+        anchorMs: guard.state.lagAnchorMs,
+        ...KNOBS,
+        nudgedAtMs,
+      }).verdict;
+      const confirmation = confirmReflexKill(guard.state, verdict);
+      state = confirmation.state;
+      killed = confirmation.kill;
+      if (killed) expect(now - T0).toBeGreaterThanOrEqual(KNOBS.killAfterSeconds * 1000 + TICK);
+    }
+    expect(killed).toBe(true);
   });
 });

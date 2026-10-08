@@ -185,6 +185,11 @@ function finalNonEmptyLine(value: string): string {
 
 const RATE_LIMIT_PATTERN =
   /(?:\b429\b|rate[ -]?limit|too many requests|spend limit|usage (?:limit|cap)|insufficient_quota|credit balance|resource exhausted|(?:limit|quota).*(?:reached|exceed|exhaust)|(?:hit|exceed|exhaust).*(?:limit|quota))/i;
+// An org admin switched the account off. Claude Code then exits with an SDK
+// tag (`[claude-code:unrecognized_model]`) as its LAST line, which used to be
+// reported verbatim and sent the reader chasing a model-alias regression.
+const ACCOUNT_DISABLED_PATTERN =
+  /(?:usage allocation has been disabled|(?:disabled|suspended|revoked) by (?:your|the|an) (?:org(?:anization)? )?admin(?:istrator)?|ask your (?:org(?:anization)? )?admin)/i;
 const AUTH_PATTERN =
   /(?:\b401\b|not logged in|login required|unauthori[sz]ed|authentication failed|invalid (?:api )?key|credentials? (?:were )?rejected|(?:invalid|expired).*token|token.*(?:invalid|expired)|please run \/login)/i;
 
@@ -196,8 +201,11 @@ function matchingDiagnostic(value: string, pattern: RegExp): string {
   return (lines.find(line => pattern.test(line)) ?? lines.at(-1) ?? 'no diagnostic output').slice(0, 300);
 }
 
-function lastDiagnostic(value: string): string {
-  return finalNonEmptyLine(value).slice(0, 300) || 'no diagnostic output';
+/** The harness's user-facing result (stdout) AND its last stderr line: the
+ * SDK's trailing `[claude-code:*]` tag alone hides the real reason. */
+function exitDiagnostic(stdout: string, stderr: string): string {
+  const parts = [finalNonEmptyLine(stdout), finalNonEmptyLine(stderr)].filter(Boolean);
+  return [...new Set(parts)].join(' | ').slice(0, 300) || 'no diagnostic output';
 }
 
 async function claudeSupportsBare(wrapper: string, env: Readonly<NodeJS.ProcessEnv>): Promise<boolean> {
@@ -306,6 +314,18 @@ async function runProbe(options: HarnessProbeOptions, cachePath: string | undefi
         error: `timed out after ${Math.round(timeoutMs / 1_000)}s`,
       };
     }
+    if (ACCOUNT_DISABLED_PATTERN.test(output)) {
+      // A credential failure for routing: retrying or waiting will not help.
+      return {
+        binary: options.binary,
+        up: false,
+        cached: false,
+        ms,
+        checkedAt,
+        failureKind: 'authentication',
+        error: `account disabled by its admin (exit ${code}): ${matchingDiagnostic(output, ACCOUNT_DISABLED_PATTERN)}`,
+      };
+    }
     if (RATE_LIMIT_PATTERN.test(output)) {
       return {
         binary: options.binary,
@@ -336,7 +356,7 @@ async function runProbe(options: HarnessProbeOptions, cachePath: string | undefi
         ms,
         checkedAt,
         failureKind: 'process_error',
-        error: `probe exited ${code}: ${lastDiagnostic(output)}`,
+        error: `probe exited ${code}: ${exitDiagnostic(stdout, stderr)}`,
       };
     }
     return {

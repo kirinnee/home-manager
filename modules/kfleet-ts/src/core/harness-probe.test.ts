@@ -192,6 +192,29 @@ describe('success cache', () => {
     expect(await readFile(cachePath, 'utf8').catch(() => '')).not.toContain('claude-auto-limited');
   });
 
+  test('an admin-disabled account is an authentication failure carrying the real reason, not the SDK tag', async () => {
+    const { wrapper } = await fixture(
+      'claude-auto-disabled',
+      `printf 'Your usage allocation has been disabled by your admin\\n'\nprintf '[claude-code:unrecognized_model] {"model":"claude-sonnet-5-5[1m]","query_source":"sdk"}\\n' >&2\nexit 1`,
+    );
+    const result = await probeHarness(options('claude-auto-disabled', wrapper, 'claude'));
+    expect(result.up).toBe(false);
+    expect(result.failureKind).toBe('authentication');
+    expect(result.error).toContain('account disabled by its admin');
+    expect(result.error).toContain('usage allocation has been disabled');
+    expect(result.error).not.toContain('unrecognized_model');
+  });
+
+  test('an unclassified exit surfaces the harness result text alongside the trailing stderr tag', async () => {
+    const { wrapper } = await fixture(
+      'claude-auto-odd',
+      `printf 'Something unexpected happened upstream\\n'\nprintf '[claude-code:some_tag] {}\\n' >&2\nexit 1`,
+    );
+    const result = await probeHarness(options('claude-auto-odd', wrapper, 'claude'));
+    expect(result.failureKind).toBe('process_error');
+    expect(result.error).toBe('probe exited 1: Something unexpected happened upstream | [claude-code:some_tag] {}');
+  });
+
   test('rejects wrong output and timeouts when no exact reply arrives', async () => {
     const wrong = await fixture('codex-auto-wrong', `printf 'banner\\n${HARNESS_PROBE_SENTINEL}\\n'`);
     const slow = await fixture(

@@ -2204,10 +2204,32 @@ describe('warden-scoped token authorization', () => {
     const wardenBase = scopedServer(new WardenLabelledService());
     const allowed = await fetch(`${wardenBase}/v1/sessions/s1/signal`, {
       method: 'POST',
-      headers: scoped,
+      headers: { ...scoped, 'x-kteam-session-id': 's1' },
       body: JSON.stringify({ kind: 'done' }),
     });
     expect(allowed.status).toBe(202);
+  });
+
+  test('warden A cannot signal warden B under the shared scoped token', async () => {
+    // Two warden-labelled sessions, one shared scoped bearer token.
+    class TwoWardensService extends FakeService {
+      get = (async (id: string) =>
+        ({
+          ...view,
+          config: { ...view.config, id, label: WARDEN_LABEL },
+          state: { ...view.state, id },
+        }) as SessionView) as unknown as FakeService['get'];
+    }
+    const base = scopedServer(new TwoWardensService());
+    const signal = (target: string, caller?: string) =>
+      fetch(`${base}/v1/sessions/${target}/signal`, {
+        method: 'POST',
+        headers: { ...scoped, ...(caller ? { 'x-kteam-session-id': caller } : {}) },
+        body: JSON.stringify({ kind: 'done' }),
+      });
+    expect((await signal('warden-b', 'warden-a')).status).toBe(403);
+    expect((await signal('warden-b')).status).toBe(403); // no caller identity at all
+    expect((await signal('warden-a', 'warden-a')).status).toBe(202); // done is accepted asynchronously
   });
 });
 

@@ -113,6 +113,63 @@ export function reflexAssess(input: {
   return { verdict: 'alive', zeroSeconds, strongSeconds, secondsSince };
 }
 
+/** A monitor tick this much later than its scheduled gap, or a daemon
+ *  event-loop lag this large, means the HOST was starved (launch storm,
+ *  load ~138 on 2026-07-29): the silence the reflex measured is partly the
+ *  machine's, not the agent's, so it is not evidence of a frozen agent. */
+export const REFLEX_LAG_DEFER_MS = 30_000;
+/** 1-minute load average per CPU at or above which the reflex defers. */
+export const REFLEX_LOAD_PER_CPU_DEFER = 4;
+
+/** Per-monitor state of the reflex load guard, carried across ticks on the
+ *  monitor's OWN clock (never persisted: a restarted monitor starts fresh). */
+export interface ReflexGuardState {
+  /** When the previous reflex tick ran (monitor clock, epoch ms). */
+  lastTickAtMs?: number;
+  /** Silence is measured from no earlier than this — moved to "now" on every
+   *  lagged tick, so a starvation window never counts toward nudge/kill. */
+  lagAnchorMs?: number;
+  /** Consecutive un-lagged ticks whose verdict was `kill`. */
+  killTicks: number;
+}
+
+/** Pure load gate in front of the reflex escalation. A lagged tick extends
+ *  the anchor and resets the kill streak; the caller must then skip nudge
+ *  AND kill for this tick. */
+export function reflexLoadGuard(input: {
+  state: ReflexGuardState;
+  nowMs: number;
+  /** The gap the monitor scheduled since its previous tick (its sleep). */
+  expectedTickMs: number;
+  eventLoopLagMs: number;
+  loadPerCpu?: number;
+}): { lagged: boolean; reason?: string; state: ReflexGuardState } {
+  const { state, nowMs } = input;
+  const tickLateMs =
+    state.lastTickAtMs === undefined ? 0 : Math.max(0, nowMs - state.lastTickAtMs - input.expectedTickMs);
+  const reason =
+    tickLateMs >= REFLEX_LAG_DEFER_MS
+      ? `monitor tick ran ${Math.round(tickLateMs / 1000)}s late`
+      : input.eventLoopLagMs >= REFLEX_LAG_DEFER_MS
+        ? `daemon event loop lagged ${Math.round(input.eventLoopLagMs / 1000)}s`
+        : input.loadPerCpu !== undefined && input.loadPerCpu >= REFLEX_LOAD_PER_CPU_DEFER
+          ? `host load ${input.loadPerCpu.toFixed(1)} per CPU`
+          : undefined;
+  if (reason) return { lagged: true, reason, state: { lastTickAtMs: nowMs, lagAnchorMs: nowMs, killTicks: 0 } };
+  return { lagged: false, state: { ...state, lastTickAtMs: nowMs } };
+}
+
+/** Kill confirmation: a `kill` verdict must hold on TWO consecutive un-lagged
+ *  ticks before the monitor acts; any other verdict resets the streak. */
+export function confirmReflexKill(
+  state: ReflexGuardState,
+  verdict: ReflexVerdict,
+): { kill: boolean; state: ReflexGuardState } {
+  if (verdict !== 'kill') return { kill: false, state: { ...state, killTicks: 0 } };
+  const killTicks = state.killTicks + 1;
+  return { kill: killTicks >= 2, state: { ...state, killTicks } };
+}
+
 /** Human-readable per-session liveness view, atomically rewritten every
  *  monitor tick to <session dir>/liveness.yaml — the always-fresh on-disk
  *  ledger the user (and assigned wardens) can read directly. Pure renderer;

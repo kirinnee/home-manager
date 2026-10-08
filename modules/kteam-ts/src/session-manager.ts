@@ -1,5 +1,6 @@
 import { appendFile, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
+import os from 'os';
 import path from 'path';
 import { prepareHarnessProbeEnv, probeHarness as runHarnessProbe } from '../../kfleet-ts/src/core/harness-probe';
 import { AttachmentError, AttachmentStore, type StoredAttachment } from './attachments';
@@ -173,11 +174,20 @@ import {
   type PaneState,
   type StallLivenessState,
 } from './tmux-controller';
-import { reflexAssess, renderLivenessYaml, susFindings, type LivenessLedger } from './liveness';
+import {
+  confirmReflexKill,
+  reflexAssess,
+  reflexLoadGuard,
+  renderLivenessYaml,
+  susFindings,
+  type LivenessLedger,
+  type ReflexGuardState,
+} from './liveness';
 import type {
   Harness,
   InteractionMode,
   KTeamEvent,
+  ModelFallbackEventData,
   RuntimeControlRequest,
   SendDisposition,
   SendPath,
@@ -655,6 +665,16 @@ const TERMINAL_REPROBE_MS = 250;
  *  liveness signals, not history: keeping them out of events.jsonl removed the
  *  largest write class the daemon had (6584 terminal.frame records in one real
  *  12.7k-event session, every one of them an fsync). */
+/** A silently downgraded session (state.modelFallback) reads as 'degraded'
+ *  while it runs, whichever monitor path last wrote a routine
+ *  'healthy'/'thinking' — dozens of sites write those, so the overlay lives on
+ *  the read side (list/get) rather than in each writer. */
+function withModelFallbackHealth(state: SessionState): SessionState {
+  return state.modelFallback && (state.health === 'healthy' || state.health === 'thinking')
+    ? { ...state, health: 'degraded' }
+    : state;
+}
+
 const LIVE_ONLY_EVENT_TYPES = new Set(['terminal.frame']);
 /** Event classes the HARNESS already recorded in its own transcript. kteam
  *  indexes these by byte offset (chat_pointers) and streams them live, but never
@@ -1628,7 +1648,13 @@ export class SessionManager implements KTeamService {
   async list(): Promise<SessionView[]> {
     return this.store.listSessions().flatMap(item => {
       if (!item.config || !item.state) return [];
-      return [{ config: item.config as SessionConfig, state: item.state as SessionState, directory: item.directory }];
+      return [
+        {
+          config: item.config as SessionConfig,
+          state: withModelFallbackHealth(item.state as SessionState),
+          directory: item.directory,
+        },
+      ];
     });
   }
 
@@ -1639,7 +1665,7 @@ export class SessionManager implements KTeamService {
         this.store.readConfig<SessionConfig>(id),
         this.store.readState<SessionState>(id),
       ]);
-      return { config, state, directory: sessionDir(this.paths, id) };
+      return { config, state: withModelFallbackHealth(state), directory: sessionDir(this.paths, id) };
     } catch {
       throw new Error(`unknown kteam session "${id}"`);
     }
@@ -6275,6 +6301,10 @@ export class SessionManager implements KTeamService {
     // reflex must not flag it (2026-07-22: two healthy Fable sessions were
     // stall-killed mid-thinking this way).
     let liveness: StallLivenessState = { lastWorkAdvanceAt: 0 };
+    // Reflex load guard (2026-07-29 launch storm): a starved host must never
+    // read as a frozen agent. Kept on this monitor's own clock.
+    let reflexGuard: ReflexGuardState = { killTicks: 0 };
+    let reflexDeferReason: string | undefined;
     try {
       while (!signal.aborted && !this.closed) {
         let sleepSeconds = this.options.healthIntervalSeconds;
@@ -6828,10 +6858,29 @@ export class SessionManager implements KTeamService {
           };
           const nudgeAfter = view.config.nudgeAfterSeconds ?? 180;
           const killAfter = Math.max(view.config.killAfterSeconds ?? 300, nudgeAfter + 30);
+          // Load guard BEFORE the assessment: a lagged tick moves the silence
+          // anchor to now, so the starvation window never counts as silence.
+          const cpuCount = os.cpus().length;
+          const guard = reflexLoadGuard({
+            state: reflexGuard,
+            nowMs: Date.now(),
+            expectedTickMs: view.config.intervalSeconds * 1000,
+            eventLoopLagMs: this.eventLoopLagMs,
+            ...(cpuCount > 0 ? { loadPerCpu: os.loadavg()[0]! / cpuCount } : {}),
+          });
+          reflexGuard = guard.state;
+          if (guard.lagged && reflexDeferReason === undefined)
+            await this.emit(
+              id,
+              'session.reflex_deferred',
+              { reason: `${guard.reason}; stall nudge/kill deferred and the silence clock restarted` },
+              'watcher',
+            );
+          reflexDeferReason = guard.reason;
           const assessment = reflexAssess({
             ledger,
             nowMs: Date.now(),
-            anchorMs: turnStartedAt,
+            anchorMs: Math.max(turnStartedAt, reflexGuard.lagAnchorMs ?? 0),
             tickSeconds: view.config.intervalSeconds,
             nudgeAfterSeconds: nudgeAfter,
             killAfterSeconds: killAfter,
@@ -6843,6 +6892,13 @@ export class SessionManager implements KTeamService {
               Number.isFinite(value) ? Math.floor(value) : null,
             ]),
           );
+          // Two stale ticks on the monitor's own clock before a kill: one
+          // late observation must never end a session.
+          const killConfirmation = confirmReflexKill(
+            reflexGuard,
+            waiting || guard.lagged ? 'alive' : assessment.verdict,
+          );
+          reflexGuard = killConfirmation.state;
           if (waiting || assessment.verdict === 'alive') {
             // Only a returning STRONG life-sign ends the nudge episode. The
             // nudge's own injected text repaints the pane, so pane flicker
@@ -6852,6 +6908,8 @@ export class SessionManager implements KTeamService {
               await this.store.updateState<SessionState>(id, current => ({ ...current, nudgedAt: undefined }));
               view = await this.get(id);
             }
+          } else if (guard.lagged) {
+            // Host starved this tick: neither nudge nor kill (the anchor moved).
           } else if (assessment.verdict === 'nudge') {
             await this.store.updateState<SessionState>(id, current => ({ ...current, nudgedAt: now() }));
             await this.emit(
@@ -6870,6 +6928,8 @@ export class SessionManager implements KTeamService {
               )
               .catch(() => undefined);
             view = await this.get(id);
+          } else if (!killConfirmation.kill) {
+            // First stale kill tick: confirm on the next un-lagged one.
           } else {
             // kill: the nudge revived nothing.
             await this.tmux.snapshot(view.config, true);
@@ -7184,6 +7244,13 @@ export class SessionManager implements KTeamService {
           .catch(() => undefined);
         view = await this.get(id);
       }
+      // Silent model downgrade (session.model_fallback, journalled by the loop
+      // above). Sticky: the session keeps running on the wrong model for the
+      // rest of its life, so health stays 'degraded' and `status` says why.
+      const fallbackEvent = [...events].reverse().find(event => event.type === 'session.model_fallback') as
+        | { data: ModelFallbackEventData }
+        | undefined;
+      const modelFallback = fallbackEvent ? { ...fallbackEvent.data, at: now() } : undefined;
       // Transcript-based context accounting (turn-020): the harness's own
       // usage records are ground truth; the pane statusline is only a
       // fallback. Last usage event in the batch wins.
@@ -7296,9 +7363,15 @@ export class SessionManager implements KTeamService {
             ? current.health
             : status === 'awaiting_question'
               ? 'waiting'
-              : status === 'thinking'
-                ? 'thinking'
-                : 'healthy',
+              : (modelFallback ?? current.modelFallback)
+                ? 'degraded'
+                : status === 'thinking'
+                  ? 'thinking'
+                  : 'healthy',
+          ...(modelFallback && !current.modelFallback ? { modelFallback } : {}),
+          ...(modelFallback && !terminal
+            ? { reason: `model fell back: ${modelFallback.fromModel} → ${modelFallback.toModel}` }
+            : {}),
           openTools: [...openTools],
           pendingQuestion,
           turnCompleted,
@@ -8415,8 +8488,15 @@ export class SessionManager implements KTeamService {
   }
 
   /** Is this session holding a live warden? (An assigned warden's target must
-   *  keep its scratch — the warden is about to read it.) */
+   *  keep its scratch — the warden is about to read it.) Assigned wardens are
+   *  spawned WITHOUT a parent; their target link lives only in
+   *  wardenState.assignments, so that record is the authoritative check. */
   private hasLiveWarden(id: string): boolean {
+    const assignedWardenId = this.wardenState.assignments?.[id]?.wardenId;
+    if (assignedWardenId) {
+      const state = this.store.getSession(assignedWardenId)?.state as SessionState | undefined;
+      if (state && !terminalStatuses.includes(state.status)) return true;
+    }
     for (const session of this.store.listSessions()) {
       const config = session.config as SessionConfig | undefined;
       const state = session.state as SessionState | undefined;
@@ -8720,21 +8800,41 @@ export class SessionManager implements KTeamService {
           anomalies: result.anomalies,
         });
     }
-    // Sus anomalies (alive but weird) get ONE assigned warden each; everything
-    // else goes through the shared fleet-triage escalation below.
-    const assigned = await this.spawnAssignedWardens(
-      result.anomalies.filter(item => item.assignedWarden === true),
+    const { assigned, escalation } = await this.dispatchWardens(
+      result.anomalies,
+      result.fingerprint,
       sessions,
       forceEscalation,
     );
-    const triage = result.anomalies.filter(item => item.assignedWarden !== true);
-    const escalation = await this.maybeEscalate(triage, result.fingerprint, sessions, forceEscalation);
     return {
       sweptAt: at,
       anomalies: result.anomalies,
       ...escalation,
       ...(assigned.length ? { assignedWardens: assigned } : {}),
     };
+  }
+
+  /** Both warden spawn sites for one sweep, drawing down ONE shared cap. */
+  private async dispatchWardens(
+    anomalies: WardenAnomaly[],
+    fingerprint: string,
+    sessions: SessionView[],
+    forceEscalation: boolean,
+  ): Promise<{ assigned: string[]; escalation: { spawned?: string; message?: string } }> {
+    // Sus anomalies (alive but weird) get ONE assigned warden each; everything
+    // else goes through the shared fleet-triage escalation below.
+    const assigned = await this.spawnAssignedWardens(
+      anomalies.filter(item => item.assignedWarden === true),
+      sessions,
+      forceEscalation,
+    );
+    const triage = anomalies.filter(item => item.assignedWarden !== true);
+    // Re-read after assigned spawns: maybeEscalate counts live wardens from the
+    // array it is given, and the sweep-start snapshot cannot see a warden the
+    // await above just launched — that let one sweep exceed the shared cap.
+    const escalationSessions = assigned.length > 0 ? await this.list() : sessions;
+    const escalation = await this.maybeEscalate(triage, fingerprint, escalationSessions, forceEscalation);
+    return { assigned, escalation };
   }
 
   /** Pick the account for the NEXT warden spawn (both spawn sites call this

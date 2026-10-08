@@ -239,7 +239,17 @@ export interface SessionState {
   lastDiffAt?: string;
   exitCode?: number;
   reason?: string;
-  health?: 'healthy' | 'thinking' | 'waiting' | 'idle' | 'stalled' | 'rate_limited' | 'crashed' | 'unknown';
+  /** 'degraded' = running, but not as asked (see modelFallback). */
+  health?:
+    | 'healthy'
+    | 'thinking'
+    | 'waiting'
+    | 'idle'
+    | 'stalled'
+    | 'rate_limited'
+    | 'crashed'
+    | 'unknown'
+    | 'degraded';
   promptReady?: boolean;
   /** The session's Remote Control surface, from the harness's own
    *  `bridge_status` transcript record (claude + `--rc`). Sticky for the whole
@@ -422,6 +432,10 @@ export interface SessionState {
    *  gone when the daemon restarted: the conversation is intact and
    *  `kteam resume` brings it back. Cleared by the next launch. */
   resumable?: boolean;
+  /** Sticky record of a silent model downgrade (session.model_fallback): the
+   *  harness served toModel instead of the requested fromModel. Keeps health
+   *  'degraded' for the rest of the session. */
+  modelFallback?: ModelFallbackEventData & { at: string };
 }
 
 /** Payload of the `session.model_fallback` event: the harness quietly served a
