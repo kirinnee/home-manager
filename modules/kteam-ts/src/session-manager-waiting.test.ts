@@ -58,6 +58,13 @@ async function waitingManager(initial: Partial<SessionState> = {}): Promise<Wait
   manager.emit = async (_id: string, type: string, data: Record<string, unknown>) => {
     events.push({ type, data });
   };
+  // The expired-wait wake obligation (wakePending) is a plain state write.
+  manager.store = {
+    updateState: async (_id: string, mutate: (current: SessionState) => SessionState) => {
+      state = mutate(state);
+      return state;
+    },
+  };
   manager.tmux = {
     send: async (_config: SessionConfig, message: string) => {
       sent.push(message);
@@ -357,5 +364,104 @@ describe('what the monitor actually gates on', () => {
     expect(turnCeilingMs(config, state({}))).toBe(14_400_000);
     // Three hours parked: the 4 h ceiling now falls at 7 h of wall clock.
     expect(turnCeilingMs(config, state({ waitingCreditSeconds: 10_800 }))).toBe(25_200_000);
+  });
+});
+
+describe('an expired wait keeps owing its wake until it lands (1463a)', () => {
+  const expired = () => ({
+    waiting: {
+      since: new Date(Date.now() - 600_000).toISOString(),
+      until: new Date(Date.now() - 1_000).toISOString(),
+      condition: 'the nightly suite',
+    },
+  });
+  const tick = (harness: WaitHarness) =>
+    (harness.manager as unknown as { serviceWakePending: (id: string) => Promise<void> }).serviceWakePending('s1');
+  // Retries are spaced by WAKE_RETRY_MS; age the last attempt instead of sleeping.
+  const ageLastAttempt = (harness: WaitHarness) => {
+    const pending = harness.state().wakePending!;
+    pending.lastAttemptAt = Date.now() - 60_000;
+  };
+
+  test('a first wake that fails before typing is retried on a later tick, and the turn starts', async () => {
+    const harness = await waitingManager(expired());
+    let ready = false;
+    let sends = 0;
+    harness.manager.tmux = {
+      send: async (_config: SessionConfig, message: string) => {
+        sends++;
+        if (sends === 1) throw new Error('interactive harness did not become ready within 30s');
+        harness.sent.push(message);
+      },
+      state: async () => ({ alive: true, dead: false, promptReady: ready, pane: '', visiblePane: '' }),
+    };
+    await service(harness);
+    expect(harness.sent).toEqual([]);
+    expect(harness.state().waiting).toBeUndefined();
+    expect(harness.state().wakePending?.attempts).toBe(1);
+    expect(harness.events.find(item => item.type === 'session.waiting_wake_failed')?.data.willRetry).toBe(true);
+
+    // Too soon: no attempt inside the retry spacing.
+    await tick(harness);
+    expect(sends).toBe(1);
+
+    // Busy pane: never typed into, still owed.
+    ageLastAttempt(harness);
+    await tick(harness);
+    expect(sends).toBe(1);
+    expect(harness.state().wakePending?.attempts).toBe(2);
+
+    // Prompt is back: the wake lands once and the obligation clears.
+    ready = true;
+    ageLastAttempt(harness);
+    await tick(harness);
+    expect(harness.sent).toHaveLength(1);
+    expect(harness.sent[0]).toContain('the nightly suite');
+    expect(harness.state().wakePending).toBeUndefined();
+    expect(harness.events.map(item => item.type)).toContain('session.waiting_woken');
+
+    // Delivered means done: no later tick types it again.
+    await tick(harness);
+    expect(harness.sent).toHaveLength(1);
+  });
+
+  test('a failure AFTER typing is never retyped (it may have delivered)', async () => {
+    const harness = await waitingManager(expired());
+    let sends = 0;
+    harness.manager.tmux = {
+      send: async () => {
+        sends++;
+        throw new Error('tmux send-keys Enter failed');
+      },
+      state: async () => ({ alive: true, dead: false, promptReady: true, pane: '', visiblePane: '' }),
+    };
+    await service(harness);
+    expect(harness.state().wakePending).toBeUndefined();
+    expect(harness.events.find(item => item.type === 'session.waiting_wake_failed')?.data.willRetry).toBe(false);
+    await tick(harness);
+    expect(sends).toBe(1);
+  });
+
+  test('a new park or an ending supersedes the owed wake; a stale one is abandoned', async () => {
+    const parked = await waitingManager({ wakePending: { since: new Date().toISOString(), attempts: 1 } });
+    await declare(parked, { until: '30m', condition: 'second suite' });
+    await tick(parked);
+    expect(parked.state().wakePending).toBeUndefined();
+
+    const ended = await waitingManager({
+      status: 'completed',
+      wakePending: { since: new Date().toISOString(), attempts: 1 },
+    });
+    await tick(ended);
+    expect(ended.state().wakePending).toBeUndefined();
+    expect(ended.sent).toEqual([]);
+
+    const stale = await waitingManager({
+      wakePending: { since: new Date(Date.now() - 2 * 60 * 60_000).toISOString(), attempts: 9 },
+    });
+    await tick(stale);
+    expect(stale.state().wakePending).toBeUndefined();
+    expect(stale.events.map(item => item.type)).toContain('session.waiting_wake_abandoned');
+    expect(stale.sent).toEqual([]);
   });
 });

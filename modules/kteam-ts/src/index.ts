@@ -9,6 +9,7 @@ import {
   discoverAutoAgents,
   recommendDecisionGuide,
   renderRecommendationDecisionGuide,
+  psStatusLabel,
   resolveDisplayModel,
   resolveParent,
   type AgentUsage,
@@ -106,6 +107,16 @@ async function waitForDaemon(): Promise<Record<string, unknown>> {
     onProgress: seconds => console.error(`daemon starting — still initializing (${seconds}s); waiting up to 90s…`),
     daemonLog: paths.daemonLog,
   });
+}
+
+/** A resume answers once its relaunch is bounded-waited; a `starting` view
+ *  means the relaunch is still running in the daemon, not that it failed. */
+function printResumed(view: Awaited<ReturnType<ApiClient['get']>>): void {
+  printView(view);
+  if (view.state.status === 'starting' || view.state.status === 'created')
+    console.log(
+      `  relaunch still in progress in the background — check \`kteam status ${view.config.teammate ?? view.config.id}\``,
+    );
 }
 
 function printView(view: Awaited<ReturnType<ApiClient['get']>>): void {
@@ -539,6 +550,7 @@ program
   )
   .option('--max-snapshots <count>', '', Number)
   .option('--detach', 'return as soon as the session is persisted; the TUI launch continues in the background')
+  .option('--force', "start even when the daemon's maxRunningSessions admission cap is reached")
   .option(
     '--request-id <id>',
     'idempotency key (also KTEAM_REQUEST_ID): re-running start with the same id returns the SAME session instead of a second teammate',
@@ -610,6 +622,7 @@ program
         directSendMaxChars: options.directMax as number | undefined,
         maxSnapshots: options.maxSnapshots as number | undefined,
         detach: options.detach === true,
+        ...(options.force === true ? { force: true } : {}),
         initialAttachments,
       },
       options.requestId as string | undefined,
@@ -681,15 +694,8 @@ program
     const rows = sessions.map(view => [
       view.config.teammate ?? '-',
       view.config.id,
-      // A declared park reports the same 'waiting' status as an unanswered
-      // question; the marker is the only fleet-level way to tell them apart.
-      // A PEER park says who it is on, so a lead reading `ps` can see a
-      // teammate-to-teammate conversation in flight rather than a mystery idle.
-      view.state.waiting
-        ? `${view.state.status} PARKED${
-            view.state.waiting.peer ? `←${view.state.waiting.peerName ?? view.state.waiting.peer}` : ''
-          }`
-        : view.state.status,
+      // PARKED marker, peer park target, and `failed (resumable)`: see psStatusLabel.
+      psStatusLabel(view.state),
       // The RESOLVED model, not the alias: `claude-auto-glm52a` defaults to the
       // alias `opus` while the pane actually runs glm-5.3. Harness-reported
       // first, then the wrapper's known mapping, then whatever was configured.
@@ -933,9 +939,43 @@ stopCommand
   );
 program
   .command('resume')
-  .argument('<id>')
+  .argument('[id]')
   .argument('[message...]')
-  .action(async (id, parts: string[]) => printView(await (await client()).resume(id, parts.join(' ') || undefined)));
+  .option('--all-resumable', 'resume, one at a time, every session detached by a daemon restart (`failed (resumable)`)')
+  .option('-l, --label <label>', 'with --all-resumable: only sessions with this ownership label')
+  .action(async (id: string | undefined, parts: string[], options: { allResumable?: boolean; label?: string }) => {
+    const api = await client();
+    if (options.allResumable) {
+      if (id) throw new Error('--all-resumable takes no session id (use --label to narrow it)');
+      // Sequential on purpose: each resume queues behind the global bootstrap
+      // chain anyway, and one-at-a-time keeps a progress line per session.
+      const targets = (await api.list()).filter(
+        view =>
+          view.state.status === 'failed' &&
+          view.state.resumable === true &&
+          (!options.label || view.config.label === options.label),
+      );
+      if (!targets.length) return console.log('no resumable sessions');
+      let failures = 0;
+      for (const [index, view] of targets.entries()) {
+        const name = view.config.teammate ?? view.config.id;
+        console.log(`[${index + 1}/${targets.length}] resuming ${name} (${view.config.id})…`);
+        try {
+          printResumed(await api.resume(view.config.id));
+        } catch (error) {
+          failures++;
+          console.error(`  resume failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (failures) {
+        console.error(`${failures} of ${targets.length} resume(s) failed`);
+        process.exitCode = 1;
+      }
+      return;
+    }
+    if (!id) throw new Error('missing session id (or pass --all-resumable)');
+    printResumed(await api.resume(id, parts.join(' ') || undefined));
+  });
 program
   .command('migrate')
   .description('continue a session on another same-kind account (new wrapper); relaunches under it')
@@ -1142,7 +1182,7 @@ program
   .action(async (id, parts: string[]) => {
     const api = await client();
     await api.stop(id, 'restarted by client');
-    printView(await api.resume(id, parts.join(' ') || undefined));
+    printResumed(await api.resume(id, parts.join(' ') || undefined));
   });
 program
   .command('delete')

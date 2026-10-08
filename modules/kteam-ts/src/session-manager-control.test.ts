@@ -3936,7 +3936,7 @@ describe('migrate — cross-account continuation', () => {
         steps.push(type);
         return {} as unknown;
       },
-      resume: async (_id: string, message?: string) => {
+      resumeAwaited: async (_id: string, message?: string) => {
         steps.push('resume');
         resumedWith = message;
         return claudeSession;
@@ -3994,11 +3994,62 @@ describe('migrate — cross-account continuation', () => {
       tmux: { state: async () => ({ alive: false, dead: true, promptReady: false }) },
       stopTmuxWithEvidence: async () => undefined,
       emit: async () => ({}) as unknown,
-      resume: async () => claudeSession,
+      resumeAwaited: async () => claudeSession,
     });
 
     await callMigrate(manager, 's1', 'claude-auto-glm52b', 'fable');
     expect(current.model).toBe('fable');
+  });
+
+  test('migrate --model shows the NEW model at once, not the old harness-observed one (3875)', async () => {
+    const wrapperDir = await mkdtemp(path.join(os.tmpdir(), 'kteam-migrate-'));
+    temporaryDirectories.push(wrapperDir);
+    await writeFile(
+      path.join(wrapperDir, 'claude-auto-kirin'),
+      'export CLAUDE_CONFIG_DIR="/new/home"\nexport KTEAM_MODEL="claude-opus-5"\n',
+      { mode: 0o755 },
+    );
+    let current: Loose = { ...(claudeSession.config as unknown as Loose), model: 'claude-fable-5-1' };
+    let state = {
+      ...(claudeSession.state as unknown as Loose),
+      observedModel: 'claude-fable-5-1',
+      observedModelAt: '2026-09-24T00:00:00Z',
+    } as unknown as SessionState;
+    let stateAtResume: SessionState | undefined;
+    const manager = migrateManager({
+      paths: { kfleetBin: wrapperDir },
+      get: async () => ({ ...claudeSession, config: current, state }) as unknown as SessionView,
+      store: {
+        listSessions: () => [],
+        updateConfig: async (_id: string, mutate: (c: Loose) => Loose) => {
+          current = mutate(current);
+          return current;
+        },
+        updateState: async (_id: string, mutate: (s: SessionState) => SessionState) => {
+          state = mutate(state);
+          return state;
+        },
+      },
+      stopMonitor: async () => undefined,
+      tmux: { state: async () => ({ alive: false, dead: true, promptReady: false }) },
+      stopTmuxWithEvidence: async () => undefined,
+      emit: async () => ({}) as unknown,
+      resumeAwaited: async () => {
+        stateAtResume = state;
+        return claudeSession;
+      },
+    });
+
+    await callMigrate(manager, 's1', 'claude-auto-kirin', 'claude-opus-5-5[1m]');
+    expect(current.model).toBe('claude-opus-5-5[1m]');
+    // Cleared BEFORE the relaunch, so neither `status` nor the failed-relaunch
+    // rollback can read the previous harness's model evidence.
+    expect(stateAtResume?.observedModel).toBeUndefined();
+    expect(stateAtResume?.observedModelAt).toBeUndefined();
+    const { resolveDisplayModel } = await import('./core');
+    expect(resolveDisplayModel(current.binary as string, current.model as string, state.observedModel).model).toContain(
+      'opus-5-5',
+    );
   });
 
   test('rolls the config back to the original account and fails the session when the relaunch throws', async () => {
@@ -4031,7 +4082,7 @@ describe('migrate — cross-account continuation', () => {
       transition: async (_id: string, patch: { status?: string; reason?: string }) => {
         transitions.push(patch);
       },
-      resume: async () => {
+      resumeAwaited: async () => {
         throw new Error('pane never became ready');
       },
     });
@@ -4131,7 +4182,7 @@ describe('migrate — cross-account continuation', () => {
         return {} as unknown;
       },
       transition: async () => undefined,
-      resume: async () => {
+      resumeAwaited: async () => {
         throw new Error('pane never became ready');
       },
     });
@@ -4219,7 +4270,7 @@ describe('migrate — cross-account continuation', () => {
       transition: async (_id: string, patch: { status?: string }) => {
         transitions.push(patch);
       },
-      resume: async () => {
+      resumeAwaited: async () => {
         throw new Error('failed resume cleanup could not kill pane');
       },
     });
@@ -4309,7 +4360,7 @@ describe('migrate — cross-account continuation', () => {
       tmux: { state: async () => ({ alive: false, dead: true, promptReady: false }) },
       emit: async () => ({}) as unknown,
       transition: async () => undefined,
-      resume: async () => {
+      resumeAwaited: async () => {
         throw new Error('monitor attach failed after the model answered');
       },
     });

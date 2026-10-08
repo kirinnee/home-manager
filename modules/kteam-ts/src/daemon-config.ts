@@ -147,6 +147,11 @@ export interface DaemonConfig {
    *  substring pattern → window size, longest match wins. Built-ins: `[1m]`
    *  ⇒ 1M, default 200k (codex reports its own window in token_count). */
   contextWindows?: Record<string, number>;
+  /** Opt-in admission control: `kteam start` refuses (409) while this many
+   *  sessions are already live (non-terminal), unless `--force`. Unset or 0 =
+   *  off. Read from config.json at each start, so a change needs no restart.
+   *  Daemon-owned warden spawns are exempt. */
+  maxRunningSessions?: number;
 }
 
 export const defaultWardenFailoverConfig = (): WardenFailoverConfig => ({

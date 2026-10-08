@@ -172,6 +172,11 @@ export interface SessionConfig {
   updatedAt: string;
   turn: number;
   harnessSessionId: string;
+  /** Claude only: the harness never persisted a conversation for
+   *  harnessSessionId (turn 1 died before writing its transcript), so the next
+   *  launch must CREATE it with `--session-id` instead of `--resume` — which
+   *  dies with "No conversation found". Re-derived before every resume. */
+  harnessSessionFresh?: boolean;
   harnessHome?: string;
   harnessSessionBaseline?: string[];
   tmuxSession: string;
@@ -401,6 +406,22 @@ export interface SessionState {
   /** Seconds this turn has spent in declared waits, credited back against the
    *  turn ceiling so parked time never counts as runtime. */
   waitingCreditSeconds?: number;
+  /** A declared wait expired and the daemon cleared it, but the wake message
+   *  has not been delivered yet. The monitor retries the wake on later ticks
+   *  until a send lands; cleared on delivery or on the next turn. */
+  wakePending?: {
+    since: string;
+    attempts: number;
+    /** The expired wait's condition, quoted in the wake text. */
+    condition?: string;
+    lastError?: string;
+    /** Wall-clock ms of the last attempt; retries are spaced from it. */
+    lastAttemptAt?: number;
+  };
+  /** Set on a `failed` session whose only problem is that its tmux pane was
+   *  gone when the daemon restarted: the conversation is intact and
+   *  `kteam resume` brings it back. Cleared by the next launch. */
+  resumable?: boolean;
 }
 
 /** Payload of the `session.model_fallback` event: the harness quietly served a
@@ -504,6 +525,8 @@ export interface StartSessionRequest {
    *  TUI bootstrap. The launch continues in the background either way — this
    *  only decides whether the caller waits for it. */
   detach?: boolean;
+  /** Bypass the daemon's optional `maxRunningSessions` admission gate. */
+  force?: boolean;
   initialAttachments?: Array<{
     filename: string;
     mime?: string;

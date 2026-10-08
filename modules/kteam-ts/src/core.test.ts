@@ -9,6 +9,7 @@ import {
   harnessDisplayName,
   inferHarness,
   interactiveHarnessArgs,
+  psStatusLabel,
   recommendDecisionGuide,
   recommendTeam,
   renderRecommendationDecisionGuide,
@@ -21,7 +22,7 @@ import {
   type TeamRecommendation,
   type TeamRole,
 } from './core';
-import type { SessionConfig } from './types';
+import type { SessionConfig, SessionState } from './types';
 
 const config = (harness: 'claude' | 'codex', turn = 1, model?: string): SessionConfig => ({
   id: 'abc',
@@ -57,6 +58,18 @@ describe('harness support', () => {
     expect(interactiveHarnessArgs(config('claude', 2))).not.toContain('--print');
     expect(interactiveHarnessArgs(config('codex', 2))[0]).toBe('resume');
     expect(interactiveHarnessArgs(config('codex', 1))).not.toContain('exec');
+  });
+
+  test('a claude conversation that was never persisted is CREATED, not resumed', () => {
+    // `--resume <id>` of a conversation Claude never wrote dies with "No
+    // conversation found"; the daemon marks a freshly minted id instead.
+    const args = interactiveHarnessArgs({
+      ...config('claude', 4),
+      harnessSessionId: 'fresh-id',
+      harnessSessionFresh: true,
+    });
+    expect(args).not.toContain('--resume');
+    expect(args[args.indexOf('--session-id') + 1]).toBe('fresh-id');
   });
 
   test('omits --model when no model is set', () => {
@@ -823,5 +836,23 @@ describe('resolveDisplayModel: show what the pane actually runs', () => {
   test('an unmapped wrapper falls back to configured, then to default', () => {
     expect(resolveDisplayModel('claude-auto-atomi', 'opus').model).toBe('opus');
     expect(resolveDisplayModel('codex-auto-loge', undefined)).toEqual({ model: 'default', source: 'unknown' });
+  });
+});
+
+describe('psStatusLabel', () => {
+  const state = (patch: Partial<SessionState>) => ({ status: 'running', ...patch }) as SessionState;
+
+  test('a session detached by a daemon restart reads as resumable, not lost', () => {
+    expect(psStatusLabel(state({ status: 'failed', resumable: true }))).toBe('failed (resumable)');
+    expect(psStatusLabel(state({ status: 'failed' }))).toBe('failed');
+    // A stale flag on a session that has since moved on is ignored.
+    expect(psStatusLabel(state({ status: 'running', resumable: true }))).toBe('running');
+  });
+
+  test('declared parks keep their marker and peer target', () => {
+    expect(psStatusLabel(state({ status: 'waiting', waiting: { since: 'x' } }))).toBe('waiting PARKED');
+    expect(psStatusLabel(state({ status: 'waiting', waiting: { since: 'x', peer: 'p1', peerName: 'mordecai' } }))).toBe(
+      'waiting PARKED←mordecai',
+    );
   });
 });

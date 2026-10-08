@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from 'fs';
 import path from 'path';
-import type { Harness, Recommendation, SessionConfig } from './types';
+import type { Harness, Recommendation, SessionConfig, SessionState } from './types';
 import { authFailureRemedy, USAGE_REFRESH_MS } from './usage';
 
 export function inferHarness(binary: string): Harness {
@@ -1329,7 +1329,7 @@ export function interactiveHarnessArgs(config: SessionConfig): string[] {
   const extra = config.harnessFlags ?? [];
 
   if (config.harness === 'claude') {
-    const sessionFlag = config.turn === 1 ? '--session-id' : '--resume';
+    const sessionFlag = config.turn === 1 || config.harnessSessionFresh ? '--session-id' : '--resume';
     const args = ['--dangerously-skip-permissions', sessionFlag, config.harnessSessionId, ...model];
     // Name the session on Claude's side too — one argv element, so tmux-
     // controller's single-quote `quote()` keeps the spaces and [brackets]
@@ -1417,4 +1417,16 @@ export function contextWindowForSession(args: {
   }
   if (configModel?.includes('[1m]') || servedModel?.includes('[1m]')) return 1_000_000;
   return 200_000;
+}
+
+/** The STATUS cell of `kteam ps`. A declared park reports the same 'waiting'
+ *  status as an unanswered question; the marker is the only fleet-level way to
+ *  tell them apart, and a PEER park says who it is on. A session merely
+ *  detached by a daemon restart is `failed (resumable)` — plain `failed` read
+ *  as lost work and invited duplicate re-spawns. */
+export function psStatusLabel(state: Pick<SessionState, 'status' | 'waiting' | 'resumable'>): string {
+  if (state.waiting)
+    return `${state.status} PARKED${state.waiting.peer ? `←${state.waiting.peerName ?? state.waiting.peer}` : ''}`;
+  if (state.resumable && state.status === 'failed') return 'failed (resumable)';
+  return state.status;
 }

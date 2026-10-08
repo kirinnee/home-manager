@@ -365,6 +365,9 @@ interface SessionManagerOptions {
   /** The entrypoint owns runtime assets; invoke it only after persistence. */
   onPwaConfigUpdated?: (config: PwaConfig) => void;
   contextWindows?: Record<string, number>;
+  /** Admission cap on live (non-terminal) sessions; see DaemonConfig. When
+   *  omitted the daemon config.json value is read at each start. */
+  maxRunningSessions?: number;
   /** Invoked when the daemon decides its own index is unhealable and a clean
    *  restart is the only repair. The entrypoint owns HOW (and WHETHER — only a
    *  process a service manager will re-spawn may exit); the manager only
@@ -616,6 +619,10 @@ const START_WAIT_MS = 45_000;
  *  bootstrap queue for a slow provider, short enough to stay under the client
  *  request timeout. */
 const CONTROL_LAUNCH_WAIT_MS = 60_000;
+/** How long a client `resume` holds its request open before answering with
+ *  the persisted `starting` view and letting the relaunch finish in the
+ *  background. Matches START_WAIT_MS and stays under the client deadline. */
+const RESUME_WAIT_MS = 45_000;
 /** Long bracketed pastes are unreliable in a busy Claude composer (4.3KB was
  *  lost 8/8 in live repros). Keep native-queue typing below this bound and put
  *  the complete logical message in a durable file instead. */
@@ -674,6 +681,10 @@ const GIT_FINGERPRINT_COALESCE_MS = 2_000;
 /** How often a declared wait publishes a heartbeat, so "parked" never looks
  *  the same as "gone" to a lead reading the event stream. */
 const WAITING_HEARTBEAT_MS = 300_000;
+/** A wake that could not be typed (pane busy or not ready) is retried on
+ *  later monitor ticks, spaced by this, until it lands or the window closes. */
+const WAKE_RETRY_MS = 30_000;
+const WAKE_PENDING_MAX_MS = 30 * 60_000;
 
 /** True when the reflex layer and the turn ceiling must stand down: a declared
  *  wait, a waiting status, or an interrupted turn. `state.waiting` — not the
@@ -980,6 +991,8 @@ export class SessionManager implements KTeamService {
    *  concurrent starts race the injector — only the first survives, the rest
    *  land typed-but-never-started. */
   private bootstrapChain: Promise<void> = Promise.resolve();
+  /** Bootstraps queued on or running in bootstrapChain (health + admission). */
+  private bootstrapQueueDepth = 0;
   /** One daemon-wide cache over kfleet's 300-second usage feed. */
   private readonly usageFeed: UsageFeed;
   /** Shared with `kfleet health`; kept as a field so start-preflight tests can
@@ -1053,6 +1066,8 @@ export class SessionManager implements KTeamService {
   /** A field (rather than an inlined sleep) so hermetic race tests can run the
    *  real confirmation path without wall-clock delay. */
   private readonly terminalReprobeMs = TERMINAL_REPROBE_MS;
+  /** Client-resume answer bound; a field so tests can shorten it. */
+  private readonly resumeWaitMs = RESUME_WAIT_MS;
   private wardenState: WardenRuntimeState = {};
   private lastSweep?: WardenSweep;
   private lastEmittedFingerprint = '';
@@ -1575,6 +1590,7 @@ export class SessionManager implements KTeamService {
       running: active.length,
       monitors: this.monitors.size,
       unmonitoredRunning,
+      bootstrapQueueDepth: this.bootstrapQueueDepth,
       wardenLastSweepSeconds: lastSweepMs > 0 ? Math.floor((Date.now() - lastSweepMs) / 1000) : null,
       wardenTimerArmed,
       eventLoopLagMs: this.eventLoopLagMs,
@@ -1587,6 +1603,26 @@ export class SessionManager implements KTeamService {
       ...(this.bootstrapErrors.length > 0 ? { bootstrapErrorMessages: this.bootstrapErrors.slice(0, 10) } : {}),
       time: now(),
     };
+  }
+
+  /** The configured live-session cap, or undefined when admission is off. */
+  private async maxRunningSessions(): Promise<number | undefined> {
+    const configured =
+      this.options.maxRunningSessions ??
+      (await readJson<{ maxRunningSessions?: unknown }>(this.paths.daemonConfig).catch(() => undefined))
+        ?.maxRunningSessions;
+    return typeof configured === 'number' && Number.isInteger(configured) && configured > 0 ? configured : undefined;
+  }
+
+  private async assertAdmission(): Promise<void> {
+    const cap = await this.maxRunningSessions();
+    if (cap === undefined) return;
+    const live = (await this.list()).filter(item => !terminalStatuses.includes(item.state.status)).length;
+    if (live < cap) return;
+    throw new Error(
+      `refusing start: ${live} session(s) are already live, at the daemon's maxRunningSessions cap of ${cap} ` +
+        `(bootstrap queue depth ${this.bootstrapQueueDepth}); wait for some to finish, or pass --force`,
+    );
   }
 
   async list(): Promise<SessionView[]> {
@@ -2345,6 +2381,11 @@ export class SessionManager implements KTeamService {
     // `--teammate` slug or a live-session collision must fail on the same terms
     // whatever the wrapper/filesystem look like, and before any launch work.
     const teammate = this.resolveTeammateName(request);
+    // Admission control (opt-in): with no gate, a fan-out onto a loaded host
+    // kept accepting launches that queued forever behind the bootstrap chain
+    // (load 245, five `starting` sessions with no pane). Daemon-owned starts
+    // (wardens, which pass hooks) are exempt: they are how a wedged fleet heals.
+    if (request.force !== true && !hooks.beforeFirstTurn) await this.assertAdmission();
     const binary = request.agent;
     const harness = inferHarness(binary);
     if (!path.basename(binary).startsWith(`${harness}-auto-`))
@@ -4045,9 +4086,81 @@ export class SessionManager implements KTeamService {
     );
   }
 
+  /** `--resume <id>` of a conversation Claude never wrote dies at once with
+   *  "No conversation found" (turn 1 killed before its first transcript
+   *  record) — and every later resume died the same way. When neither the
+   *  derived nor the recorded transcript exists, give the relaunch a FRESH
+   *  harness session id to create with `--session-id`. The work context lives
+   *  in kteam's turn files, so nothing a harness could resume is lost. */
+  private async ensureClaudeConversation(config: SessionConfig, force = false): Promise<SessionConfig> {
+    if (config.harness !== 'claude' || !config.harnessHome || !config.harnessSessionId) return config;
+    // `force`: Claude itself just refused the id, so skip the existence probe.
+    if (!force) {
+      const known = [claudeTranscriptPath(config), config.transcriptFile].filter((file): file is string => !!file);
+      // Claude names the project dir from ITS realpath'd cwd, which can differ
+      // from config.cwd (/tmp vs /private/tmp). A false "missing" would discard
+      // a real conversation, so look in every project dir before minting.
+      const projects = path.join(config.harnessHome, 'projects');
+      const anywhere = async () => {
+        const dirs = await readdir(projects).catch((error: NodeJS.ErrnoException) =>
+          error.code === 'ENOENT' ? [] : undefined,
+        );
+        // Unreadable for any other reason: unknown is not "missing" — keep --resume.
+        if (!dirs) return true;
+        return dirs.some(dir => existsSync(path.join(projects, dir, `${config.harnessSessionId}.jsonl`)));
+      };
+      if (known.some(file => existsSync(file)) || (await anywhere())) {
+        if (!config.harnessSessionFresh) return config;
+        return await this.store.updateConfig<SessionConfig>(config.id, current => ({
+          ...current,
+          harnessSessionFresh: undefined,
+          updatedAt: now(),
+        }));
+      }
+      // Already minted and still unused: keep the id, it is not taken yet.
+      if (config.harnessSessionFresh) return config;
+    }
+    const previous = config.harnessSessionId;
+    const next = await this.store.updateConfig<SessionConfig>(config.id, current => {
+      const minted: SessionConfig = {
+        ...current,
+        harnessSessionId: crypto.randomUUID(),
+        harnessSessionFresh: true,
+        updatedAt: now(),
+      };
+      return { ...minted, transcriptFile: claudeTranscriptPath(minted) };
+    });
+    await this.emit(
+      config.id,
+      'session.harness_session_reminted',
+      {
+        previous,
+        harnessSessionId: next.harnessSessionId,
+        reason: 'no persisted claude conversation for the previous id; relaunching with --session-id',
+      },
+      'daemon',
+    ).catch(() => undefined);
+    return next;
+  }
+
+  /** Did a failed claude RESUME launch die on "No conversation found"? Only a
+   *  `--resume` launch qualifies — a fresh `--session-id` already retried. */
+  private async claudeConversationMissing(config: SessionConfig, error: unknown): Promise<boolean> {
+    if (config.harness !== 'claude' || config.turn === 1 || config.harnessSessionFresh || config.migration)
+      return false;
+    const pattern = /No conversation found/i;
+    if (pattern.test(String(error instanceof Error ? error.message : error))) return true;
+    const pane = await this.tmux.state(config.tmuxSession).catch(() => undefined);
+    return Boolean(pane && (pattern.test(pane.pane) || pattern.test(pane.visiblePane)));
+  }
+
   private resumeFailureReason(config: SessionConfig, error: unknown, pane: PaneState): string {
     const detail = error instanceof Error ? error.message : String(error);
-    return /\bexited\b/i.test(detail) ? this.harnessExitReason(config, pane) : detail;
+    if (/\bexited\b/i.test(detail)) return this.harnessExitReason(config, pane);
+    // Only called once the exit is CONFIRMED: a readiness timeout or an
+    // injection error is the symptom, the dead harness and its final frame
+    // (e.g. a crash under a new claude version) are the reason.
+    return `${this.harnessExitReason(config, pane)} (launch error: ${detail})`;
   }
 
   /** Legacy automatic-recovery collision detector. A label is a batch slug,
@@ -4067,7 +4180,50 @@ export class SessionManager implements KTeamService {
     return undefined;
   }
 
+  /** Public resume. A client call (no policy) is answered within
+   *  RESUME_WAIT_MS: a relaunch can queue behind the global bootstrap chain or
+   *  replay a huge transcript for minutes, and a silent multi-minute block
+   *  read as a hang (and invited a mid-relaunch kill). Past the bound the
+   *  caller gets the persisted `starting` view while the SAME relaunch keeps
+   *  its lock, launch claim and post-unlock monitor start in the background,
+   *  and records its own success or failure on the session. Internal callers
+   *  pass a policy and keep waiting for the full outcome. */
   async resume(id: string, message?: string, policy?: ResumePolicy): Promise<SessionView> {
+    if (policy !== undefined) return await this.resumeAwaited(id, message, policy);
+    const waitMs = this.resumeWaitMs ?? RESUME_WAIT_MS;
+    const relaunch = this.resumeAwaited(id, message);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<'timeout'>(resolve => {
+      timer = setTimeout(() => resolve('timeout'), waitMs);
+    });
+    try {
+      const outcome = await Promise.race([relaunch, timedOut]);
+      if (outcome !== 'timeout') return outcome;
+    } finally {
+      clearTimeout(timer);
+    }
+    const ref = this.resolveRef(id);
+    void relaunch.catch(error =>
+      this.emit(
+        ref,
+        'session.resume_background_failed',
+        { reason: error instanceof Error ? error.message : String(error) },
+        'daemon',
+      ).catch(() => undefined),
+    );
+    await this.emit(
+      ref,
+      'session.resume_backgrounded',
+      {
+        pending: true,
+        reason: `relaunch still in progress after ${Math.round(waitMs / 1000)}s; it continues in the background`,
+      },
+      'daemon',
+    ).catch(() => undefined);
+    return await this.get(ref);
+  }
+
+  private async resumeAwaited(id: string, message?: string, policy?: ResumePolicy): Promise<SessionView> {
     id = this.resolveRef(id);
     const effectivePolicy = policy ?? implicitResumePolicy(currentActor());
     // Same pending-not-refused contract as send(): wait for an in-flight first
@@ -4163,6 +4319,10 @@ export class SessionManager implements KTeamService {
             updatedAt: now(),
           }));
         }
+        // Never during a migration: a conversation the NEW account cannot see
+        // must fail the relaunch (and roll back), not silently start over.
+        if (view.config.harness === 'claude' && !view.config.migration)
+          view.config = await this.ensureClaudeConversation(view.config);
         // Bare relaunch: an interactive session resumed with no message just gets
         // its terminal back (`--resume <session-id>`, nothing typed). Telling a
         // human's TUI to "continue the assigned task" would be kteam inventing a
@@ -4217,6 +4377,8 @@ export class SessionManager implements KTeamService {
             turnCompleted: false,
             waiting: undefined,
             waitingCreditSeconds: 0,
+            wakePending: undefined,
+            resumable: undefined,
           },
           'session.resuming',
         );
@@ -4298,9 +4460,12 @@ export class SessionManager implements KTeamService {
               return await this.get(id);
             }
             await this.tmux.snapshot(config, true).catch(() => '');
-            await this.stopTmuxWithEvidence(config, 'failed resume cleanup');
-            const attempt = view.state.retryAttempt ?? 0;
+            // Derive the real exit reason (final frame) BEFORE cleanup: a failed
+            // teardown writes kill_failed with its own message, and the reason the
+            // harness died must survive into state.reason either way.
             const failureReason = this.resumeFailureReason(config, error, exit.pane);
+            await this.stopTmuxWithEvidence(config, `failed resume cleanup after: ${failureReason}`);
+            const attempt = view.state.retryAttempt ?? 0;
             if (automaticRetry && attempt < (config.retry?.transientAttempts ?? 0)) {
               const nextAttempt = attempt + 1;
               await this.transition(
@@ -4502,7 +4667,20 @@ export class SessionManager implements KTeamService {
           usageAuthOk: undefined,
         }));
       }
-      resumed = await this.resume(
+      if (agent !== from || nextModel !== original.model) {
+        // The display prefers the harness-observed model, and the old
+        // harness's evidence would keep showing the PREVIOUS model until the
+        // new one reports. The rollback below also reads observedModel as
+        // proof the NEW model launched, so it must not see stale evidence.
+        await this.store.updateState<SessionState>(id, current => ({
+          ...current,
+          observedModel: undefined,
+          observedModelAt: undefined,
+        }));
+      }
+      // The full outcome, not the bounded client answer: the rollback below
+      // must see a failed relaunch.
+      resumed = await this.resumeAwaited(
         id,
         'You have been migrated to a different account mid-task due to quota/auth issues on the previous one. ' +
           'Re-read your latest turn file and continue exactly where you left off.',
@@ -5041,12 +5219,15 @@ export class SessionManager implements KTeamService {
         { until: waiting.until ?? null, condition: waiting.condition ?? null, backstopped, elapsedSeconds },
         'watcher',
       );
-      await this.tmux
-        .send(
-          view.config,
-          `The wait you declared has elapsed (${waiting.condition ?? 'no condition given'}). Re-check the condition and continue the task.`,
-        )
-        .catch(error => void this.emit(id, 'session.waiting_wake_failed', { message: String(error) }, 'watcher'));
+      // The wake used to be ONE send whose failure was only logged: a pane
+      // that was busy or slow to show its prompt left the teammate parked
+      // forever with no wait and no wake. Persist the obligation first, so
+      // the monitor keeps retrying (and a daemon restart keeps it too).
+      await this.store.updateState<SessionState>(id, current => ({
+        ...current,
+        wakePending: { since: now(), attempts: 0, ...(waiting.condition ? { condition: waiting.condition } : {}) },
+      }));
+      await this.serviceWakePending(id);
       return;
     }
     // Hold the status against the transcript's constant recomputation, so the
@@ -5075,6 +5256,75 @@ export class SessionManager implements KTeamService {
       },
       'watcher',
     );
+  }
+
+  /** Deliver (or retry) the wake owed after a declared wait expired. The
+   *  first attempt is the classic send; a retry types ONLY into a pane that
+   *  already shows a ready prompt, so it never blocks a tick on a busy pane
+   *  and never types over live work. Only a pre-keystroke failure (the
+   *  readiness gate) is retried — an error after typing may have delivered,
+   *  and a duplicate is not traded for a missed wake. */
+  private async serviceWakePending(id: string): Promise<void> {
+    const view = await this.get(id);
+    const pending = view.state.wakePending;
+    if (!pending) return;
+    const clear = async () =>
+      await this.store.updateState<SessionState>(id, current => ({ ...current, wakePending: undefined }));
+    // A new park, or an ending, supersedes the owed wake.
+    if (view.state.waiting !== undefined || protectedStatuses.includes(view.state.status)) return void (await clear());
+    if (pending.lastAttemptAt !== undefined && Date.now() - pending.lastAttemptAt < WAKE_RETRY_MS) return;
+    const sinceMs = Date.parse(pending.since);
+    if (Number.isFinite(sinceMs) && Date.now() - sinceMs > WAKE_PENDING_MAX_MS) {
+      await clear();
+      await this.emit(
+        id,
+        'session.waiting_wake_abandoned',
+        { attempts: pending.attempts, lastError: pending.lastError ?? null },
+        'watcher',
+      ).catch(() => undefined);
+      return;
+    }
+    const attempts = pending.attempts + 1;
+    const recordAttempt = async (lastError?: string) =>
+      await this.store.updateState<SessionState>(id, current =>
+        current.wakePending
+          ? {
+              ...current,
+              wakePending: {
+                ...current.wakePending,
+                attempts,
+                lastAttemptAt: Date.now(),
+                ...(lastError ? { lastError } : {}),
+              },
+            }
+          : current,
+      );
+    if (pending.attempts > 0) {
+      const pane = await this.tmux.state(view.config.tmuxSession).catch(() => undefined);
+      // A dead pane is the monitor's death path, not a wake problem.
+      if (!pane || !pane.alive || pane.dead) return;
+      if (!pane.promptReady) return void (await recordAttempt('pane not at a ready prompt'));
+    }
+    try {
+      await this.tmux.send(
+        view.config,
+        `The wait you declared has elapsed (${pending.condition ?? 'no condition given'}). Re-check the condition and continue the task.`,
+      );
+    } catch (error) {
+      const message = String(error);
+      const retryable = /did not become ready/i.test(message);
+      await this.emit(
+        id,
+        'session.waiting_wake_failed',
+        { message, attempt: attempts, willRetry: retryable },
+        'watcher',
+      ).catch(() => undefined);
+      if (retryable) await recordAttempt(message);
+      else await clear();
+      return;
+    }
+    await clear();
+    if (attempts > 1) await this.emit(id, 'session.waiting_woken', { attempts }, 'watcher').catch(() => undefined);
   }
 
   async snapshot(id: string): Promise<string> {
@@ -5641,8 +5891,11 @@ export class SessionManager implements KTeamService {
             reason: 'daemon restarted but the interactive tmux session no longer exists; use resume',
             finishedAt: now(),
             promptReady: false,
+            // Detached, not lost: the conversation is intact, so `ps` must
+            // not read like the work is gone.
+            resumable: true,
           },
-          'daemon.recovery_failed',
+          'daemon.recovery_detached',
         );
       }
     }
@@ -6459,6 +6712,9 @@ export class SessionManager implements KTeamService {
           // layer treat a deliberate park as a corpse.
           if (view.state.waiting !== undefined) {
             await this.serviceWaiting(view);
+            view = await this.get(id);
+          } else if (view.state.wakePending !== undefined) {
+            await this.serviceWakePending(id);
             view = await this.get(id);
           }
           // `state.waiting` — not the status — is the authority for a declared
@@ -8075,6 +8331,21 @@ export class SessionManager implements KTeamService {
     try {
       await this.tmux.launch(config);
     } catch (error) {
+      if (await this.claudeConversationMissing(config, error)) {
+        // The pre-launch check could not see it (e.g. a transcript deleted
+        // underneath us), but Claude itself just said so. One fresh-start
+        // retry under a new id; the caller's config object follows it.
+        await this.tmux.stop(config.tmuxSession).catch(() => undefined);
+        Object.assign(config, await this.ensureClaudeConversation(config, true));
+        await this.emit(
+          config.id,
+          'control.launch_retry',
+          { reason: 'claude reported "No conversation found"; relaunching with a fresh --session-id' },
+          'daemon',
+        ).catch(() => undefined);
+        await this.tmux.launch(config);
+        return;
+      }
       if (!/did not become ready/i.test(String(error))) throw error;
       await this.tmux.stop(config.tmuxSession).catch(() => undefined);
       await this.emit(
@@ -8089,12 +8360,17 @@ export class SessionManager implements KTeamService {
 
   /** Run a TUI bootstrap (launch + first inject) exclusively — see bootstrapChain. */
   private async serializedBootstrap<T>(operation: () => Promise<T>): Promise<T> {
+    this.bootstrapQueueDepth++;
     const result = this.bootstrapChain.then(operation, operation);
     this.bootstrapChain = result.then(
       () => undefined,
       () => undefined,
     );
-    return await result;
+    try {
+      return await result;
+    } finally {
+      this.bootstrapQueueDepth--;
+    }
   }
 
   private async serialized<T>(id: string, operation: () => Promise<T>): Promise<T> {

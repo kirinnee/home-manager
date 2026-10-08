@@ -996,3 +996,419 @@ describe('resume waiting for the global bootstrap slot', () => {
     expect((await h.manager.get('s1')).state.status).toBe('stopped');
   });
 });
+
+// --- W2-c: resume and recovery lifecycle ------------------------------------
+
+interface ResumeHarness {
+  manager: Loose;
+  events: string[];
+  config: () => Record<string, unknown>;
+  state: () => Record<string, unknown>;
+  monitorsStarted: () => number;
+  launches: Array<Record<string, unknown>>;
+}
+
+/** A manager whose real resume() runs against fake store/tmux. `launch` is
+ *  the fake launchWithRetry (it receives the config resume launches with). */
+async function resumeHarness(input: {
+  launch?: (config: Record<string, unknown>) => Promise<void>;
+  config?: Record<string, unknown>;
+  state?: Record<string, unknown>;
+}): Promise<ResumeHarness> {
+  const home = await temporaryHome();
+  await Promise.all([
+    mkdir(path.join(home, 's1', 'turns'), { recursive: true }),
+    mkdir(path.join(home, 's1', 'markers'), { recursive: true }),
+  ]);
+  let config: Record<string, unknown> = {
+    id: 's1',
+    harness: 'claude',
+    mode: 'auto',
+    binary: 'claude-auto-loge',
+    tmuxSession: 'kteam-s1-agent',
+    harnessSessionId: 'original-id',
+    turn: 3,
+    cwd: home,
+    ...input.config,
+  };
+  let state: Record<string, unknown> = { id: 's1', status: 'failed', health: 'crashed', turn: 3, ...input.state };
+  let monitors = 0;
+  const events: string[] = [];
+  const launches: Array<Record<string, unknown>> = [];
+  const manager = bareManager();
+  manager.paths = { home, sessions: home, daemon: home };
+  manager.closed = false;
+  manager.terminalReprobeMs = 0;
+  manager.launching = new Map();
+  manager.monitors = new Map();
+  manager.autoContinued = new Set();
+  manager.doneDeferred = new Set();
+  manager.resolveRef = (id: string) => id;
+  manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
+  manager.serializedBootstrap = async (work: () => Promise<unknown>) => await work();
+  manager.clearNeedsHuman = async () => undefined;
+  manager.cancelRetry = () => undefined;
+  manager.promptInstruction = () => 'continue';
+  manager.store = {
+    updateConfig: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+      config = mutate(config);
+      return config;
+    },
+    updateState: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+      state = mutate(state);
+      return state;
+    },
+  };
+  manager.get = async () => ({ directory: path.join(home, 's1'), config, state });
+  manager.transition = async (_id: string, patch: Record<string, unknown>) => {
+    state = { ...state, ...patch };
+  };
+  manager.emit = async (_id: string, type: string) => {
+    events.push(type);
+    return {};
+  };
+  manager.stopMonitor = async () => undefined;
+  manager.startMonitor = async () => {
+    monitors++;
+  };
+  manager.stopTmuxWithEvidence = async () => undefined;
+  manager.launchWithRetry = async (launched: Record<string, unknown>) => {
+    launches.push({ ...launched });
+    await input.launch?.(launched);
+  };
+  manager.tmux = {
+    state: async () => ({ alive: false, dead: true, promptReady: false, pane: '', visiblePane: '' }),
+    send: async () => undefined,
+    subprocessAlive: async () => false,
+    snapshot: async () => '',
+  };
+  return {
+    manager,
+    events,
+    config: () => config,
+    state: () => state,
+    monitorsStarted: () => monitors,
+    launches,
+  };
+}
+
+const callResume = (manager: Loose, message?: string) =>
+  (
+    manager as unknown as { resume: (id: string, message?: string) => Promise<{ state: Record<string, unknown> }> }
+  ).resume('s1', message);
+
+describe('a client resume answers within its bound (3715)', () => {
+  test('a slow relaunch returns `starting` promptly, then finishes to `running` in the background', async () => {
+    let release = () => {};
+    const gate = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const harness = await resumeHarness({ launch: async () => await gate });
+    harness.manager.resumeWaitMs = 30;
+
+    const startedAt = Date.now();
+    const answered = await callResume(harness.manager, 'continue');
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(answered.state.status).toBe('starting');
+    expect(harness.events).toContain('session.resume_backgrounded');
+    // Still claimed as launching, so the self-check and the monitor death
+    // path keep their amnesty while the relaunch runs on.
+    expect((harness.manager.launching as Map<string, unknown>).has('s1')).toBe(true);
+
+    release();
+    for (let i = 0; i < 100 && harness.state().status !== 'running'; i++) await Bun.sleep(5);
+    expect(harness.state().status).toBe('running');
+    expect(harness.monitorsStarted()).toBe(1);
+    expect((harness.manager.launching as Map<string, unknown>).has('s1')).toBe(false);
+  });
+
+  test('a fast relaunch is answered with its real outcome, not the pending view', async () => {
+    const harness = await resumeHarness({});
+    harness.manager.resumeWaitMs = 5_000;
+    const answered = await callResume(harness.manager, 'continue');
+    expect(answered.state.status).toBe('running');
+    expect(harness.events).not.toContain('session.resume_backgrounded');
+  });
+
+  test('a relaunch that fails after the bound still records the failure on the session', async () => {
+    let fail = (_error: Error) => {};
+    const gate = new Promise<void>((_resolve, reject) => {
+      fail = reject;
+    });
+    const harness = await resumeHarness({ launch: async () => await gate });
+    harness.manager.resumeWaitMs = 20;
+    const answered = await callResume(harness.manager, 'continue');
+    expect(answered.state.status).toBe('starting');
+    fail(new Error('interactive harness exited; exit code unavailable'));
+    for (let i = 0; i < 100 && harness.state().status === 'starting'; i++) await Bun.sleep(5);
+    expect(harness.state().status).toBe('failed');
+    expect(harness.events).toContain('session.resume_background_failed');
+  });
+});
+
+describe('resume of a claude conversation that never persisted (2663)', () => {
+  test('a missing transcript gives the relaunch a NEW id created with --session-id', async () => {
+    const harnessHome = await temporaryHome();
+    const harness = await resumeHarness({ config: { harnessHome } });
+    await callResume(harness.manager, 'continue');
+
+    const launched = harness.launches[0]!;
+    expect(launched.harnessSessionId).not.toBe('original-id');
+    expect(launched.harnessSessionFresh).toBe(true);
+    expect(String(launched.transcriptFile)).toContain(`${launched.harnessSessionId}.jsonl`);
+    expect(harness.events).toContain('session.harness_session_reminted');
+    const { interactiveHarnessArgs } = await import('./core');
+    const args = interactiveHarnessArgs(launched as never);
+    expect(args[args.indexOf('--session-id') + 1]).toBe(launched.harnessSessionId as string);
+    expect(args).not.toContain('--resume');
+  });
+
+  test('an existing transcript — even under a differently-named project dir — keeps --resume', async () => {
+    const harnessHome = await temporaryHome();
+    // Claude derives the project dir from its realpath'd cwd (/private/tmp vs /tmp).
+    const project = path.join(harnessHome, 'projects', '-private-elsewhere');
+    await mkdir(project, { recursive: true });
+    await writeFile(path.join(project, 'original-id.jsonl'), '{}\n');
+    const harness = await resumeHarness({ config: { harnessHome } });
+    await callResume(harness.manager, 'continue');
+    expect(harness.launches[0]!.harnessSessionId).toBe('original-id');
+    expect(harness.launches[0]!.harnessSessionFresh).toBeUndefined();
+    expect(harness.events).not.toContain('session.harness_session_reminted');
+  });
+
+  test('a migration never mints: a conversation the new account cannot see must fail and roll back', async () => {
+    const harnessHome = await temporaryHome();
+    const harness = await resumeHarness({
+      config: { harnessHome, migration: { from: 'claude-auto-a', to: 'claude-auto-b', at: 'x' } },
+    });
+    await callResume(harness.manager, 'continue');
+    expect(harness.launches[0]!.harnessSessionId).toBe('original-id');
+    expect(harness.launches[0]!.harnessSessionFresh).toBeUndefined();
+  });
+
+  test('"No conversation found" from the harness itself earns one fresh-start retry', async () => {
+    const harnessHome = await temporaryHome();
+    let config: Record<string, unknown> = {
+      id: 's1',
+      harness: 'claude',
+      mode: 'auto',
+      binary: 'claude-auto-loge',
+      tmuxSession: 'kteam-s1-agent',
+      harnessSessionId: 'original-id',
+      harnessHome,
+      turn: 4,
+      cwd: harnessHome,
+    };
+    const launchedIds: string[] = [];
+    const events: string[] = [];
+    const manager = bareManager();
+    manager.assertAutoHarnessHealthy = async () => undefined;
+    manager.store = {
+      updateConfig: async (_id: string, mutate: (current: Record<string, unknown>) => Record<string, unknown>) => {
+        config = mutate(config);
+        return config;
+      },
+    };
+    manager.emit = async (_id: string, type: string) => {
+      events.push(type);
+      return {};
+    };
+    manager.tmux = {
+      launch: async (launched: Record<string, unknown>) => {
+        launchedIds.push(String(launched.harnessSessionId));
+        if (launchedIds.length === 1) throw new Error('interactive harness exited before becoming ready');
+      },
+      stop: async () => undefined,
+      state: async () => ({
+        alive: true,
+        dead: true,
+        promptReady: false,
+        pane: 'No conversation found with session ID: original-id',
+        visiblePane: '',
+      }),
+    };
+    const target = { ...config };
+    await (manager as unknown as { launchWithRetry: (config: unknown) => Promise<void> }).launchWithRetry(target);
+    expect(launchedIds).toHaveLength(2);
+    expect(launchedIds[0]).toBe('original-id');
+    expect(launchedIds[1]).not.toBe('original-id');
+    // The caller's config object follows the retry, so its later prompt
+    // injection and monitor use the conversation that actually launched.
+    expect(target.harnessSessionId).toBe(launchedIds[1]);
+    expect(target.harnessSessionFresh).toBe(true);
+    expect(events).toContain('control.launch_retry');
+  });
+});
+
+describe('a failed resume records the real exit reason (3791)', () => {
+  test('a readiness error over a confirmed-dead harness keeps the final frame in state.reason', async () => {
+    const harness = await resumeHarness({
+      launch: async () => {
+        throw new Error('interactive harness did not become ready within 30s');
+      },
+    });
+    harness.manager.tmux = {
+      state: async () => ({
+        alive: true,
+        dead: true,
+        promptReady: false,
+        pane: 'Error: unsupported session format (claude 2.1.258)',
+        visiblePane: 'Error: unsupported session format (claude 2.1.258)',
+      }),
+      send: async () => undefined,
+      subprocessAlive: async () => false,
+      snapshot: async () => '',
+    };
+    let cleanupReason = '';
+    harness.manager.stopTmuxWithEvidence = async (_config: unknown, reason: string) => {
+      cleanupReason = reason;
+    };
+    harness.manager.resumeWaitMs = 5_000;
+    await expect(callResume(harness.manager, 'continue')).rejects.toThrow('did not become ready');
+    expect(harness.state().status).toBe('failed');
+    expect(String(harness.state().reason)).toContain('unsupported session format');
+    expect(String(harness.state().reason)).toContain('launch error: interactive harness did not become ready');
+    // A failed teardown writes kill_failed with this reason; it must carry
+    // the real cause, not only the pid-probe message.
+    expect(cleanupReason).toContain('unsupported session format');
+  });
+});
+
+describe('daemon recovery of a session whose tmux is gone (3746)', () => {
+  test('it is failed but RESUMABLE, journalled as detached', async () => {
+    const recorded: Recorded[] = [];
+    let state: Record<string, unknown> = { id: 's1', status: 'running', health: 'healthy', turn: 7 };
+    const config = { id: 's1', harness: 'claude', mode: 'interactive', tmuxSession: 'kteam-s1-agent', turn: 7 };
+    const manager = bareManager();
+    manager.closed = false;
+    manager.monitors = new Map();
+    manager.serialized = async (_id: string, work: () => Promise<unknown>) => await work();
+    manager.sweepSendFatesUnlocked = async () => undefined;
+    manager.doneMarkerForTurn = () => false;
+    manager.get = async () => ({ directory: '/nonexistent', config, state });
+    manager.tmux = {
+      state: async () => ({ alive: false, dead: true, promptReady: false, pane: '', visiblePane: '' }),
+    };
+    manager.transition = async (_id: string, patch: Record<string, unknown>, type: string) => {
+      recorded.push({ type, patch });
+      state = { ...state, ...patch };
+    };
+    manager.emit = async () => ({});
+    await (manager as unknown as { recoverSession: (view: unknown) => Promise<void> }).recoverSession({
+      directory: '/nonexistent',
+      config,
+      state,
+    });
+    expect(state.status).toBe('failed');
+    expect(state.resumable).toBe(true);
+    expect(recorded.map(item => item.type)).toEqual(['daemon.recovery_detached']);
+    const { psStatusLabel } = await import('./core');
+    expect(psStatusLabel(state as never)).toBe('failed (resumable)');
+  });
+
+  test('the next resume clears the resumable flag', async () => {
+    const harness = await resumeHarness({ state: { resumable: true } });
+    await callResume(harness.manager, 'continue');
+    expect(harness.state().status).toBe('running');
+    expect(harness.state().resumable).toBeUndefined();
+  });
+});
+
+describe('start admission control and bootstrap queue depth (3644)', () => {
+  async function admissionManager(input: { cap?: unknown; onDisk?: unknown; live: number; terminal?: number }) {
+    const home = await temporaryHome();
+    const daemonConfig = path.join(home, 'config.json');
+    if (input.onDisk !== undefined) await writeFile(daemonConfig, JSON.stringify(input.onDisk));
+    const manager = bareManager();
+    manager.paths = { home, daemonConfig };
+    manager.options = input.cap === undefined ? {} : { maxRunningSessions: input.cap };
+    manager.bootstrapQueueDepth = 3;
+    const sessions = [
+      ...Array.from({ length: input.live }, (_, i) => ({ id: `l${i}`, status: 'running' })),
+      ...Array.from({ length: input.terminal ?? 0 }, (_, i) => ({ id: `t${i}`, status: 'completed' })),
+    ];
+    manager.list = async () => sessions.map(item => ({ config: { id: item.id }, state: item, directory: '' }));
+    return manager as unknown as { assertAdmission: () => Promise<void> };
+  }
+
+  test('is off unless configured', async () => {
+    await expect((await admissionManager({ live: 500 })).assertAdmission()).resolves.toBeUndefined();
+    await expect((await admissionManager({ cap: 0, live: 500 })).assertAdmission()).resolves.toBeUndefined();
+  });
+
+  test('refuses at the cap, counting only live sessions, and names the escape hatch', async () => {
+    await expect(
+      (await admissionManager({ cap: 3, live: 2, terminal: 50 })).assertAdmission(),
+    ).resolves.toBeUndefined();
+    await expect((await admissionManager({ cap: 3, live: 3 })).assertAdmission()).rejects.toThrow(
+      /3 session\(s\) are already live.*cap of 3.*queue depth 3.*--force/,
+    );
+  });
+
+  test('reads the cap from daemon config.json when the daemon was not given one', async () => {
+    await expect(
+      (await admissionManager({ onDisk: { maxRunningSessions: 2 }, live: 2 })).assertAdmission(),
+    ).rejects.toThrow(/cap of 2/);
+  });
+
+  test('bootstrap queue depth counts queued AND running bootstraps and drains on failure', async () => {
+    const manager = bareManager();
+    manager.bootstrapChain = Promise.resolve();
+    manager.bootstrapQueueDepth = 0;
+    const run = (
+      manager as unknown as {
+        serializedBootstrap: (operation: () => Promise<unknown>) => Promise<unknown>;
+      }
+    ).serializedBootstrap.bind(manager);
+    let release = () => {};
+    const first = run(
+      () =>
+        new Promise<void>(resolve => {
+          release = resolve;
+        }),
+    );
+    const second = run(async () => {
+      throw new Error('launch died');
+    });
+    second.catch(() => undefined);
+    expect(manager.bootstrapQueueDepth).toBe(2);
+    // The chain starts the first operation on a later microtask.
+    await Bun.sleep(0);
+    release();
+    await first;
+    await second.catch(() => undefined);
+    expect(manager.bootstrapQueueDepth).toBe(0);
+  });
+});
+
+describe('start() consults the admission gate', () => {
+  async function gatedStart(request: Record<string, unknown>, hooks: Record<string, unknown> = {}) {
+    const home = await temporaryHome();
+    const manager = bareManager();
+    manager.paths = { home, daemonConfig: path.join(home, 'config.json'), kfleetBin: path.join(home, 'no-bin') };
+    manager.options = { maxRunningSessions: 1 };
+    manager.bootstrapQueueDepth = 0;
+    manager.resolveTeammateName = () => 'rowan';
+    manager.list = async () => [{ config: { id: 'l0' }, state: { status: 'running' }, directory: '' }];
+    const savedPath = process.env.PATH;
+    process.env.PATH = path.join(home, 'empty-path');
+    try {
+      return await (manager as unknown as { start: (request: unknown, hooks: unknown) => Promise<unknown> }).start(
+        { prompt: 'work', agent: 'claude-auto-nowhere', ...request },
+        hooks,
+      );
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  }
+
+  test('a start at the cap is refused before anything is persisted', async () => {
+    await expect(gatedStart({})).rejects.toThrow(/maxRunningSessions cap of 1/);
+  });
+
+  test('--force and daemon-owned warden spawns pass the gate', async () => {
+    // Past the gate, the next refusal is the (deliberately missing) wrapper.
+    await expect(gatedStart({ force: true })).rejects.toThrow(/wrapper not found/);
+    await expect(gatedStart({}, { beforeFirstTurn: async () => undefined })).rejects.toThrow(/wrapper not found/);
+  });
+});

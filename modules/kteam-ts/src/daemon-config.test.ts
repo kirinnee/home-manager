@@ -88,3 +88,10 @@ describe('cgroup config merge', () => {
     });
   });
 });
+
+describe('admission cap (maxRunningSessions)', () => {
+  test('is OFF by default and survives the merge when configured', async () => {
+    expect((await loadDaemonConfig(await pathsWithConfig(undefined))).maxRunningSessions).toBeUndefined();
+    expect((await loadDaemonConfig(await pathsWithConfig({ maxRunningSessions: 40 }))).maxRunningSessions).toBe(40);
+  });
+});
