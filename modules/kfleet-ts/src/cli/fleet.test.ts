@@ -155,3 +155,19 @@ describe('partitionByCredential', () => {
     expect(partitionByCredential(agents, null)).toEqual({ agents, skipped: [] });
   });
 });
+
+describe('withoutTokenlessAgents (what usage/serve probe)', () => {
+  test('drops agents apply would skip, keeps the rest; unchanged when every token is present', async () => {
+    const { loadConfig } = await import('../core/config');
+    const { withoutTokenlessAgents } = await import('./fleet');
+    const fleet = sandbox();
+    const config = loadConfig(path.join(fleet.home, '.kfleet', 'config.yaml'));
+    const secretsFile = path.join(fleet.home, '.secrets');
+
+    fleet.secrets('export LOGE_CLAUDE_1_TOKEN=one\n');
+    expect(withoutTokenlessAgents(config, secretsFile).agents.map(a => a.name)).toEqual(['kirin', 'loge1']);
+
+    fleet.secrets('export LOGE_CLAUDE_1_TOKEN=one\nexport LOGE_CLAUDE_2_TOKEN=two\n');
+    expect(withoutTokenlessAgents(config, secretsFile)).toBe(config);
+  });
+});

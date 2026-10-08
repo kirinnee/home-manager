@@ -33,17 +33,26 @@ interface ActiveFleet {
 /** Resolve the agents that get wrappers right now: agents whose `secrets-file`
  *  token is absent upstream are skipped, along with every command (explicit
  *  or alias-expanded) that targets one of their wrappers. */
-function resolveActive(config: Config): ActiveFleet {
+function resolveActive(config: Config, secretsFile = SECRETS_FILE): ActiveFleet {
   const all = resolveAll(config);
   const keys = [...new Set(all.flatMap(a => (a.credential?.source === 'secrets-file' ? [a.credential.key] : [])))];
-  const present = keys.length ? secretsFileKeysPresent(keys, SECRETS_FILE) : new Set<string>();
-  if (!present) logWarn(`could not read ${SECRETS_FILE}; keeping every secrets-file agent this run`);
+  const present = keys.length ? secretsFileKeysPresent(keys, secretsFile) : new Set<string>();
+  if (!present) logWarn(`could not read ${secretsFile}; keeping every secrets-file agent this run`);
   const { agents, skipped } = partitionByCredential(all, present);
   const wrappers = new Set(skipped.flatMap(s => s.wrappers));
   const targetsGone = (c: CommandDef) => wrappers.has(c.target);
   const commands = [...config.commands.filter(c => !targetsGone(c)), ...expandAliases(config.aliases, agents)];
   const dependents = [...config.commands, ...expandAliases(config.aliases, all)].filter(targetsGone);
   return { agents, commands, skipped, gone: [...wrappers, ...dependents.map(c => c.name)] };
+}
+
+/** The config minus agents `apply` skips for a missing upstream token, so
+ *  usage probes and listings never report accounts that have no wrappers. */
+export function withoutTokenlessAgents(config: Config, secretsFile = SECRETS_FILE): Config {
+  const { skipped } = resolveActive(config, secretsFile);
+  if (!skipped.length) return config;
+  const gone = new Set(skipped.map(s => s.agent));
+  return { ...config, agents: config.agents.filter(a => !gone.has(a.name)) };
 }
 
 export function createApplyCommand(): Command {

@@ -7,6 +7,7 @@ import { Command } from 'commander';
 import { loadConfig } from '../core/config';
 import { type AgentHealth, autoAgents, probeFleet } from '../core/health';
 import { type AccountUsage, probeUsage } from '../core/usage';
+import { withoutTokenlessAgents } from './fleet';
 import { logInfo, logOk, logWarn } from '../util/format';
 
 export const DEFAULT_PORT = 47318;
@@ -134,7 +135,7 @@ async function refreshUsage(cache: UsageCache): Promise<void> {
   cache.running = true;
   try {
     const cfg = loadConfig();
-    cache.results = await probeUsage(cfg, {
+    cache.results = await probeUsage(withoutTokenlessAgents(cfg), {
       concurrency: cfg.usage.concurrency,
       timeoutMs: cfg.usage.timeout * 1000,
       atLimitPercent: cfg.usage.atLimitPercent,

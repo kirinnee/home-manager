@@ -7,6 +7,7 @@ import { Command } from 'commander';
 import pc from 'picocolors';
 import { loadConfig } from '../core/config';
 import { type AccountUsage, probeUsage } from '../core/usage';
+import { withoutTokenlessAgents } from './fleet';
 import { logDim, logOk, logWarn } from '../util/format';
 import { loadOrDie } from './shared';
 
@@ -64,7 +65,8 @@ export function createUsageCommand(): Command {
         concurrency?: number;
         timeout?: number;
       }) => {
-        const config = loadOrDie(() => loadConfig());
+        // Accounts `apply` skipped for a missing upstream token have no wrappers: never probe or list them.
+        const config = withoutTokenlessAgents(loadOrDie(() => loadConfig()));
         const u = config.usage;
         // --no-relogin/--no-sync force off; otherwise follow config.usage.*.
         const relogin = opts.relogin === false ? false : u.relogin;
