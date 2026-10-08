@@ -3678,3 +3678,316 @@ this is the same "status lies about liveness" family as the 429 dead-shell entry
 and check host `uptime`. If load is already high, do the work inline instead of spawning. To triage
 when the CLI is wedged, read `~/.kteam/<id>/events.jsonl` and `logs/turn-*.txt` directly and check
 `tmux has-session -t kteam-<id>-agent` — do not rely on `kteam ps` status.
+
+## `kteam wait --timeout 45m` silently returns exit 0 immediately (no wait at all)
+
+**Recorded.** 2026-08-12, kirin-box (box-side kteamd, version 0.2.1).
+
+**Problem.** `kteam wait <id> --timeout <duration>` accepts a non-numeric duration string and
+returns _instantly with exit code 0_, as if the session had reached a terminal state. `--help`
+documents the unit as seconds ("give up after this many seconds (exit code 124...)"), so `45m`
+is genuinely wrong input — but the failure mode is silent success, not a parse error.
+
+**Evidence.** Five sessions were launched (`--label diene-study`) and were all still `running`.
+A loop of `kteam wait <id> --timeout 45m` over all five completed in under a second and printed
+`ALL DONE`; `kteam ps --label diene-study` immediately afterwards still showed all five as
+`running`, and none of the expected output files existed (`zsh: no matches found:
+/home/kirin/diene-study/*.md`). Re-running with `--timeout 2700` blocks correctly.
+
+**Why this is bad.** Exit 0 from `wait` is the primary "teammate is finished" gate for an
+orchestrating lead. A silently-zero wait makes the lead believe work completed and read
+non-existent deliverables — the exact failure `--until-marker` exists to prevent. A bad
+`--timeout` should exit non-zero with a parse error, or the flag should accept `45m`-style
+durations (preferable, since every other kteam flag that takes a duration — e.g.
+`kteam send --ask --until 30m` — uses the suffixed form).
+
+**Suspected code path.** `modules/kteam-ts/src/` — the `wait` command's option parsing.
+Likely `Number(opts.timeout)` / `parseInt(...)` producing `NaN`, then a comparison such as
+`Date.now() - start > NaN` or `NaN <= 0` short-circuiting the poll loop on the first
+iteration and falling through to the success return. Check the timeout normalisation helper
+and whether `wait` shares the duration parser used by `send --until` (which does handle `30m`);
+the inconsistency between the two flags is the root cause.
+
+**Workaround.** Pass `--timeout` in **seconds** (`--timeout 2700`, not `45m`), and prefer
+`kteam wait <id> --until-marker <deliverable>` so completion is gated on a real artifact rather
+than on the exit code. After any `wait` returns, re-check `kteam ps` before trusting it.
+
+## `kteam resume` blocks for minutes on a large-transcript session (2026-09-01)
+
+**Problem.** `kteam resume <id>` returns promptly for most sessions but hung past a 2-minute
+tool timeout for `aly` (`mt8dty5t-d6a321c3`, turn 56, cwd `~/.kteam/shared`). The session did
+come up — `kteam status` showed `starting` right after the kill and `running` ~20s later — so
+the work was not lost, but the CLI gave no progress output and no indication that it was
+mid-relaunch rather than wedged.
+
+**Evidence.** A single `for` loop resuming three stopped sessions
+(`mtgoed1y-a6dc0e27`, `mt9t1zgy-4bd506a7`, `mt8dty5t-d6a321c3`): the first two each printed
+their status line within seconds; the third produced no output at all and the shell was killed
+at 120s (exit 143). Follow-up `kteam status mt8dty5t-d6a321c3` → `starting`, then `running`
+with `turn 56` and fresh `subprocess 1s / pane 1s` liveness. `avarie` (`context 364% used`)
+resumed fine, so raw context size alone is not the trigger; `aly` had
+`+268214s credited for declared waits` and 55 prior turns.
+
+**Why this is bad.** `resume` is the recovery path after a daemon restart, so a lead often runs
+it against several dead sessions at once. A silent multi-minute block is indistinguishable from
+a hang, and killing the client mid-relaunch risks leaving the session half-attached — the lead
+has no way to tell which happened without polling `status` separately.
+
+**Suspected code path.** `modules/kteam-ts/src/` — the `resume` command's wait-for-ready gate
+(the same "attach then confirm the TUI is live" step `restart` shares). Likely it blocks on
+transcript replay / resume-menu navigation (`resumeMenuChoice: "full"`) proportional to turn
+count, with no timeout and no incremental output. Compare against `start`, which returns as soon
+as the session is registered.
+
+**Workaround.** Resume sessions **one per Bash call**, not in a loop, and treat a timeout as
+"probably fine" — re-check with `kteam status <id>` and wait for `starting` → `running` before
+concluding anything failed.
+
+## `kteam ps` reports `failed` for sessions that are merely detached after a daemon restart (2026-09-01)
+
+**Problem.** Three interactive sessions the human cared about — `juan` (`ms3pp1xf-b6b15180`,
+Valkey Leader), `glenda` (`ms3p5iyj-4e35cbc2`, PE Dangling) and `quill`
+(`mti4fz21-dfbae217`, Local Sandbox) — all showed `failed` in `kteam ps -a`, alongside ~15
+other `failed` rows from the same event. Nothing had actually failed: `kteam status` on each
+one explained `daemon restarted but the interactive tmux session no longer exists; use resume`,
+and a single `kteam resume <id>` brought every one of them back with the full conversation and
+turn counter intact (`turn 1218`, `turn 330`, `turn 10` respectively).
+
+**Evidence.** `kteam daemon status` → `pid 2460`, `sessions 1023`, `running 1`,
+`bootstrapState: complete` — i.e. one live session out of 1023, with a fresh daemon pid. Every
+`failed` row's `status` detail was the identical "daemon restarted but the interactive tmux
+session no longer exists" string, not a model error, quota error or non-zero exit. After
+resume, `kteam snapshot` showed live panes mid-conversation (juan's last pane line was an
+`API Error: Unable to connect to API (ENOTFOUND)` from the restart window; quill and glenda
+were sitting at their prompts with prior output visible). All three went
+`failed` → `running` → `awaiting_user`.
+
+**Why this is bad.** `failed` is terminal-sounding and is what `kteam ps` shows by default, so
+a lead scanning the table reads a recoverable detach as lost work and either abandons the
+session or re-spawns a duplicate teammate. The distinction only appears in the per-session
+`kteam status` detail, which nobody runs across 1023 rows. There is also no bulk recovery path:
+each orphan needs its own `resume` (and see the previous entry — `resume` can block for minutes
+with no output, so a loop over them is unsafe).
+
+**Suspected code path.** `modules/kteam-ts/src/` — the daemon-bootstrap reconciliation that
+sweeps sessions whose tmux pane is missing at startup and marks them `failed`. It should use a
+distinct state (`orphaned` / `detached`, resumable) rather than collapsing into `failed`, and
+`kteam ps` should surface that state plus a hint. A `kteam resume --all-orphaned` (serialised,
+with progress output) would make post-restart recovery one command.
+
+**Second, unrelated failure hiding underneath.** `glenda` resumed but its pane reads
+`Not logged in · Run /login` and `kteam ps` shows `QUOTA AUTH!` — the `auto-kirin` account has
+no OAuth credential (no `~/.claude-auto-kirin/.credentials.json`, no matching
+`Claude Code-credentials-*` keychain entry resolvable for it). That needs an interactive
+browser `/login` inside the pane and cannot be fixed headlessly. Worth noting that
+`kteam ps` renders auth loss and tmux loss both as `failed`, which conflates a 10-second
+recovery with one that needs the human.
+
+**Workaround.** Never trust `failed` in `kteam ps` for an interactive session — run
+`kteam status <id>` and look for the "daemon restarted" detail, then `kteam resume <id>` one at
+a time. If the resumed pane says `Not logged in`, attach with `kteam attach <name>` and run
+`/login` by hand.
+
+## interactive resume dies instantly after a claude version bump (2026-09-10)
+
+**Problem:** `kteam resume <id>` on an interactive session repeatedly fails with
+"tmux session … stopped, but harness process death could not be confirmed: pane pid N
+was absent from the process table before tmux teardown". The relaunched claude exits
+almost immediately; state cycles kill_failed → (stop) → failed → (resume) → kill_failed.
+
+**Evidence:**
+
+- Session `mtvqvoyi-49e67ede` (sury, claude-auto-loge6, opus, interactive). Died once
+  legitimately mid-report ("Pane is dead (status 1)"), then would not revive.
+- Account/wrapper healthy: `claude-auto-loge6 -p "reply OK" --model opus` → `OK`.
+- Session/context intact: a manual **headless** resume
+  `claude-auto-loge6 --resume <uuid> --model opus -p "finish the report"` ran cleanly and
+  regenerated the full report to summary.md. So the transcript and creds are fine.
+- Running the session's own `launch.sh` by hand in a real pty tmux pane starts
+  **Claude Code v2.1.258** — but the session's last-snapshot was authored under
+  **v2.1.220**. The hand-launched pane did NOT crash; it came up 0% context (fresh),
+  i.e. it did not load the old transcript.
+
+**Suspected cause:** claude auto-updated 2.1.220 → 2.1.258 between original launch and
+resume. The interactive resume path (which loads the pre-existing session transcript,
+plus `--chrome --rc`) chokes on the old on-disk session under the new binary and exits
+before kteamd can confirm the pid, leaving kill_failed. Headless `--resume` + `-p` is
+unaffected.
+
+**Suspected code path:** `modules/kteam-ts` resume/relaunch (launch.sh regeneration +
+the pid-confirm probe after tmux spawn). Two things to harden: (1) the pid-death probe
+races the harness exit and mislabels it kill_failed; (2) no fallback when the harness
+exits non-zero on resume — surface the pane's stderr instead of only the pid-probe
+message.
+
+**Workaround:** recover the deliverable with a headless resume
+(`<wrapper> --resume <session-uuid> --model <m> -p "<finish instruction>"`); the report
+lands in summary.md. To keep working interactively, start a FRESH session seeded with
+summary.md rather than reviving the old one.
+
+## 2026-09-24 — macOS system sleep stalls an active session for ~40min, silently absorbed by nudge (workaround only, not a bug)
+
+**Problem:** While babysitting session `oden` (mufsagiz-83d3a0c2, claude-auto-atomi,
+auto mode, task "Refresh Kteam Model Catalog"), the host Mac went to sleep mid-turn.
+The pane itself shows the harness printing `API Error: Your computer went to sleep
+mid-response. The response above may be incomplete.` followed by `✻ Cogitated for
+39m 44s · done 10:46 AM`, then kteam's automode nudge text `Automode: do not wait
+for user input. Make the best reasonable decision, continue the task, and write the
+required done marker when complete.` — i.e. the built-in nudge worked and revived
+the session, but only after ~40 minutes of dead time that `kteam status`/`kteam ps`
+reported the whole time as plain `running`/`tool_running` with no indication
+anything was wrong.
+
+**Evidence:**
+
+- `kteam status oden` polled every 2 min showed `last tool started` advancing
+  normally 17:07→17:19 UTC, then the next poll (real wall-clock ~17:46) still only
+  showed `last tool started 2026-09-24T17:21:05.174Z` — i.e. no forward progress
+  for ~25 min, yet state stayed `running`.
+- `kteam snapshot oden` around the same time showed the `API Error: Your computer
+went to sleep mid-response` line and `Cogitated for 39m 44s · done 10:46 AM`
+  directly in the pane transcript — the true cause (host sleep), not a kteam
+  liveness/pid issue.
+- A separate babysitting Bash `Monitor` polling loop on the same host also saw its
+  own notification stream gap by ~27 minutes across the same window, consistent
+  with the whole machine (not just the tmux pane) being asleep.
+- After the nudge text, the session resumed cleanly and continued running `bun
+test` — no data loss, no manual intervention needed.
+- `rg -n "caffeinate|prevent.*sleep|pmset" modules/kteam-ts/src modules/kteam-ts/*.sh`
+  returns no hits — nothing in launch.sh or the daemon prevents/detects host sleep.
+
+**Suspected code path:** `modules/kteam-ts/src/session-manager.ts` around the
+nudge/kill reflex (`nudgeAfterSeconds`/`killAfterSeconds`, ~lines 6161-6232) — this
+is exactly why the nudge fired and the session recovered, so the reflex logic
+itself is not at fault. The gap is that `kteam status`/`kteam ps` never surfaced
+"host was asleep" as a distinct condition (it just looked like an ordinary long
+`tool_running` turn), and nothing in `launch.sh` (or the daemon that spawns tmux
+panes) runs `caffeinate` to keep the Mac awake while a session is active.
+
+**Workaround:** none needed for correctness — the built-in nudge already revives
+the session after a sleep-induced API error, so this is not currently causing lost
+work. To avoid the ~3-5 min "dead" nudge-detection window (and reduce the
+40-minute worst case from a long, unattended sleep) on interactive/laptop
+machines, wrap `launch.sh`'s spawn (or the daemon itself) in `caffeinate -is` for
+the lifetime of active sessions; absent that, treat a `tool_running` session whose
+`last tool started` hasn't advanced in several minutes as "maybe the host slept,
+check `kteam snapshot` for an `API Error: Your computer went to sleep` line" before
+assuming a genuine stall.
+
+## 2026-09-24 — `kteam status` shows the old model after `migrate --model`
+
+- **Problem:** after `kteam migrate <id> -a claude-auto-kirin --model 'claude-opus-5-5[1m]'`, `config.json` has the new model and the TUI status bar shows "Opus 5.5 (1M context)", but `kteam status`/`ps` still print the old model (`claude-fable-5-1` for juan ms3pp1xf, `claude-opus-5` for glenda ms3p5iyj).
+- **Suspected path:** the status view's `model=` comes from the transcript/token counters (last observed model), not `config.model`, and isn't refreshed on migrate. Look at the status/view builder in `modules/kteam-ts/src/session-manager.ts` / `core.ts`.
+- **Workaround:** trust `jq .model ~/.kteam/<id>/config.json` or `kteam snapshot` (status bar) until the next turn updates the counters.
+
+## 2026-09-24 Restart leaves kteamd "degraded" over sessions whose harness already died
+
+- **Problem:** after `kteam daemon restart` on kirin-box, bootstrap ended `ok: true` but `bootstrapState: degraded` with 2 errors. Both sessions were already dead before the restart; recovery treats "cannot confirm the harness died" as a failure, even though the pane pid is simply gone.
+- **Evidence:** `recovery of mt9butuf-6ff61291 failed: tmux session kteam-mt9butuf-6ff61291-agent stopped, but harness process death could not be confirmed: pane pid 3161786 was absent from the process table before tmux teardown` (same for `msmih8xq-59c25ea7`, pid 3340011). Bootstrap took ~3 min for 10 parked sessions. The previous daemon had been running since 2026-08-10 after an OOM kill (5.1G peak), and systemd warns the tmux server (pid 4833) survives unit stops.
+- **Suspected code path:** `modules/kteam-ts/src/tmux-controller.ts:2325` (sets captureProblem) → `:2344`, the teardown verification that emits "harness process death could not be confirmed". A pid that is already absent from the process table BEFORE teardown is proof of death, not ambiguity; it should count as confirmed-dead and the session be marked stopped.
+- **Workaround:** harmless. The daemon serves normally. `kteam stop` / clean up the two dead session ids to clear the degraded flag.
+
+## 2026-10-08 — `kteam daemon install` on macOS left kteamd DOWN (launchd bootstrap race)
+
+**Problem:** `kteam daemon install` (run to pick up `AbandonProcessGroup` — the installed
+plist was from 2026-07-11, before 47934d7) printed `Bootstrap failed: 5: Input/output error`
+and exited with kteamd not running. Teammate panes were unaffected (tmux server pid 43239 kept
+running; `kteam daemon start` ~10s later re-adopted all 6 sessions, `daemon.readopted` events).
+
+**Evidence:** install() runs `launchctl bootout` then immediately `launchctl bootstrap`;
+bootout returns before launchd finishes tearing the job down. `kteam daemon restart` on darwin
+is bootout + 500ms + bootstrap — same race.
+
+**Code path:** `modules/kteam-ts/src/daemon-service.ts` `install()` / `start()`.
+
+**Fix (committed):** `launchdBootstrap()` retries up to 10× at 500ms while stderr is the
+`5: Input/output error` teardown race; other failures still throw. Tests in
+`daemon-service.test.ts`. **Workaround on older builds:** `kteam daemon start`.
+
+## 2026-10-08 — `--model fable` silently runs Sonnet: Claude Code `model_consent_fallback` is not detected
+
+**Problem:** keelin (muztj9py-3e6527ca, claude-auto-loge3, `kteam start --model fable`) ran its
+whole session on `claude-sonnet-5-5[1m]`. The interactive TUI emitted a system event
+`model_consent_fallback: "Switched to claude-sonnet-5-5[1m] for this session · Fable 5.1 requires
+usage credits · /model to change"` and kept going. `kteam ps` showed MODEL=claude-sonnet-5-5 but
+nothing flagged it; the lead asked for Fable-tier work and silently got Sonnet.
+
+**Evidence:** launch.sh `--model 'fable'`, wrapper `ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5-1[1m]`;
+transcript 5e71d3f3-…: all 16 assistant turns `claude-sonnet-5-5`, plus the system line above.
+`claude-auto-loge3 -p --model fable` (non-interactive) served `claude-fable-5-1` fine — the
+fallback is interactive-only (usage-credit consent prompt).
+
+**Suspected code path:** transcript watcher in `modules/kteam-ts/src/session-manager.ts` /
+`observedModel` handling — it records the served model but never compares it with the requested
+model, and ignores `system` entries with `subtype: model_consent_fallback`.
+
+**Proposed fix:** on `model_consent_fallback` (or observedModel tier ≠ requested), emit an event,
+mark the session (e.g. health `degraded` + reason "model fell back: fable → sonnet"), surface it in
+`kteam ps/status`, and let routing treat that account as Fable-unavailable for interactive starts.
+**Workaround:** check `observedModel` after start; use `codex-auto-* --model gpt-6-astra` for
+Fable-tier work.
+
+## 2026-10-08 — Fable "usage credits" consent dialog is an undetected modal: first prompt lost, 3 min dead start, then the nudge silently picks the downgrade
+
+**Problem:** companion to the `model_consent_fallback` entry above (same session keelin
+muztj9py-3e6527ca). On `--model fable`, interactive Claude Code showed a blocking selector ("Fable 5.1
+now uses usage credits" / `❯ Switch to claude-sonnet-5-5[1m] and continue` / `Continue with Fable 5.1`)
+BEFORE the first prompt could be typed. kteam did not recognise it as a modal: the turn-1 pointer text
+was typed into the dialog, never reached the input box, and the session sat idle until the generic
+zero-life-signs nudge (183s) pressed Enter, which accepts the default = the Sonnet downgrade.
+
+**Evidence:** events.jsonl seq 6 `session.protocol_warning` "automode returned to input without a done
+marker" (17:37:04, 15s after start, nothing had run), seq 7 `monitor.error` "text did not land in the
+interactive input box" (17:37:13), seq 8 `session.nudged` "zero life-signs for 183s" (17:39:53), then
+turn proceeded at 17:40 on sonnet. snapshots/2026-10-08T17-36-49-671Z.txt shows the dialog with the
+turn-1 prompt line stranded above it.
+
+**Suspected code path:** warden dialog/blocker detection (`modules/kteam-ts/src/warden-detect.ts`) has no
+pattern for the usage-credits consent selector; delivery/verification in `session-manager.ts` /
+`tmux-controller.ts` only reports "did not land" without classifying what is on screen; the stall nudge
+is blind Enter.
+
+**Proposed fix:** add a warden pattern for the consent selector. With a requested-model pin, choose
+"Continue with Fable 5.1" or fail the start loudly (never default into the downgrade); and make the
+nudge never send Enter into an unclassified selector. **Workaround:** pass a non-Fable model, or use
+a wrapper/account where Fable needs no usage-credit consent.
+
+## 2026-10-08 — harness probe reports an admin-disabled account as `unrecognized_model`
+
+**Problem:** `kteam start --agent claude-auto-loge4` (and loge5) refused with
+`harness probe failed (process_error): probe exited 1: [claude-code:unrecognized_model]
+{"model":"claude-sonnet-5-5[1m]","query_source":"sdk"}`. The real cause: the account's usage
+allocation was disabled by the org admin (`claude -p` on the same wrapper: "Your usage allocation
+has been disabled by your admin"). The message sent the lead chasing a model-alias regression.
+
+**Suspected code path:** the harness probe error classification in `modules/kteam-ts`
+(probe → `process_error` mapping; grep `unrecognized_model`). It surfaces the SDK's last
+`[claude-code:*]` tag instead of the user-facing result text.
+
+**Fix idea:** include the probe's result/stderr text in the refusal, and classify "usage
+allocation has been disabled" / "ask your admin" as an account-disabled credential failure so
+routing skips the account (like the existing credential-rejection cache).
+**Workaround:** `kfleet/skills/llm-refresh/scripts/smoke.sh <wrapper> opus` shows the real error.
+
+## 2026-10-08 — RESOLUTION: fix batch for the open entries above (triage of all ~60 entries)
+
+Triage at f075381: 56 FIXED, 17 not-a-kteam-bug, 25 OPEN/PARTIAL, 7 human decisions. Landed:
+
+- 4f3975d tmux: absent pane pid = confirmed death (restart "degraded", resume `kill_failed`); readiness timeouts now carry the last frame.
+- cd84c77 liveness/warden: `sus_subprocess` needs a stale transcript + still pane.
+- 79b2210 CLI: `kteam wait` retries through daemon blips (exit 3 if unreachable); `kteam pin` rejects help/verbs.
+- 77466f4 usage: cached auth rejection is re-checked live before refusing `start`.
+- 6e6ea89 tasks: any session can claim files on a legacy task record.
+- fca61d1 + cc205d7 model fallback: `model_consent_fallback` → `session.model_fallback`, health degraded, shown in ps/status.
+- 409c262 kloge: `pull` recreates the proxy; `push` refuses to delete remote creds without `--yes`.
+- b6490b0 signal: done accepted before the session lock; turn-mismatched / starting-state done rejected.
+  STILL OPEN: a late untagged done after a resumed turn starts is indistinguishable (needs a per-turn
+  work token on every delivery path).
+- 05e59f2 send: busy/declared-wait sessions get deferred, bounded retries; ambiguous sends never retyped.
+- 45fac3f resume/lifecycle: bounded resume, missing-transcript relaunch, `failed (resumable)`, migrate clears observedModel, wake retries, bootstrap queue depth.
+- cc205d7 warden/liveness: live-warden check, warden signal scope, per-sweep cap, lag-aware reflex kill, admin-disabled accounts classified correctly in the probe.
+
+Known flaky under full-suite load (passes alone): attention-service "permission and review answers land on the audit row".
+Open human decisions: run kteam from a built snapshot (3426/3454), per-teammate worktrees (1220/2229),
+ghost-session policy (923), cross-harness migrate (2874), WatchdogSec (489), warden token isolation (364),
+peer-relayed answers (1323).
