@@ -5,6 +5,11 @@ import type { SessionState } from './types';
  *  across every session instead of multiplying probes by the fleet size. */
 export const USAGE_REFRESH_MS = 300_000;
 
+/** Minimum spacing between live CLI re-checks of a snapshot that condemns an
+ *  account. A re-check probes every provider, so a genuinely broken account
+ *  must not turn each feed read into a fleet-wide probe. */
+export const USAGE_RECHECK_MS = 60_000;
+
 type Fetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 type Fallback = () => Promise<AgentUsage[] | undefined>;
 
@@ -13,6 +18,7 @@ export interface UsageFeedOptions {
   fallback?: Fallback;
   now?: () => number;
   refreshMs?: number;
+  recheckMs?: number;
 }
 
 const usageAccounts = (payload: unknown): AgentUsage[] | undefined => {
@@ -28,7 +34,8 @@ const usageAccounts = (payload: unknown): AgentUsage[] | undefined => {
 };
 
 /** CLI fallback for hosts where `kfleet serve` is not running. UsageFeed calls
- *  this at most once per refresh interval for the whole daemon. */
+ *  this at most once per refresh interval for the whole daemon, plus at most
+ *  once per USAGE_RECHECK_MS to confirm a snapshot that condemns an account. */
 export async function fetchKfleetUsage(command = 'kfleet'): Promise<AgentUsage[] | undefined> {
   try {
     // `--all` is billing-critical: without it kfleet intentionally hides raw
@@ -51,16 +58,22 @@ export async function fetchKfleetUsage(command = 'kfleet'): Promise<AgentUsage[]
   }
 }
 
+/** True when this record would make `kteam start` refuse the wrapper. */
+const condemns = (account: AgentUsage): boolean => account.authOk === false || account.unavailable === true;
+
 /** Cached view of kfleet's already-refreshed `/usage` feed. Concurrent readers
  *  share one request; failed refreshes retain the last good snapshot. */
 export class UsageFeed {
   private cached?: { at: number; accounts: AgentUsage[] };
   private pending?: Promise<AgentUsage[]>;
   private retryAfter = 0;
+  private recheckPending?: Promise<AgentUsage[]>;
+  private recheckAfter = 0;
   private readonly fetcher: Fetcher;
   private readonly fallback?: Fallback;
   private readonly clock: () => number;
   private readonly refreshMs: number;
+  private readonly recheckMs: number;
 
   constructor(
     private readonly url: string,
@@ -70,6 +83,7 @@ export class UsageFeed {
     this.fallback = options.fallback;
     this.clock = options.now ?? Date.now;
     this.refreshMs = options.refreshMs ?? USAGE_REFRESH_MS;
+    this.recheckMs = options.recheckMs ?? USAGE_RECHECK_MS;
   }
 
   hasSnapshot(): boolean {
@@ -86,17 +100,42 @@ export class UsageFeed {
   async accounts(signal?: AbortSignal): Promise<AgentUsage[]> {
     if (signal?.aborted) return [];
     const at = this.clock();
-    if (this.cached && at - this.cached.at < this.refreshMs) return this.cached.accounts;
-    if (at < this.retryAfter) return this.cached?.accounts ?? [];
-
-    const pending = this.pending ?? this.refresh();
-    this.pending = pending;
-    try {
-      const accounts = await pending;
-      return signal?.aborted ? [] : accounts;
-    } finally {
-      if (this.pending === pending) this.pending = undefined;
+    let accounts: AgentUsage[];
+    if (this.cached && at - this.cached.at < this.refreshMs) accounts = this.cached.accounts;
+    else if (at < this.retryAfter) accounts = this.cached?.accounts ?? [];
+    else {
+      const pending = this.pending ?? this.refresh();
+      this.pending = pending;
+      try {
+        accounts = await pending;
+      } finally {
+        if (this.pending === pending) this.pending = undefined;
+      }
     }
+    // A snapshot that would refuse a start (rejected credentials, provider
+    // down) may be up to two refresh intervals old: ours plus kfleet serve's
+    // own cache. Confirm it against a live CLI probe before answering, so a
+    // rotated key is usable immediately instead of after both caches roll.
+    if (this.fallback && accounts.some(condemns) && this.clock() >= this.recheckAfter) {
+      const pending = this.recheckPending ?? this.recheck();
+      this.recheckPending = pending;
+      try {
+        accounts = await pending;
+      } finally {
+        if (this.recheckPending === pending) this.recheckPending = undefined;
+      }
+    }
+    return signal?.aborted ? [] : accounts;
+  }
+
+  private async recheck(): Promise<AgentUsage[]> {
+    this.recheckAfter = this.clock() + this.recheckMs;
+    const accounts = await this.fallback?.().catch(() => undefined);
+    // A failed or empty probe proves nothing; keep the snapshot we have.
+    if (accounts === undefined || accounts.length === 0) return this.cached?.accounts ?? [];
+    this.cached = { at: this.clock(), accounts };
+    this.retryAfter = 0;
+    return accounts;
   }
 
   private async refresh(): Promise<AgentUsage[]> {
@@ -107,6 +146,8 @@ export class UsageFeed {
       accounts = usageAccounts(await response.json());
     } catch {}
     if ((accounts === undefined || accounts.length === 0) && this.fallback) {
+      // This IS a live probe; a condemning answer needs no immediate re-check.
+      this.recheckAfter = this.clock() + this.recheckMs;
       const fallback = await this.fallback().catch(() => undefined);
       if (fallback !== undefined) accounts = fallback;
     }

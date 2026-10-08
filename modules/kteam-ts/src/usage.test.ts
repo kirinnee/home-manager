@@ -4,6 +4,7 @@ import {
   compactUsageQuota,
   providerUnavailableDetail,
   quotaFromUsage,
+  USAGE_RECHECK_MS,
   USAGE_REFRESH_MS,
   UsageFeed,
   usageAccountView,
@@ -97,6 +98,103 @@ describe('cached kfleet usage feed', () => {
     at = USAGE_REFRESH_MS - 1;
     expect((await feed.accounts())[0]?.weeklyPercent).toBe(62);
     expect(fallbackCalls).toBe(1);
+  });
+
+  const authFeed = (authOk: boolean) =>
+    new Response(JSON.stringify({ accounts: [{ binary: 'claude-auto-glm52a', ok: true, authOk, provider: 'zai' }] }));
+
+  test('re-checks a cached auth rejection live so a rotated key starts immediately', async () => {
+    let at = 0;
+    let fetches = 0;
+    let fallbackCalls = 0;
+    const feed = new UsageFeed('http://usage.test/usage', {
+      now: () => at,
+      fetcher: async () => {
+        fetches += 1;
+        return authFeed(false);
+      },
+      fallback: async () => {
+        fallbackCalls += 1;
+        return fallbackCalls === 1
+          ? [{ binary: 'claude-auto-glm52a', ok: true, authOk: false, provider: 'zai' }]
+          : [{ binary: 'claude-auto-glm52a', ok: true, authOk: true, provider: 'zai' }];
+      },
+    });
+
+    // The stale kfleet serve snapshot condemns the account and the first live
+    // probe agrees: the start is refused.
+    expect(quotaFromUsage((await feed.accounts())[0]!).authOk).toBe(false);
+    expect([fetches, fallbackCalls]).toEqual([1, 1]);
+    // Inside the re-check window the condemnation is served from cache.
+    at = USAGE_RECHECK_MS - 1;
+    expect(quotaFromUsage((await feed.accounts())[0]!).authOk).toBe(false);
+    expect(fallbackCalls).toBe(1);
+
+    // The key is rotated; well inside the 300s refresh interval the next read
+    // re-probes live and the start is allowed.
+    at = USAGE_RECHECK_MS;
+    expect(quotaFromUsage((await feed.accounts())[0]!).authOk).toBe(true);
+    expect([fetches, fallbackCalls]).toEqual([1, 2]);
+    // The healthy answer replaces the snapshot: no further probes.
+    at = USAGE_RECHECK_MS * 3;
+    expect(quotaFromUsage((await feed.accounts())[0]!).authOk).toBe(true);
+    expect([fetches, fallbackCalls]).toEqual([1, 2]);
+  });
+
+  test('still refuses when the live re-check also rejects, and never probes per read', async () => {
+    let at = 0;
+    let fallbackCalls = 0;
+    const feed = new UsageFeed('http://usage.test/usage', {
+      now: () => at,
+      fetcher: async () => authFeed(false),
+      fallback: async () => {
+        fallbackCalls += 1;
+        return [{ binary: 'claude-auto-glm52a', ok: true, authOk: false, provider: 'zai' }];
+      },
+    });
+
+    await Promise.all([feed.accounts(), feed.accounts(), feed.accounts()]);
+    expect(fallbackCalls).toBe(1);
+    at = USAGE_RECHECK_MS + 1;
+    expect(quotaFromUsage((await feed.accounts())[0]!).authOk).toBe(false);
+    expect(quotaFromUsage((await feed.accounts())[0]!).authOk).toBe(false);
+    expect(fallbackCalls).toBe(2);
+  });
+
+  test('re-checks a cached provider outage and keeps the snapshot when the probe fails', async () => {
+    let at = 0;
+    let fallbackCalls = 0;
+    const feed = new UsageFeed('http://usage.test/usage', {
+      now: () => at,
+      fetcher: async () =>
+        new Response(JSON.stringify([{ binary: 'claude-auto-kirin', ok: true, authOk: true, unavailable: true }])),
+      fallback: async () => {
+        fallbackCalls += 1;
+        return fallbackCalls === 1 ? undefined : [{ binary: 'claude-auto-kirin', ok: true, authOk: true }];
+      },
+    });
+
+    // A failed probe proves nothing: the outage verdict stands.
+    expect((await feed.accounts())[0]?.unavailable).toBe(true);
+    at = USAGE_RECHECK_MS;
+    expect((await feed.accounts())[0]?.unavailable).toBeUndefined();
+    expect(fallbackCalls).toBe(2);
+  });
+
+  test('a healthy snapshot is never re-probed', async () => {
+    let fallbackCalls = 0;
+    const feed = new UsageFeed('http://usage.test/usage', {
+      now: () => USAGE_RECHECK_MS * 2,
+      fetcher: async () => authFeed(true),
+      fallback: async () => {
+        fallbackCalls += 1;
+        return [];
+      },
+    });
+
+    expect((await feed.accounts())[0]?.authOk).toBe(true);
+    expect((await feed.accounts())[0]?.authOk).toBe(true);
+    expect(fallbackCalls).toBe(0);
   });
 });
 
