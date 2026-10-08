@@ -111,7 +111,7 @@ Scrolling`, not `fix-transcript-scrolling`). Never add a `[Teammate]` prefix —
   scope changes, conflicts and final results through the lead.
 - **Verify, don't trust.** `completed` is a claim: read `~/.kteam/<id>/summary.md`, inspect the diff,
   and run the checks yourself before believing it.
-- **Never restart `kteamd`** — the whole fleet depends on it. That is the human's call.
+- **Restarting `kteamd` is safe — do it yourself when needed** (e.g. after `modules/kteam-ts` changes, which only go live on restart). Teammate sessions live in tmux, outside the daemon, and the new daemon re-adopts every live pane (`daemon.readopted` event; verified 2026-10-08 with 6 sessions). Procedure: save `kteam ps`, run `kteam daemon restart`, then confirm every session is back with the same status; `kteam resume <name>` any that are not. Prefer a moment when no teammate is about to finish a turn (a pane dying mid-finish can be misread as `failed`).
 
 **Concurrent teammates share one working tree.** Assign explicit per-file ownership with no file
 owned twice, always commit with `git commit --only <paths>` (never `-a`) after checking the index for

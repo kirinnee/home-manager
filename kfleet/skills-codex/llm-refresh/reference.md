@@ -79,7 +79,7 @@ then `CLAUDE_CONFIG_DIR=~/.claude-auto-atomi $P/bin/claude -p --model '<id>[1m]'
 | `kfleet/config.yaml`, skills, CLAUDE\*.md | `hms` — REQUIRED. `~/.kfleet/config.yaml` and the skill dirs are nix-store copies linked by home-manager, so a bare `kfleet apply` regenerates wrappers from the OLD config (verified 2026-09-24). `kfleet apply` alone only helps after `hms` has re-linked the assets. |
 | flake.lock CLI bumps                      | `hms` (`sudo darwin-rebuild` via the askpass pattern in `kfleet/CLAUDE.md`).                                                                                                                                                                                             |
 | `models.overlay.json`                     | `kloge build && kloge up` locally; `kloge push user@box` for the box.                                                                                                                                                                                                    |
-| `modules/kteam-ts/**`                     | kteamd runs from source; the HUMAN restarts `kteamd` (never do it yourself).                                                                                                                                                                                             |
+| `modules/kteam-ts/**`                     | kteamd runs from source: `kteam daemon restart` (safe — sessions are re-adopted; check `kteam ps` after).                                                                                                                                                                |
 
 ## Probe endpoints (what `probe-catalogs.sh` calls)
 
