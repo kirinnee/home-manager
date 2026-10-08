@@ -2,6 +2,7 @@ import { watch as fsWatch, type FSWatcher } from 'node:fs';
 import { open, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { CLAUDE_INPUT_SHAPE_VERSION, type ObservedHumanInput } from './observed-human-input';
+import type { ModelFallbackEventData } from './types';
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -49,6 +50,14 @@ export type ClaudeNormalizedEvent =
        *  session. */
       type: 'session.remote_control';
       data: { url: string };
+    })
+  | (ClaudeEventMetadata & {
+      /** The harness switched this session off the requested model. Claude
+       *  Code writes a `system`/`model_consent_fallback` record when Fable
+       *  needs usage credits and the consent dialog falls through to its
+       *  default — then keeps working on Sonnet with nothing else to show it. */
+      type: 'session.model_fallback';
+      data: ModelFallbackEventData;
     })
   | (ClaudeEventMetadata & {
       /** Context accounting from the harness's OWN usage record — the ground
@@ -301,6 +310,30 @@ export function normalizeClaudeTranscriptRecord(value: unknown): ClaudeNormalize
       return [{ ...eventMetadata(record, message), type: 'session.remote_control', data: { url } }];
     }
     return [];
+  }
+
+  // Silent model downgrade. Structured, so no parsing of the sentence in
+  // `content` — which must never surface as chat either way.
+  if (record.type === 'system' && record.subtype === 'model_consent_fallback') {
+    const fromModel = string(record.originalModel);
+    const toModel = string(record.fallbackModel);
+    if (!fromModel || !toModel) return [];
+    const fromModelName = string(record.originalModelName);
+    const reason = string(record.content);
+    const choice = string(record.choice);
+    return [
+      {
+        ...eventMetadata(record, message),
+        type: 'session.model_fallback',
+        data: {
+          fromModel,
+          toModel,
+          ...(fromModelName ? { fromModelName } : {}),
+          ...(reason ? { reason } : {}),
+          ...(choice ? { choice } : {}),
+        },
+      },
+    ];
   }
 
   for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {

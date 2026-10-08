@@ -395,6 +395,23 @@ export interface SessionState {
   waitingCreditSeconds?: number;
 }
 
+/** Payload of the `session.model_fallback` event: the harness quietly served a
+ *  different model than the one requested (Claude Code's
+ *  `system`/`model_consent_fallback` record — e.g. Fable needs usage credits,
+ *  the consent dialog is declined or defaulted, and Sonnet runs instead). */
+export interface ModelFallbackEventData {
+  /** Model the session asked for, as the harness names it (`claude-fable-5-1`). */
+  fromModel: string;
+  /** Model the harness actually switched to (`claude-sonnet-5-5[1m]`). */
+  toModel: string;
+  /** Display name of `fromModel` (`Fable 5.1`), when the record carries one. */
+  fromModelName?: string;
+  /** The harness's own one-line explanation, verbatim. */
+  reason?: string;
+  /** How the consent prompt was resolved (`cancelled`, …), when recorded. */
+  choice?: string;
+}
+
 export interface KTeamEvent<T = unknown> {
   /** Position in THIS session's journal. 0 = never journalled — the live-only
    *  classes (terminal.frame) and every harness-derived chat event, whose

@@ -417,6 +417,40 @@ describe('Remote Control announcement (session.remote_control)', () => {
   });
 });
 
+describe('Model consent fallback (session.model_fallback)', () => {
+  // Real record from keelin (2026-10-08): `--model fable` on an account where
+  // Fable needs usage credits; Claude Code quietly switched to Sonnet.
+  const realRecord = async () =>
+    JSON.parse(
+      (
+        await Bun.file(path.join(import.meta.dir, 'fixtures', 'claude-model-consent-fallback-real.jsonl')).text()
+      ).trim(),
+    ) as Record<string, unknown>;
+
+  test('the real record yields exactly one session.model_fallback and no chat content', async () => {
+    const events = normalizeClaudeTranscriptRecord(await realRecord());
+    expect(events).toHaveLength(1);
+    expect(events[0]!.type).toBe('session.model_fallback');
+    expect(events[0]!.data).toEqual({
+      fromModel: 'claude-fable-5-1',
+      toModel: 'claude-sonnet-5-5[1m]',
+      fromModelName: 'Fable 5.1',
+      reason:
+        'Switched to claude-sonnet-5-5[1m] for this session · Fable 5.1 requires usage credits · /model to change',
+      choice: 'cancelled',
+    });
+    expect(events[0]!.timestamp).toBe('2026-10-08T17:39:53.779Z');
+    expect(events[0]!.recordUuid).toBe('a9d985b0-f50f-45fe-932c-24de3e47ee9a');
+    expect(events.some(event => event.type.startsWith('chat.'))).toBe(false);
+  });
+
+  test('ignores a fallback record missing either model', async () => {
+    const record = await realRecord();
+    expect(normalizeClaudeTranscriptRecord({ ...record, originalModel: undefined })).toHaveLength(0);
+    expect(normalizeClaudeTranscriptRecord({ ...record, fallbackModel: '' })).toHaveLength(0);
+  });
+});
+
 describe('Claude transcript file watching', () => {
   test('discovers only the exact UUID and tails partial, replaced, and truncated files', async () => {
     const temporary = await temporaryDirectory();
