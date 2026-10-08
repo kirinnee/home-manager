@@ -602,16 +602,16 @@ describe('in-session runtime model controls', () => {
       harness: 'claude',
       binary: 'claude-auto-loge',
     });
-    const result = await callRuntime(manager, { action: 'model', model: 'claude-sonnet-5' });
+    const result = await callRuntime(manager, { action: 'model', model: 'claude-sonnet-5-5' });
 
     expect(result).toBe(view);
-    expect(commands).toEqual(['/model claude-sonnet-5']);
+    expect(commands).toEqual(['/model claude-sonnet-5-5']);
     expect(result.config.turn).toBe(7);
     expect(result.state.observedModel).toBe('previous-model');
     expect(events).toEqual([
       {
         type: 'control.runtime_model',
-        data: { harness: 'claude', requestedModel: 'claude-sonnet-5' },
+        data: { harness: 'claude', requestedModel: 'claude-sonnet-5-5' },
       },
     ]);
   });
@@ -1298,13 +1298,13 @@ describe('in-session runtime model controls', () => {
 
   test('refuses busy panes and unsupported Claude model ids before typing', async () => {
     const busy = runtimeManager({ harness: 'claude', binary: 'claude-auto-loge', promptReady: false });
-    await expect(callRuntime(busy.manager, { action: 'model', model: 'claude-sonnet-5' })).rejects.toThrow(
+    await expect(callRuntime(busy.manager, { action: 'model', model: 'claude-sonnet-5-5' })).rejects.toThrow(
       /idle prompt/,
     );
     expect(busy.commands).toEqual([]);
 
     const provider = runtimeManager({ harness: 'claude', binary: 'claude-auto-mm3' });
-    await expect(callRuntime(provider.manager, { action: 'model', model: 'claude-sonnet-5' })).rejects.toThrow(
+    await expect(callRuntime(provider.manager, { action: 'model', model: 'claude-sonnet-5-5' })).rejects.toThrow(
       /not available on wrapper/,
     );
     expect(provider.commands).toEqual([]);

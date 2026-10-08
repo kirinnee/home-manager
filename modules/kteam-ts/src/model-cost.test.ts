@@ -75,7 +75,7 @@ describe('estimateEquivalentApiCost', () => {
   });
 
   test('exposes the registry verification date for comparison copy', () => {
-    expect(PRICING_REGISTRY_VERIFIED_AT).toBe('2026-09-24');
+    expect(PRICING_REGISTRY_VERIFIED_AT).toBe('2026-10-08');
   });
 
   test('prices the September 2026 Anthropic lineup from its own dated rate identity', () => {
@@ -146,6 +146,36 @@ describe('estimateEquivalentApiCost', () => {
     expect(new Set(keys).size).toBe(keys.length);
     expect(PRICING_REGISTRY.filter(entry => entry.aliases.includes('claude-opus-5-5'))).toHaveLength(1);
     expect(PRICING_REGISTRY.filter(entry => entry.aliases.includes('claude-fable-5-1'))).toHaveLength(1);
+  });
+
+  test('prices Sonnet 5.5 and Haiku 5.5 from their own dated rows, from release', () => {
+    // Sonnet 5.5: 0.7M × $2 + 0.2M × $0.10 + 40k × $2.5 + 60k × $4
+    // + 1M output × $10 = $11.76.
+    // Haiku 5.5 (≤100k-prompt tier): 0.7M × $0.10 + 0.2M × $0.01
+    // + 40k × $0.125 + 60k × $0.20 + 1M × $0.50 = $0.589.
+    const cases: Array<[string, string, bigint, string]> = [
+      ['claude-sonnet-5-5', '2026-09-28T00:00:00.000Z', 11_760_000n, 'anthropic:claude-sonnet-5-5@2026-10-08'],
+      ['claude-haiku-5-5', '2026-10-07T00:00:00.000Z', 589_000n, 'anthropic:claude-haiku-5-5@2026-10-08'],
+    ];
+    for (const [pricingModel, createdAt, usdMicros, pricingKey] of cases) {
+      expect(
+        estimateEquivalentApiCost({
+          ...base,
+          pricingModel,
+          createdAt,
+          cacheWrite5mInputTokens: 40_000,
+          cacheWrite1hInputTokens: 60_000,
+        }),
+      ).toMatchObject({ kind: 'known', usdMicros, pricingKey });
+      const dayBefore = new Date(Date.parse(createdAt) - 1).toISOString();
+      expect(resolvePricingEntry(pricingModel, dayBefore)).toEqual({ kind: 'outside_validity_window', pricingKey });
+      expect(PRICING_REGISTRY.filter(entry => entry.aliases.includes(pricingModel))).toHaveLength(1);
+    }
+    // The retired ids keep their historical rows.
+    expect(resolvePricingEntry('claude-haiku-4-5-20251001', '2026-10-08T00:00:00.000Z')).toMatchObject({
+      kind: 'known',
+      entry: { pricingKey: 'anthropic:claude-haiku-4-5@2026-07-28' },
+    });
   });
 
   test('prices the GPT-6 generation and the GPT-5.6 re-price from their own dated rows', () => {

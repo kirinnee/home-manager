@@ -29,8 +29,8 @@ test('listWrappers marks harness + auto/interactive and sorts launchable-first',
   expect(loge.runtimeModels?.map(model => model.value)).toEqual([
     'claude-fable-5-1[1m]',
     'claude-opus-5-5[1m]',
-    'claude-sonnet-5',
-    'claude-haiku-4-5-20251001',
+    'claude-sonnet-5-5',
+    'claude-haiku-5-5',
   ]);
 
   const interactive = wrappers.find(w => w.name === 'claude-loge')!;
@@ -74,8 +74,8 @@ test('runtime model choices are account-aware and never leak Anthropic ids to pr
   expect(runtimeModelsForWrapper('claude-auto-loge').map(model => model.value)).toEqual([
     'claude-fable-5-1[1m]',
     'claude-opus-5-5[1m]',
-    'claude-sonnet-5',
-    'claude-haiku-4-5-20251001',
+    'claude-sonnet-5-5',
+    'claude-haiku-5-5',
   ]);
   expect(runtimeModelsForWrapper('claude-auto-loge7')).toEqual([]);
   expect(runtimeModelsForWrapper('claude-auto-unknown')).toEqual([]);

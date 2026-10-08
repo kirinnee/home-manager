@@ -35,8 +35,8 @@ export interface WrapperInfo {
 const ANTHROPIC_RUNTIME_MODELS: RuntimeModelOption[] = [
   { value: 'fable', label: 'Fable 5.1 · 1M' },
   { value: 'opus', label: 'Opus 5.5 · 1M' },
-  { value: 'sonnet', label: 'Sonnet 5' },
-  { value: 'haiku', label: 'Haiku 4.5' },
+  { value: 'sonnet', label: 'Sonnet 5.5 · 1M' },
+  { value: 'haiku', label: 'Haiku 5.5' },
 ];
 
 // Direct Anthropic OAuth just like the other first-party accounts. The human
@@ -47,8 +47,8 @@ const LOGE_DIRECT_RUNTIME_MODELS = ANTHROPIC_RUNTIME_MODELS;
 const LOGE_RUNTIME_MODELS: RuntimeModelOption[] = [
   { value: 'claude-fable-5-1[1m]', label: 'Fable 5.1 · 1M' },
   { value: 'claude-opus-5-5[1m]', label: 'Opus 5.5 · 1M' },
-  { value: 'claude-sonnet-5', label: 'Sonnet 5' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+  { value: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+  { value: 'claude-haiku-5-5', label: 'Haiku 5.5' },
 ];
 
 const GLM_RUNTIME_MODELS: RuntimeModelOption[] = [

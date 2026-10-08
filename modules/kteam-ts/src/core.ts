@@ -165,7 +165,8 @@ export interface RoutingDoctrineRow {
  *  codex slots — GPT-6 Astra is Fable-tier (frontier planner, and the codex
  *  "only the hardest" implementer that gpt-5.6-sol held), GPT-6 Sol is
  *  Opus-tier and replaces gpt-5.6-terra as the default reviewer, GPT-6 Luna is
- *  Haiku-tier. */
+ *  Haiku-tier. 2026-10-08: Sonnet 5.5 and Haiku 5.5 took over the `sonnet` and
+ *  `haiku` slots from Sonnet 5 and Haiku 4.5 in the same roles. */
 export const ROUTING_DOCTRINE: RoutingDoctrineRow[] = [
   {
     work: 'Mission-critical thinking/planning — where a blindspot or missed understanding causes large rework or impact',
@@ -187,7 +188,7 @@ export const ROUTING_DOCTRINE: RoutingDoctrineRow[] = [
   { work: 'External docs/HTML', models: [{ model: 'GPT-6 Sol' }] },
   {
     work: 'Small/medium mechanical',
-    models: [{ model: 'Sonnet 5' }, { model: 'glm-5.3' }, { model: 'gpt-5.6-terra' }, { model: 'GPT-6 Luna' }],
+    models: [{ model: 'Sonnet 5.5' }, { model: 'glm-5.3' }, { model: 'gpt-5.6-terra' }, { model: 'GPT-6 Luna' }],
   },
 ];
 
@@ -506,7 +507,7 @@ export type ModelKey =
   | 'gpt55'
   | 'glm52'
   | 'mm3'
-  | 'sonnet5'
+  | 'sonnet55'
   | 'dsv4f'
   | 'gpt6luna'
   | 'haiku';
@@ -674,8 +675,8 @@ const MODELS: Record<ModelKey, ModelSpec> = {
     implementerFit: { mechanical: 92, mid: 35, hard: 0 },
     note: 'fast; strong at UI/SVG/screenshot-to-code, but never product-facing',
   },
-  sonnet5: {
-    label: 'Sonnet 5',
+  sonnet55: {
+    label: 'Sonnet 5.5',
     family: 'claude',
     tier: 'mass-chore',
     speed: 'fast',
@@ -710,7 +711,7 @@ const MODELS: Record<ModelKey, ModelSpec> = {
     note: 'cheap, fast codex fan-out for trivial mechanical work',
   },
   haiku: {
-    label: 'Haiku 4.5',
+    label: 'Haiku 5.5',
     family: 'claude',
     tier: 'trivial',
     speed: 'fastest',
@@ -756,7 +757,7 @@ const ACCOUNTS: AccountSpec[] = [
     options: [
       { model: 'fable51' },
       { model: 'opus55', flag: 'claude-opus-5-5' },
-      { model: 'sonnet5', flag: 'claude-sonnet-5' },
+      { model: 'sonnet55', flag: 'claude-sonnet-5-5' },
     ],
   },
   {
@@ -767,7 +768,7 @@ const ACCOUNTS: AccountSpec[] = [
     options: [
       { model: 'opus55' },
       { model: 'fable51', flag: 'fable' },
-      { model: 'sonnet5', flag: 'sonnet' },
+      { model: 'sonnet55', flag: 'sonnet' },
       { model: 'haiku', flag: 'haiku' },
     ],
   },
@@ -776,7 +777,7 @@ const ACCOUNTS: AccountSpec[] = [
     options: [
       { model: 'opus55' },
       { model: 'fable51', flag: 'fable' },
-      { model: 'sonnet5', flag: 'sonnet' },
+      { model: 'sonnet55', flag: 'sonnet' },
       { model: 'haiku', flag: 'haiku' },
     ],
   },
@@ -785,7 +786,7 @@ const ACCOUNTS: AccountSpec[] = [
     options: [
       { model: 'opus55' },
       { model: 'fable51', flag: 'fable' },
-      { model: 'sonnet5', flag: 'sonnet' },
+      { model: 'sonnet55', flag: 'sonnet' },
       { model: 'haiku', flag: 'haiku' },
     ],
   },

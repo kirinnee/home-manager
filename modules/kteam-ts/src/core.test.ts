@@ -297,7 +297,7 @@ describe('recommendDecisionGuide: teaches the decision without making it', () =>
       ['Super-small mechanical', ['MiniMax M3']],
       ['Internal docs/HTML', ['MiniMax M3']],
       ['External docs/HTML', ['GPT-6 Sol']],
-      ['Small/medium mechanical', ['Sonnet 5', 'glm-5.3', 'gpt-5.6-terra', 'GPT-6 Luna']],
+      ['Small/medium mechanical', ['Sonnet 5.5', 'glm-5.3', 'gpt-5.6-terra', 'GPT-6 Luna']],
     ]);
     expect(ROUTING_DOCTRINE.find(row => row.work === 'Implementing')?.models.at(-1)?.caution).toBe('only if you must');
     expect(ROUTING_DOCTRINE.find(row => row.work === 'Implementing')?.models.at(-2)?.caution).toBe('only the hardest');
@@ -468,7 +468,7 @@ const FLEET = [
   'codex-auto-personal',
 ];
 
-const MASS_CHORE_TIER = ['glm52', 'mm3', 'dsv4f', 'haiku', 'sonnet5', 'gpt6luna'];
+const MASS_CHORE_TIER = ['glm52', 'mm3', 'dsv4f', 'haiku', 'sonnet55', 'gpt6luna'];
 const TOP_TIER = ['astra', 'sol', 'opus55'];
 // Opus-class power: GPT-6 Sol is in this class but priced mid-tier, so it is the
 // quality-first answer for mid work without being "the top tier on a chore".
@@ -668,7 +668,7 @@ describe('recommendTeam: account rules', () => {
       expect(options.every(option => option.binary === binary)).toBe(true);
       expect(options.find(option => option.model === 'fable51')?.modelFlag).toBe('fable');
       expect(options.find(option => option.model === 'opus55')?.modelFlag).toBeUndefined();
-      expect(options.find(option => option.model === 'sonnet5')?.modelFlag).toBe('sonnet');
+      expect(options.find(option => option.model === 'sonnet55')?.modelFlag).toBe('sonnet');
       expect(options.every(option => !option.command.includes('claude-opus-5-5'))).toBe(true);
     }
 

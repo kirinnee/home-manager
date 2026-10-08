@@ -121,8 +121,9 @@ const rate = (usdPerMillion: string): bigint => {
 
 /**
  * Official sources, verified 2026-07-28; Anthropic re-checked 2026-09-24 for the
- * Opus 5.5 / Fable 5.1 lineup and OpenAI re-checked 2026-09-24 for the GPT-6
- * generation and the GPT-5.6 re-price (all appended, never mutated):
+ * Opus 5.5 / Fable 5.1 lineup and 2026-10-08 for Sonnet 5.5 / Haiku 5.5, and
+ * OpenAI re-checked 2026-09-24 for the GPT-6 generation and the GPT-5.6 re-price
+ * (all appended, never mutated):
  * - https://developers.openai.com/api/docs/pricing.md
  * - https://docs.anthropic.com/en/docs/about-claude/pricing.md
  *
@@ -341,6 +342,45 @@ export const PRICING_REGISTRY: readonly PricingEntry[] = [
     },
     verifiedAt: '2026-09-24',
     validCreatedAt: { from: '2026-09-24T00:00:00.000Z' },
+  },
+  // --- Anthropic, verified 2026-10-08 (Sonnet 5.5 + Haiku 5.5). Appended; the
+  // Sonnet 5 / Haiku 4.5 rows above stay for older sessions.
+  {
+    // Claude Sonnet 5.5 (released 2026-09-28) — the fleet's `sonnet` alias
+    // since 2026-10-08. Same rates as Sonnet 5 except a cheaper cache read.
+    aliases: ['claude-sonnet-5-5'],
+    provider: 'anthropic',
+    pricingKey: 'anthropic:claude-sonnet-5-5@2026-10-08',
+    ratesUsdMicrosPerMillion: {
+      input: rate('2'),
+      cachedRead: rate('0.1'),
+      cacheWrite5m: rate('2.5'),
+      cacheWrite1h: rate('4'),
+      output: rate('10'),
+    },
+    verifiedAt: '2026-10-08',
+    validCreatedAt: { from: '2026-09-28T00:00:00.000Z' },
+  },
+  {
+    // Claude Haiku 5.5 (released 2026-10-07) — the fleet's `haiku` alias since
+    // 2026-10-08. Its list price is TIERED by prompt size: these are the
+    // ≤100k-token-prompt rates. Prompts >100k tokens bill 5× every rate
+    // (input $0.50, 5m write $0.625, 1h write $1, cache read $0.05, output
+    // $2.50). The registry prices session-aggregate token sums, which carry no
+    // per-request prompt size, so the tier cannot be applied here: long-context
+    // Haiku 5.5 sessions are UNDER-estimated by up to 5×.
+    aliases: ['claude-haiku-5-5'],
+    provider: 'anthropic',
+    pricingKey: 'anthropic:claude-haiku-5-5@2026-10-08',
+    ratesUsdMicrosPerMillion: {
+      input: rate('0.1'),
+      cachedRead: rate('0.01'),
+      cacheWrite5m: rate('0.125'),
+      cacheWrite1h: rate('0.2'),
+      output: rate('0.5'),
+    },
+    verifiedAt: '2026-10-08',
+    validCreatedAt: { from: '2026-10-07T00:00:00.000Z' },
   },
 ];
 
