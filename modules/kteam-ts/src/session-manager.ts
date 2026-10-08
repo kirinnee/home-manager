@@ -53,6 +53,7 @@ import {
   appendEvidenceKey,
   matchObservedHumanInputs,
   newAcceptedSend,
+  NATIVE_QUEUE_MAX_ATTEMPTS,
   SendLedger,
   shiftFrozenSendTimeout,
   type SendMatch,
@@ -167,6 +168,8 @@ import {
   StructuredQuestionDriveError,
   INTERACTIVE_READY_TIMEOUT_MS,
   TmuxController,
+  NativeQueuePreKeystrokeError,
+  PromptReadyTimeoutError,
   type PaneState,
   type StallLivenessState,
 } from './tmux-controller';
@@ -1868,6 +1871,7 @@ export class SessionManager implements KTeamService {
     await this.ensureSendLedgerReconciledUnlocked(view);
     const ledger = await this.sendLedger(id);
     const at = context.at ?? now();
+    await this.retryDeferredNativeSendsUnlocked(id, view, at, context.frozen);
     let transitioned = 0;
     for (const record of ledger.all()) {
       const next = advanceSendTimeout(record, {
@@ -1884,6 +1888,7 @@ export class SessionManager implements KTeamService {
       // mechanics. Once timeout fate is fsynced, remove the mechanics mirror
       // just as terminal/composer transitions do. Startup reconciliation
       // repairs the same gap if this state write loses a crash race.
+      if (next.nativeQueueRetry) await this.surfaceDeferredSendFailureUnlocked(id, next);
       await this.store.updateState<SessionState>(id, current => ({
         ...current,
         pendingNativeSends: (current.pendingNativeSends ?? []).filter(entry => entry.id !== next.sendId),
@@ -1930,6 +1935,9 @@ export class SessionManager implements KTeamService {
    *  rather than duplicating the message. */
   private async requeueTimedOutInjectionUnlocked(id: string, view: SessionView, record: SendRecord): Promise<void> {
     if (record.path !== 'turn-file' && record.path !== 'direct') return;
+    // A deferred send may have taken the tracked idle route on retry. Its
+    // attempt was already disarmed before typing; never resurrect ambiguity.
+    if (record.nativeQueueRetry) return;
     try {
       // A terminal session's leftover pane is never typed into; its own
       // finalization path owns those records (and `revive` re-delivers).
@@ -2143,6 +2151,18 @@ export class SessionManager implements KTeamService {
     // and replay correctly refuses to deliver twice, but the old mechanics row
     // would otherwise live forever. Rebuild the mirror from settled snapshots.
     const snapshots = ledger.all({ includeWithdrawn: true });
+    // Repair the exhaustion/timeout fsync -> attention crash window while the
+    // mechanics row still proves state cleanup has not completed. Cleared old
+    // alerts must not be resurrected after an explicit resume/acknowledgment.
+    for (const record of snapshots) {
+      if (
+        record.nativeQueueRetry &&
+        record.fate === 'unaccounted' &&
+        (record.unaccountedReason === 'deferred_exhausted' || record.unaccountedReason === 'timeout') &&
+        view.state.pendingNativeSends?.some(entry => entry.id === record.sendId)
+      )
+        await this.surfaceDeferredSendFailureUnlocked(id, record);
+    }
     const settledIds = new Set(
       snapshots.filter(record => record.withdrawn === true || record.fate !== 'accepted').map(record => record.sendId),
     );
@@ -2838,7 +2858,10 @@ export class SessionManager implements KTeamService {
       let busy =
         !waitingStatuses.includes(view.state.status) &&
         view.state.status !== 'interrupted' &&
-        view.state.promptReady !== true;
+        paneState.promptReady !== true;
+      // A declared wait parks the monitor, not the harness. Its tool may still
+      // be active; the live pane decides whether this is an idle delivery.
+      if (view.state.status === 'waiting' && paneState.promptReady !== true) busy = true;
       if (busy) {
         // `--now` = stop the active turn first (Escape, the same safe key
         // interrupt() uses), then RE-READ the pane: once Escape produced a
@@ -2896,12 +2919,10 @@ export class SessionManager implements KTeamService {
             disposition: this.sendDisposition(accepted.record),
             applied: false,
           };
-        // typeIntoQueue can fail after Enter/Tab. Without a typed transport
-        // phase, every error is ambiguous: preserve ACCEPTED + mechanics and
-        // never auto-retype through the file route (that duplicated Codex
-        // messages). A same-id caller retry becomes an idempotent no-op.
-        await this.queueNativeSend(id, view, request, sendId, queuedMessage, payload, fileBacked);
-        return { kind: 'result' as const, disposition: 'queued' as const, applied: true };
+        // Only a typed pre-keystroke refusal permits retry. All other failures
+        // preserve ACCEPTED + mechanics without replaying possible input.
+        const placement = await this.queueNativeSend(id, view, request, sendId, queuedMessage, payload, fileBacked);
+        return { kind: 'result' as const, disposition: 'queued' as const, applied: true, deferred: placement.deferred };
       }
       const accepted = await this.deliverToIdlePrompt(id, view, request);
       return {
@@ -2941,7 +2962,9 @@ export class SessionManager implements KTeamService {
           'daemon',
         ).catch(() => undefined);
       });
-      await this.endPeerWait(id, sender.config.id).catch(() => undefined);
+      if (!('deferred' in outcome && outcome.deferred)) {
+        await this.endPeerWait(id, sender.config.id).catch(() => undefined);
+      }
     }
     return { ...(await this.get(id)), disposition: outcome.disposition };
   }
@@ -3234,7 +3257,7 @@ export class SessionManager implements KTeamService {
     queuedMessage: string | undefined,
     payload: string,
     fileBacked: boolean,
-  ): Promise<void> {
+  ): Promise<{ deferred: boolean }> {
     const payloadFile = fileBacked ? path.join(view.directory, 'channel', `queued-${sendId}.md`) : undefined;
     const queueText = payloadFile
       ? `Read the queued message file at ${payloadFile} completely now, then follow every instruction inside it.`
@@ -3261,23 +3284,28 @@ export class SessionManager implements KTeamService {
       await this.withdrawSendUnlocked(id, sendId, 'native queue pre-submit persistence failed');
       throw error;
     }
+    let deferred = false;
     try {
       await this.tmux.typeIntoQueue(view.config.tmuxSession, queueText);
     } catch (error) {
-      if (payloadFile) {
+      if (error instanceof NativeQueuePreKeystrokeError) {
+        await (await this.sendLedger(id)).deferNative(sendId, now());
+        deferred = true;
+      } else if (payloadFile) {
         throw new NativeQueueComposerError(
           `durable queue instruction could not be confirmed; it will not be retried automatically, and the complete payload remains at ${payloadFile}: ${String(error)}`,
           error,
         );
+      } else {
+        throw new NativeQueueComposerError(
+          `native queue delivery could not be confirmed and will not be retried automatically: ${String(error)}`,
+          error,
+        );
       }
-      throw new NativeQueueComposerError(
-        `native queue delivery could not be confirmed and will not be retried automatically: ${String(error)}`,
-        error,
-      );
     }
     await appendFile(
       path.join(view.directory, 'channel', 'inbox.jsonl'),
-      `${JSON.stringify({ at: now(), type: 'message', queued: true, queueId: entry.id, message: queuedMessage, attachmentIds: request.attachmentIds ?? [], ...(request.from ? { from: request.from, fromName: request.fromName } : {}) })}\n`,
+      `${JSON.stringify({ at: now(), type: 'message', queued: true, ...(deferred ? { deferred: true } : {}), queueId: entry.id, message: queuedMessage, attachmentIds: request.attachmentIds ?? [], ...(request.from ? { from: request.from, fromName: request.fromName } : {}) })}\n`,
     );
     await this.emit(
       id,
@@ -3287,12 +3315,122 @@ export class SessionManager implements KTeamService {
         message: queuedMessage,
         attachmentIds: request.attachmentIds ?? [],
         native: true,
+        ...(deferred ? { deferred: true } : {}),
         ...(payloadFile ? { fileBacked: true, payloadFile } : {}),
         ...(request.from ? { from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}) } : {}),
         ...(request.replyExpected ? { replyExpected: true } : {}),
       },
       'client',
     );
+    return { deferred };
+  }
+
+  private async surfaceDeferredSendFailureUnlocked(id: string, record: SendRecord): Promise<void> {
+    const reason =
+      record.unaccountedReason === 'deferred_exhausted'
+        ? `message ${record.sendId} NOT delivered after deferred queue retries; run \`kteam interrupt\` then resend (payload kept in channel/sends.jsonl)`
+        : `message ${record.sendId} delivery could not be confirmed after a deferred retry; inspect the session before resending (payload kept in channel/sends.jsonl)`;
+    await this.store.updateState<SessionState>(id, current => ({
+      ...current,
+      ...(!current.needsHuman ? { needsHuman: reason, needsHumanKind: 'send_deferred_exhausted' } : {}),
+    }));
+  }
+
+  /** Monitor-driven retries use the ledger as the durable authority. Only one
+   * attempt per tick, under the session lock, and never replay an ambiguous
+   * attempt (including a daemon crash after the durable claim). */
+  private async retryDeferredNativeSendsUnlocked(
+    id: string,
+    view: SessionView,
+    at: string,
+    frozen: boolean,
+  ): Promise<void> {
+    if (terminalStatuses.includes(view.state.status)) return;
+    const ledger = await this.sendLedger(id);
+    for (const record of ledger.all().reverse()) {
+      const retry = record.nativeQueueRetry;
+      if (record.fate !== 'accepted' || record.withdrawn || record.held || !retry?.pending) continue;
+      if (retry.attempts >= NATIVE_QUEUE_MAX_ATTEMPTS || Date.parse(at) >= Date.parse(retry.expiresAt)) {
+        const exhausted = await ledger.unaccount(record.sendId, 'deferred_exhausted', at);
+        if (!exhausted) continue;
+        await this.surfaceDeferredSendFailureUnlocked(id, exhausted);
+        await this.store.updateState<SessionState>(id, current => ({
+          ...current,
+          pendingNativeSends: (current.pendingNativeSends ?? []).filter(entry => entry.id !== record.sendId),
+        }));
+        await this.emit(
+          id,
+          'control.send_unaccounted',
+          { sendId: record.sendId, reason: 'deferred_exhausted', path: record.path },
+          'daemon',
+          view.config.turn,
+          true,
+        );
+        continue;
+      }
+      if (
+        frozen ||
+        view.state.pendingQuestion ||
+        view.state.status === 'awaiting_question' ||
+        view.state.needsHumanKind === CODEX_PICKER_QUARANTINE_KIND ||
+        this.launchingRecently(id) ||
+        Date.parse(at) < Date.parse(retry.nextAttemptAt)
+      )
+        continue;
+      const pane = await this.tmux.state(view.config.tmuxSession).catch(() => undefined);
+      if (!pane?.alive || pane.dead) return;
+      const claimed = await ledger.claimDeferredNative(record.sendId);
+      if (!claimed) continue;
+      try {
+        if (pane.promptReady === true) {
+          // At an idle composer Enter begins a new turn. Reuse the tracked
+          // delivery path and logical send id instead of creating a ghost turn.
+          await this.deliverToIdlePrompt(
+            id,
+            view,
+            {
+              requestId: record.sendId,
+              message: record.message,
+              attachmentIds: record.attachmentIds,
+              ...(record.from ? { from: record.from, fromName: record.fromName } : {}),
+              ...(record.replyExpected ? { replyExpected: true } : {}),
+            },
+            claimed,
+          );
+        } else {
+          if (!record.matchText) throw new Error('deferred send has no queue payload');
+          await this.tmux.typeIntoQueue(view.config.tmuxSession, record.matchText);
+        }
+        await this.emit(
+          id,
+          'control.send_queued',
+          { queueId: record.sendId, deferred: false, retried: true },
+          'daemon',
+        );
+        if (record.from) await this.endPeerWait(id, record.from).catch(() => undefined);
+      } catch (error) {
+        if (error instanceof NativeQueuePreKeystrokeError || error instanceof PromptReadyTimeoutError) {
+          // The idle retry may have revised path/matchText/turn before the
+          // readiness gate refused it. Restore the original queue transport.
+          await this.reviseAcceptedSendUnlocked(id, record.sendId, {
+            path: record.path,
+            matchText: record.matchText,
+            turn: record.turn,
+          });
+          await ledger.deferNative(record.sendId, at);
+        } else {
+          await this.emit(
+            id,
+            'control.send_requeue_failed',
+            { sendId: record.sendId, path: record.path, error: String(error), ambiguous: true },
+            'daemon',
+            view.config.turn,
+            true,
+          );
+        }
+      }
+      return;
+    }
   }
 
   /** Terminal/dead-pane send: relaunch through resume() with the message as
@@ -3418,6 +3556,7 @@ export class SessionManager implements KTeamService {
     id: string,
     view: SessionView,
     request: SendRequest,
+    deferredAttempt?: SendRecord,
   ): Promise<{ record: SendRecord; created: boolean }> {
     {
       const message = request.message?.trim();
@@ -3440,9 +3579,9 @@ export class SessionManager implements KTeamService {
         view.config.mode === 'interactive' && !request.attachmentIds?.length
           ? true
           : this.isDirectPayload(complete, view.config);
-      const accepted = await this.acceptSendUnlocked(id, view, {
+      const input = {
         sendId: request.requestId!,
-        path: direct ? 'direct' : 'turn-file',
+        path: direct ? ('direct' as const) : ('turn-file' as const),
         message: message ?? '',
         matchText: direct ? complete : this.promptInstruction(id, turn),
         turn,
@@ -3450,7 +3589,16 @@ export class SessionManager implements KTeamService {
         ...(request.from ? { from: request.from } : {}),
         ...(request.fromName ? { fromName: request.fromName } : {}),
         ...(request.replyExpected ? { replyExpected: true } : {}),
-      });
+      };
+      const revised = deferredAttempt
+        ? await this.reviseAcceptedSendUnlocked(id, deferredAttempt.sendId, {
+            path: input.path,
+            matchText: input.matchText,
+            turn,
+          })
+        : undefined;
+      if (deferredAttempt && !revised) throw new Error('deferred send is no longer accepted');
+      const accepted = revised ? { record: revised, created: true } : await this.acceptSendUnlocked(id, view, input);
       if (!accepted.created) return accepted;
       // Prove the prompt landed before recording a delivered message or
       // advancing the turn. A failed injection must leave no phantom inbox
@@ -3458,12 +3606,19 @@ export class SessionManager implements KTeamService {
       try {
         await writeFile(turnPrompt(this.paths, id, turn), `${complete}\n`, { mode: 0o600 });
       } catch (error) {
-        await this.withdrawSendUnlocked(id, request.requestId!, 'idle prompt delivery failed');
+        if (!deferredAttempt) await this.withdrawSendUnlocked(id, request.requestId!, 'idle prompt delivery failed');
         throw error;
       }
       // tmux.send may throw after keys landed or Enter was consumed. That is
       // uncertain fate, never a withdrawn/no-attempt tombstone.
-      await this.tmux.send(view.config, direct ? complete : this.promptInstruction(id, turn));
+      try {
+        await this.tmux.send(view.config, direct ? complete : this.promptInstruction(id, turn));
+      } catch (error) {
+        if (!deferredAttempt && error instanceof PromptReadyTimeoutError) {
+          await this.withdrawSendUnlocked(id, request.requestId!, 'message NOT delivered: prompt readiness timed out');
+        }
+        throw error;
+      }
       await appendFile(
         path.join(view.directory, 'channel', 'inbox.jsonl'),
         `${JSON.stringify({ at: now(), type: 'message', turn, message, attachmentIds: request.attachmentIds ?? [], ...(request.from ? { from: request.from, fromName: request.fromName } : {}) })}\n`,
@@ -6105,6 +6260,7 @@ export class SessionManager implements KTeamService {
             return;
           }
 
+          const turnBeforeSendSweep = view.config.turn;
           await this.serialized(id, async () => {
             const current = await this.get(id);
             await this.sweepSendFatesUnlocked(id, current, {
@@ -6113,6 +6269,9 @@ export class SessionManager implements KTeamService {
             });
           });
           view = await this.get(id);
+          // A deferred retry at an idle prompt can start a tracked turn. The
+          // pane and liveness observations above then belong to its predecessor.
+          if (view.config.turn !== turnBeforeSendSweep) continue;
 
           const nextPaneHash = Bun.hash(pane.pane).toString(16);
           if (nextPaneHash !== paneHash) {

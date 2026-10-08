@@ -14,6 +14,8 @@ import {
   freeTextPageShowsQuestion,
   freeTextQuestionRegion,
   liveMenuBlock,
+  NativeQueuePreKeystrokeError,
+  PromptReadyTimeoutError,
   questionRowIndex,
   paneShowsModelSelector,
   contextPercentUsed,
@@ -531,6 +533,86 @@ describe('fillComposer', () => {
   });
 });
 
+describe('native queue preflight and ambiguous submit failures', () => {
+  const paths = createPaths('/tmp/kteam-native-queue-preflight-test');
+  const payload = 'queued message';
+
+  class QueueController extends TmuxController {
+    readonly sent: string[][] = [];
+    readonly pastes: string[] = [];
+    protected override readonly composerPollMs = 0;
+    private captures = 0;
+
+    constructor(
+      private readonly frame: string,
+      private readonly alivePane = true,
+      private readonly failEnter = false,
+      private readonly readyPane = false,
+    ) {
+      super(paths, 'http://127.0.0.1:7337');
+    }
+
+    override async state() {
+      return {
+        alive: this.alivePane,
+        dead: !this.alivePane,
+        promptReady: this.readyPane,
+        pane: this.frame,
+        visiblePane: this.frame,
+      };
+    }
+
+    override async captureVisible() {
+      return this.captures++ === 0 ? this.frame : `› ${payload}\n${this.frame}`;
+    }
+
+    protected override async keys(_name: string, ...keys: string[]) {
+      this.sent.push(keys);
+      return { code: this.failEnter && keys[0] === 'Enter' ? 1 : 0, stdout: '', stderr: 'submit failed' };
+    }
+
+    protected override async pasteText(_name: string, text: string) {
+      this.pastes.push(text);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+  }
+
+  test.each([
+    ['dead pane', '❯ ', false],
+    ['startup modal', 'Do you trust the contents of this directory?\n› 1. Yes\n  2. No', true],
+    ['structured menu', '? Which one?\n❯ 1. Alpha\n  2. Beta\nEnter to select', true],
+    ['unavailable composer', 'tool output with no input row', true],
+  ])('%s refuses before any key or paste', async (_case, frame, alivePane) => {
+    const controller = new QueueController(frame, alivePane);
+    const error = await controller.typeIntoQueue('kteam-x-agent', payload).catch(error => error);
+    expect(error).toBeInstanceOf(NativeQueuePreKeystrokeError);
+    expect(controller.sent).toEqual([]);
+    expect(controller.pastes).toEqual([]);
+  });
+
+  test('pane becoming idle after busy routing refuses before any input', async () => {
+    const controller = new QueueController('❯ \n? for shortcuts', true, false, true);
+    const error = await controller.typeIntoQueue('kteam-x-agent', payload).catch(error => error);
+    expect(error).toBeInstanceOf(NativeQueuePreKeystrokeError);
+    expect(error.message).toContain('became ready');
+    expect(controller.sent).toEqual([]);
+    expect(controller.pastes).toEqual([]);
+  });
+
+  test.each([
+    ['busy Claude without a visible input row', '✻ Working… (12s · esc to interrupt)'],
+    ['busy Codex without a visible input row', '• Working (12s • Esc to interrupt)'],
+    ['Claude composer above a tall blank viewport', `❯ \n${'\n'.repeat(40)}`],
+  ])('%s is allowed to type', async (_case, frame) => {
+    const controller = new QueueController(frame, true, true);
+    const error = await controller.typeIntoQueue('kteam-x-agent', payload).catch(error => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(NativeQueuePreKeystrokeError);
+    expect(error.message).toContain('submit failed');
+    expect(controller.sent).toEqual([['-l', payload], ['Enter']]);
+  });
+});
+
 describe('inject() consumption outcomes are exactly-once', () => {
   const paths = createPaths('/tmp/kteam-inject-outcome-test');
   const input = '/status';
@@ -790,10 +872,70 @@ describe('waitReady() timeout diagnostics', () => {
       '',
     ].join('\n');
     const error = (await new NeverReady(frame).waitReady('kteam-w1a-never-ready-agent', 600).catch(e => e)) as Error;
-    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(PromptReadyTimeoutError);
     expect(error.message).toContain('did not become ready within 1s; last frame: promptReady=false, cursor=2:43');
     expect(error.message).toContain(`--- last visible frame ---\n${frame.trimEnd()}`);
     expect(error.message.endsWith('? for shortcuts')).toBe(true);
+  });
+});
+
+describe('send() readiness timeout classification', () => {
+  const paths = createPaths('/tmp/kteam-send-timeout-test');
+
+  class TimeoutController extends TmuxController {
+    readonly sent: string[][] = [];
+    readonly timeout = new PromptReadyTimeoutError('interactive harness did not become ready within 30s');
+    injected = 0;
+    constructor(private readonly frame: string) {
+      super(paths, 'http://127.0.0.1:7337');
+    }
+    override async waitReady(): Promise<void> {
+      throw this.timeout;
+    }
+    override async state() {
+      return { alive: true, dead: false, promptReady: false, pane: this.frame, visiblePane: this.frame };
+    }
+    protected override async keys(_name: string, ...keys: string[]) {
+      this.sent.push(keys);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    override async inject(): Promise<'turn-started'> {
+      this.injected++;
+      throw new Error('injection failed after composer input');
+    }
+  }
+
+  test('auto timeout retains its class and says the message was not delivered', async () => {
+    const controller = new TimeoutController('❯ ');
+    const error = await controller
+      .send({ tmuxSession: 'kteam-x-agent', mode: 'auto' } as SessionConfig, 'hello')
+      .catch(e => e);
+    expect(error).toBe(controller.timeout);
+    expect(error).toBeInstanceOf(PromptReadyTimeoutError);
+    expect(error.message).toContain('message NOT delivered; run `kteam interrupt` then resend');
+    expect(controller.sent).toEqual([]);
+    expect(controller.injected).toBe(0);
+  });
+
+  test('interactive busy timeout also preserves the no-attempt classification', async () => {
+    const controller = new TimeoutController('• Working (12s • Esc to interrupt)');
+    const error = await controller
+      .send({ tmuxSession: 'kteam-x-agent', mode: 'interactive' } as SessionConfig, 'hello')
+      .catch(e => e);
+    expect(error).toBeInstanceOf(PromptReadyTimeoutError);
+    expect(controller.sent).toEqual([]);
+    expect(controller.injected).toBe(0);
+  });
+
+  test('interactive fallback that touched C-u reports a generic injection error', async () => {
+    const controller = new TimeoutController('❯ half-typed draft');
+    const error = await controller
+      .send({ tmuxSession: 'kteam-x-agent', mode: 'interactive' } as SessionConfig, 'hello')
+      .catch(e => e);
+    expect(controller.sent).toEqual([['C-u']]);
+    expect(controller.injected).toBe(1);
+    expect(error).not.toBeInstanceOf(PromptReadyTimeoutError);
+    expect(error.message).toContain('injection failed after composer input');
   });
 });
 

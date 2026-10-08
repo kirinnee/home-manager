@@ -2,7 +2,7 @@ export type Harness = 'claude' | 'codex';
 
 export type SendFate = 'accepted' | 'delivered' | 'unaccounted';
 export type SendPath = 'direct' | 'turn-file' | 'native-inline' | 'native-file' | 'revive' | 'revive-queue';
-export type SendUnaccountedReason = 'timeout' | 'session_ended' | 'composer_discarded';
+export type SendUnaccountedReason = 'timeout' | 'session_ended' | 'composer_discarded' | 'deferred_exhausted';
 
 export interface SendEvidence {
   /** Stable identity for replay idempotency. */
@@ -36,6 +36,14 @@ export interface SendRecord {
   fromName?: string;
   replyExpected?: boolean;
   payloadFile?: string;
+  /** Retry permission exists only after a proven pre-keystroke refusal.
+   * Cleared durably before input; an interrupted attempt is never replayed. */
+  nativeQueueRetry?: {
+    pending: boolean;
+    attempts: number;
+    nextAttemptAt: string;
+    expiresAt: string;
+  };
   /** Intentionally retained for an explicit revive; never injected, timeout-exempt. */
   held?: boolean;
   /** Synchronous injection failed and the caller was told. Default projections

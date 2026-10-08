@@ -55,6 +55,50 @@ function observed(proofKey: string, text: string, observedAt = '2026-07-27T02:00
 }
 
 describe('append-only send ledger', () => {
+  test('deferred retry permission persists, excludes false proof, and is disarmed before input across restart', async () => {
+    const file = path.join(await temporaryDirectory(), 'sends.jsonl');
+    const ledger = await SendLedger.open(file);
+    await ledger.accept(accepted('q1', 'retry safely'));
+    await ledger.deferNative('q1', '2026-07-27T02:00:33.000Z');
+    const deferred = await SendLedger.open(file);
+    expect(deferred.get('q1')).toMatchObject({ fate: 'accepted', nativeQueueRetry: { pending: true, attempts: 1 } });
+    expect(matchObservedHumanInputs(deferred.all(), [observed('unrelated-identical', 'retry safely')])).toEqual([]);
+    expect(
+      await deferred.deliver(
+        { sendId: 'q1', input: observed('unrelated-identical', 'retry safely'), tier: 'exact-text' },
+        7,
+        '2026-07-27T02:00:36.000Z',
+      ),
+    ).toBeUndefined();
+    await deferred.claimDeferredNative('q1');
+    const afterCrash = await SendLedger.open(file);
+    expect(afterCrash.get('q1')).toMatchObject({ fate: 'accepted', nativeQueueRetry: { pending: false } });
+    expect(await afterCrash.claimDeferredNative('q1')).toBeUndefined();
+    const matches = matchObservedHumanInputs(afterCrash.all(), [observed('real-proof', 'retry safely')]);
+    expect(matches).toHaveLength(1);
+    await afterCrash.deliver(matches[0]!, 7, '2026-07-27T02:00:37.000Z');
+    expect(await afterCrash.deferNative('q1', '2026-07-27T02:00:38.000Z')).toBeUndefined();
+  });
+
+  test('repeat proven refusals keep a fixed deadline and defensive retry snapshots', async () => {
+    const ledger = await SendLedger.open(path.join(await temporaryDirectory(), 'sends.jsonl'));
+    await ledger.accept(accepted('q1', 'retry safely'));
+    const first = await ledger.deferNative('q1', '2026-07-27T02:00:33.000Z');
+    first!.nativeQueueRetry!.pending = false;
+    expect(ledger.get('q1')?.nativeQueueRetry?.pending).toBe(true);
+    await ledger.claimDeferredNative('q1');
+    const next = await ledger.deferNative('q1', '2026-07-27T02:00:43.000Z');
+    expect(next?.nativeQueueRetry).toEqual({
+      pending: true,
+      attempts: 2,
+      nextAttemptAt: '2026-07-27T02:01:03.000Z',
+      expiresAt: '2026-07-27T02:05:33.000Z',
+    });
+    await ledger.unaccount('q1', 'deferred_exhausted', '2026-07-27T02:05:33.000Z');
+    expect(await ledger.claimDeferredNative('q1')).toBeUndefined();
+    expect(await ledger.deferNative('q1', '2026-07-27T02:05:34.000Z')).toBeUndefined();
+  });
+
   test('rebuilds last snapshot per id and tolerates a corrupt tail', async () => {
     const directory = await temporaryDirectory();
     const file = path.join(directory, 'channel', 'sends.jsonl');

@@ -14,8 +14,9 @@ import {
   type CodexPickerTransport,
 } from './codex-runtime';
 import { runtimeModelsForWrapper } from './fleet-inventory';
-import { createPaths } from './paths';
-import { newAcceptedSend, type SendRecord } from './send-ledger';
+import { createPaths, markerFile } from './paths';
+import { newAcceptedSend, SendLedger, type SendRecord } from './send-ledger';
+import { NativeQueuePreKeystrokeError, PromptReadyTimeoutError } from './tmux-controller';
 import { dismissCodexPicker, SessionManager } from './session-manager';
 import type { ObservedHumanInput } from './observed-human-input';
 import type { SessionView } from './service';
@@ -1360,6 +1361,302 @@ describe('in-session runtime model controls', () => {
 });
 
 describe('send() delivery holes (turn-012 fix round)', () => {
+  async function deferredHarness(status = 'running') {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'kteam-deferred-'));
+    temporaryDirectories.push(home);
+    for (const directory of ['channel', 'markers', 'turns'])
+      await mkdir(path.join(home, 's1', directory), { recursive: true });
+    const { manager } = sendManager({ status, paneAlive: true });
+    manager.paths = createPaths(home);
+    manager.reconciledSendLedgers = new Set(['s1']);
+    manager.autoContinued = new Set();
+    manager.doneDeferred = new Set();
+    let config = { id: 's1', tmuxSession: 'kteam-s1-agent', turn: 3, directSendMaxChars: 500 };
+    let state: Record<string, unknown> = { id: 's1', status, turn: 3, promptReady: false };
+    const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const pane = { alive: true, dead: false, promptReady: false, visiblePane: '• Working (10s' };
+    const attempts: string[] = [];
+    const transport = {
+      queueError: undefined as Error | undefined,
+      sendError: undefined as Error | undefined,
+    };
+    manager.get = async () => ({ directory: path.join(home, 's1'), config, state });
+    manager.store = {
+      updateState: async (_id: string, mutate: (value: typeof state) => typeof state) => (state = mutate(state)),
+      updateConfig: async (_id: string, mutate: (value: typeof config) => typeof config) => (config = mutate(config)),
+    };
+    manager.transition = async (_id: string, patch: Record<string, unknown>) => (state = { ...state, ...patch });
+    manager.emit = async (_id: string, type: string, data: Record<string, unknown>) => {
+      events.push({ type, data });
+    };
+    manager.tmux = {
+      state: async () => pane,
+      typeIntoQueue: async (_name: string, text: string) => {
+        attempts.push(`queue:${text}`);
+        if (transport.queueError) throw transport.queueError;
+      },
+      send: async (_config: unknown, text: string) => {
+        attempts.push(`direct:${text}`);
+        if (transport.sendError) throw transport.sendError;
+      },
+    };
+    const ledger = await (manager as unknown as { sendLedger: (id: string) => Promise<SendLedger> }).sendLedger('s1');
+    const send = (message = 'reply', requestId = 'deferred-1') =>
+      (manager as unknown as SessionManager).send('s1', { message, requestId });
+    const sweep = async (
+      at = ledger.get('deferred-1')?.nativeQueueRetry?.nextAttemptAt ?? new Date().toISOString(),
+      frozen = false,
+    ) => {
+      const view = await (manager.get as () => Promise<SessionView>)();
+      await (
+        manager as unknown as {
+          sweepSendFatesUnlocked: (
+            id: string,
+            view: SessionView,
+            context: { at: string; frozen: boolean },
+          ) => Promise<number>;
+        }
+      ).sweepSendFatesUnlocked('s1', view, { at, frozen });
+    };
+    return {
+      manager,
+      ledger,
+      send,
+      sweep,
+      state: () => state,
+      config: () => config,
+      pane,
+      attempts,
+      transport,
+      events,
+      home,
+    };
+  }
+
+  test('W2-B waiting with an active live pane queues without entering waitReady', async () => {
+    const h = await deferredHarness('waiting');
+    // Even a stale ready flag must not trump the current live pane.
+    h.state().promptReady = true;
+    const result = await h.send();
+    expect(result.disposition).toBe('queued');
+    expect(h.attempts).toEqual(['queue:reply']);
+    expect(h.config().turn).toBe(3);
+  });
+
+  test('W2-B running with stale prompt-ready state follows the live busy pane', async () => {
+    const h = await deferredHarness();
+    h.state().promptReady = true;
+    expect((await h.send()).disposition).toBe('queued');
+    expect(h.attempts).toEqual(['queue:reply']);
+  });
+
+  test('W2-B deferred peer replies keep their declared wait until composer delivery', async () => {
+    const h = await deferredHarness('waiting');
+    const get = h.manager.get as (id: string) => Promise<SessionView>;
+    await mkdir(path.join(h.home, 'peer/channel'), { recursive: true });
+    h.manager.get = async (id: string) =>
+      id === 'peer'
+        ? {
+            directory: path.join(h.home, 'peer'),
+            config: { id: 'peer', teammate: 'replier' },
+            state: {},
+          }
+        : await get(id);
+    const ended: string[] = [];
+    h.manager.endPeerWait = async (_id: string, from: string) => {
+      ended.push(from);
+    };
+    h.transport.queueError = new NativeQueuePreKeystrokeError('composer unavailable');
+    await (h.manager as unknown as SessionManager).send('s1', {
+      message: 'reply',
+      requestId: 'deferred-1',
+      from: 'peer',
+    });
+    expect(ended).toEqual([]);
+    expect(h.ledger.get('deferred-1')?.from).toBe('peer');
+    h.transport.queueError = undefined;
+    await h.sweep();
+    await h.sweep();
+    expect(ended).toEqual(['peer']);
+  });
+
+  test('W2-B restart repairs retry-exhaustion attention before cleaning mechanics', async () => {
+    const h = await deferredHarness();
+    h.transport.queueError = new NativeQueuePreKeystrokeError('composer unavailable');
+    await h.send();
+    await h.ledger.unaccount('deferred-1', 'deferred_exhausted', new Date().toISOString());
+    const ensure = async () => {
+      (h.manager.reconciledSendLedgers as Set<string>).clear();
+      await (
+        h.manager as unknown as { ensureSendLedgerReconciledUnlocked: (view: SessionView) => Promise<void> }
+      ).ensureSendLedgerReconciledUnlocked(await (h.manager.get as () => Promise<SessionView>)());
+    };
+    await ensure();
+    expect(h.state().needsHuman).toContain('NOT delivered');
+    expect(h.state().pendingNativeSends).toEqual([]);
+    // Explicitly cleared alerts must not return on subsequent recovery.
+    h.state().needsHuman = undefined;
+    await ensure();
+    expect(h.state().needsHuman).toBeUndefined();
+  });
+
+  test('W2-B proven refusal records a deferred inbox row and drains exactly once after recovery', async () => {
+    const h = await deferredHarness('waiting');
+    h.transport.queueError = new NativeQueuePreKeystrokeError('composer unavailable');
+    expect((await h.send()).disposition).toBe('queued');
+    expect(h.ledger.get('deferred-1')).toMatchObject({
+      fate: 'accepted',
+      nativeQueueRetry: { pending: true, attempts: 1 },
+    });
+    expect(JSON.parse((await readFile(path.join(h.home, 's1/channel/inbox.jsonl'), 'utf8')).trim())).toMatchObject({
+      deferred: true,
+      queueId: 'deferred-1',
+    });
+    await h.sweep(h.ledger.get('deferred-1')!.acceptedAt);
+    expect(h.attempts).toHaveLength(1);
+    h.transport.queueError = undefined;
+    await h.sweep();
+    await h.sweep();
+    expect(h.attempts).toEqual(['queue:reply', 'queue:reply']);
+    expect(h.ledger.get('deferred-1')).toMatchObject({ fate: 'accepted', nativeQueueRetry: { pending: false } });
+    const view = await (h.manager.get as () => Promise<SessionView>)();
+    await (
+      h.manager as unknown as {
+        reconcileObservedInputsUnlocked: (
+          id: string,
+          view: SessionView,
+          inputs: ObservedHumanInput[],
+        ) => Promise<number>;
+      }
+    ).reconcileObservedInputsUnlocked('s1', view, [
+      {
+        harness: 'claude',
+        text: 'reply',
+        proof: 'native-queue-drain',
+        proofKey: 'deferred-drain',
+        observedAt: new Date().toISOString(),
+        shapeVersion: 1,
+      },
+    ]);
+    expect(h.ledger.get('deferred-1')?.fate).toBe('delivered');
+    expect(h.state().pendingNativeSends).toEqual([]);
+    expect(h.config().turn).toBe(3);
+  });
+
+  test('W2-B restart retains deferred work and an idle recovery starts one tracked turn', async () => {
+    const h = await deferredHarness();
+    h.transport.queueError = new NativeQueuePreKeystrokeError('composer unavailable');
+    await h.send();
+    const reopened = await SendLedger.open(h.ledger.file);
+    (h.manager.sendLedgers as Map<string, Promise<SendLedger>>).set('s1', Promise.resolve(reopened));
+    h.pane.promptReady = true;
+    h.pane.visiblePane = '❯ ';
+    const doneMarker = markerFile(createPaths(h.home), 's1', 'done');
+    await writeFile(doneMarker, 'previous turn');
+    await h.sweep();
+    await h.sweep();
+    expect(h.attempts).toEqual(['queue:reply', 'direct:reply']);
+    expect(h.config().turn).toBe(4);
+    expect(h.state()).toMatchObject({ status: 'running', turn: 4 });
+    expect(reopened.get('deferred-1')).toMatchObject({ path: 'direct', turn: 4, nativeQueueRetry: { pending: false } });
+    expect(await readFile(path.join(h.home, 's1/turns/turn-004.md'), 'utf8')).toBe('reply\n');
+    expect(await stat(doneMarker).catch(() => undefined)).toBeUndefined();
+  });
+
+  test('W2-B an ambiguous initial or deferred attempt is never automatically retyped', async () => {
+    for (const deferred of [false, true]) {
+      const h = await deferredHarness();
+      if (deferred) {
+        h.transport.queueError = new NativeQueuePreKeystrokeError('composer unavailable');
+        await h.send();
+      }
+      h.transport.queueError = new Error('the message left the composer without queue evidence');
+      if (deferred) await h.sweep();
+      else await expect(h.send()).rejects.toThrow('without queue evidence');
+      await h.sweep();
+      await h.sweep();
+      await h.send(); // same request id is also idempotent
+      expect(h.attempts).toHaveLength(deferred ? 2 : 1);
+      expect(h.ledger.get('deferred-1')?.nativeQueueRetry?.pending).not.toBe(true);
+      expect(h.ledger.get('deferred-1')?.fate).toBe('accepted');
+    }
+  });
+
+  test('W2-B deferred file-backed sends retain the full payload and retry the same instruction', async () => {
+    const h = await deferredHarness();
+    const message = 'full payload '.repeat(300);
+    h.transport.queueError = new NativeQueuePreKeystrokeError('composer unavailable');
+    await h.send(message);
+    const record = h.ledger.get('deferred-1')!;
+    expect(record.path).toBe('native-file');
+    expect(await readFile(record.payloadFile!, 'utf8')).toBe(`${message.trim()}\n`);
+    expect((await stat(record.payloadFile!)).mode & 0o777).toBe(0o600);
+    h.transport.queueError = undefined;
+    await h.sweep();
+    await h.sweep();
+    expect(h.attempts).toEqual([`queue:${record.matchText}`, `queue:${record.matchText}`]);
+    expect(h.ledger.all()).toHaveLength(1);
+  });
+
+  test('W2-B retry exhaustion is bounded, unaccounted, and requests intervention once', async () => {
+    const h = await deferredHarness();
+    h.transport.queueError = new NativeQueuePreKeystrokeError('composer unavailable');
+    await h.send();
+    for (let i = 0; i < 7; i++) await h.sweep();
+    expect(h.attempts).toHaveLength(5);
+    expect(h.ledger.get('deferred-1')).toMatchObject({ fate: 'unaccounted', unaccountedReason: 'deferred_exhausted' });
+    expect(h.state().needsHuman).toContain('NOT delivered');
+    expect(h.state().pendingNativeSends).toEqual([]);
+    expect(h.events.filter(event => event.type === 'control.send_unaccounted')).toHaveLength(1);
+  });
+
+  test('W2-B frozen and quarantined sessions do not retry and still reach the retry deadline', async () => {
+    const h = await deferredHarness();
+    h.transport.queueError = new NativeQueuePreKeystrokeError('composer unavailable');
+    await h.send();
+    await h.sweep(undefined, true);
+    h.state().pendingQuestion = { question: 'choose' };
+    await h.sweep();
+    expect(h.attempts).toHaveLength(1);
+    await h.sweep(h.ledger.get('deferred-1')!.nativeQueueRetry!.expiresAt, true);
+    expect(h.ledger.get('deferred-1')?.unaccountedReason).toBe('deferred_exhausted');
+  });
+
+  test('W2-B idle readiness timeout withdraws a proven non-delivery and allows same-id resend', async () => {
+    const h = await deferredHarness('waiting');
+    h.pane.promptReady = true;
+    h.transport.sendError = new PromptReadyTimeoutError('message NOT delivered; run `kteam interrupt` then resend');
+    await expect(h.send()).rejects.toThrow('message NOT delivered');
+    expect(h.ledger.get('deferred-1')?.withdrawn).toBe(true);
+    expect(h.config().turn).toBe(3);
+    h.transport.sendError = undefined;
+    expect((await h.send()).disposition).toBe('delivered');
+    expect(h.config().turn).toBe(4);
+  });
+
+  test('W2-B deferred idle readiness refusal restores queue transport but ambiguous idle failure never retries', async () => {
+    const h = await deferredHarness();
+    h.transport.queueError = new NativeQueuePreKeystrokeError('composer unavailable');
+    await h.send();
+    h.pane.promptReady = true;
+    h.transport.sendError = new PromptReadyTimeoutError('message NOT delivered');
+    await h.sweep();
+    expect(h.ledger.get('deferred-1')).toMatchObject({
+      path: 'native-inline',
+      nativeQueueRetry: { pending: true, attempts: 2 },
+    });
+    expect(h.ledger.get('deferred-1')?.turn).toBeUndefined();
+    h.transport.sendError = new Error('failed after Enter');
+    await h.sweep();
+    await h.sweep();
+    // Even timeout requeue of an overwritten turn file must not replay this.
+    await writeFile(path.join(h.home, 's1/turns/turn-004.md'), 'overwritten');
+    await h.sweep(new Date(Date.now() + 5 * 60 * 60_000).toISOString());
+    expect(h.attempts).toHaveLength(3);
+    expect(h.ledger.get('deferred-1-requeued')).toBeUndefined();
+    expect(h.state().needsHuman).toContain('delivery could not be confirmed');
+  });
+
   function sendManager(input: { status: string; paneAlive: boolean; promptReady?: boolean }) {
     const calls: string[] = [];
     const manager = bareManager();

@@ -11,6 +11,8 @@ export const SEND_EVIDENCE_WINDOW_MS = 60 * 60_000;
 export const SEND_UNACCOUNTED_TIMEOUT_MS = 60 * 60_000;
 export const SEND_HARD_CAP_MS = 4 * 60 * 60_000;
 export const SEND_EVIDENCE_KEY_LIMIT = 200;
+export const NATIVE_QUEUE_MAX_ATTEMPTS = 5;
+export const NATIVE_QUEUE_RETRY_WINDOW_MS = 5 * 60_000;
 
 export interface SendMatch {
   sendId: string;
@@ -28,6 +30,7 @@ function cloneRecord(record: SendRecord): SendRecord {
   return {
     ...record,
     attachmentIds: [...record.attachmentIds],
+    ...(record.nativeQueueRetry ? { nativeQueueRetry: { ...record.nativeQueueRetry } } : {}),
     ...(record.evidence ? { evidence: { ...record.evidence } } : {}),
   };
 }
@@ -154,10 +157,49 @@ export class SendLedger {
     return await this.persist({ ...current, withdrawn: true, held: false, fateAt: at });
   }
 
+  /** Caller MUST have proof that this attempt sent no input to the harness. */
+  async deferNative(sendId: string, at: string): Promise<SendRecord | undefined> {
+    const current = this.records.get(sendId);
+    if (!current || current.withdrawn || current.held || current.fate !== 'accepted') return undefined;
+    const attempts = (current.nativeQueueRetry?.attempts ?? 0) + 1;
+    return await this.persist({
+      ...current,
+      nativeQueueRetry: {
+        pending: true,
+        attempts,
+        nextAttemptAt: new Date(Date.parse(at) + Math.min(60_000, 10_000 * 2 ** (attempts - 1))).toISOString(),
+        expiresAt:
+          current.nativeQueueRetry?.expiresAt ?? new Date(Date.parse(at) + NATIVE_QUEUE_RETRY_WINDOW_MS).toISOString(),
+      },
+    });
+  }
+
+  /** Fsync the loss of retry permission BEFORE touching the composer. A crash
+   * after this point may lose an attempt, but cannot duplicate a delivery. */
+  async claimDeferredNative(sendId: string): Promise<SendRecord | undefined> {
+    const current = this.records.get(sendId);
+    if (
+      !current ||
+      current.withdrawn ||
+      current.held ||
+      current.fate !== 'accepted' ||
+      !current.nativeQueueRetry?.pending
+    )
+      return undefined;
+    return await this.persist({ ...current, nativeQueueRetry: { ...current.nativeQueueRetry, pending: false } });
+  }
+
   async deliver(match: SendMatch, matchedTurn: number, at: string): Promise<SendRecord | undefined> {
     if (this.evidenceKeys.has(match.input.proofKey)) return undefined;
     const current = this.records.get(match.sendId);
-    if (!current || current.withdrawn || current.held || current.fate === 'delivered') return undefined;
+    if (
+      !current ||
+      current.withdrawn ||
+      current.held ||
+      current.nativeQueueRetry?.pending ||
+      current.fate === 'delivered'
+    )
+      return undefined;
     return await this.persist({
       ...current,
       fate: 'delivered',
@@ -239,6 +281,7 @@ export function matchObservedHumanInputs(
       record =>
         !record.withdrawn &&
         !record.held &&
+        !record.nativeQueueRetry?.pending &&
         (record.fate === 'accepted' || record.fate === 'unaccounted') &&
         typeof record.matchText === 'string' &&
         normalizeSendText(record.matchText).length > 0,
@@ -322,7 +365,7 @@ export function shiftFrozenSendTimeout(record: SendRecord, resumedAt: string): S
  * durable field changes. Terminal/composer classification is deliberately
  * handled by explicit SessionManager triggers, not this timer-free sweep. */
 export function advanceSendTimeout(record: SendRecord, context: SendTimeoutContext): SendRecord {
-  if (record.withdrawn || record.held || record.fate === 'delivered') return record;
+  if (record.withdrawn || record.held || record.nativeQueueRetry?.pending || record.fate === 'delivered') return record;
   const nowMs = Date.parse(context.now);
   const acceptedMs = Date.parse(record.acceptedAt);
   if (!Number.isFinite(nowMs) || !Number.isFinite(acceptedMs)) return record;

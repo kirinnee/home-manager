@@ -58,6 +58,24 @@ export const AUTOMODE_READY_TIMEOUT_MS = 30_000;
 export const DEFAULT_READY_TIMEOUT_MS = 45_000;
 export const LAUNCH_READY_TIMEOUT_MS = 90_000;
 
+/** A readiness timeout before a send reached the composer. Only waitReady
+ * constructs this error; callers can distinguish it from tmux/input failures. */
+export class PromptReadyTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PromptReadyTimeoutError';
+  }
+}
+
+/** The native queue was refused by a pane preflight before any composer input.
+ * Only this class permits the caller to defer and retry the same payload. */
+export class NativeQueuePreKeystrokeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NativeQueuePreKeystrokeError';
+  }
+}
+
 const STARTUP_BLOCKERS = [
   'do you trust the contents of this directory',
   'do you trust the files',
@@ -1679,7 +1697,9 @@ export class TmuxController {
     const diagnostic = lastState
       ? `; last frame: promptReady=${lastState.promptReady}, cursor=${lastState.cursorX ?? '?'}:${lastState.cursorY ?? '?'}${frame ? `\n--- last visible frame ---\n${frame}` : ''}`
       : '';
-    throw new Error(`interactive harness did not become ready within ${Math.round(timeoutMs / 1000)}s${diagnostic}`);
+    throw new PromptReadyTimeoutError(
+      `interactive harness did not become ready within ${Math.round(timeoutMs / 1000)}s${diagnostic}`,
+    );
   }
 
   async inject(name: string, text: string): Promise<InjectionOutcome> {
@@ -1790,6 +1810,11 @@ export class TmuxController {
         resumeMenuChoice: config.resumeMenuChoice,
       },
     ).catch(async error => {
+      const refuseUndelivered = (): never => {
+        if (error instanceof PromptReadyTimeoutError)
+          error.message = `message NOT delivered; run \`kteam interrupt\` then resend; ${error.message}`;
+        throw error;
+      };
       // INTERACTIVE panes have a second reason to never report a ready prompt:
       // a human (at the pane, or through the harness's own remote-control
       // surface) left text sitting in the composer. `promptReady` is false for
@@ -1797,12 +1822,12 @@ export class TmuxController {
       // to burn the full timeout and then fail with "did not become ready",
       // which reads as "kteam refused to type". The composer belongs to whoever
       // is driving; the UI IS driving, so clear the stale draft and type.
-      if (!interactive) throw error;
+      if (!interactive) refuseUndelivered();
       const state = await this.state(config.tmuxSession);
-      if (!state.alive || state.dead) throw error;
+      if (!state.alive || state.dead) refuseUndelivered();
       // Genuinely mid-turn is a different case with a different answer (the
       // caller's native-queue path) — never type over live work.
-      if (paneShowsActiveWork(state.visiblePane)) throw error;
+      if (paneShowsActiveWork(state.visiblePane)) refuseUndelivered();
       await this.keys(config.tmuxSession, 'C-u');
       await Bun.sleep(200);
     });
@@ -1817,6 +1842,26 @@ export class TmuxController {
    *  composer/queue area) before submitting; multi-line payloads are sent as
    *  a bracketed paste so the TUI treats them as one message. */
   async typeIntoQueue(name: string, text: string): Promise<void> {
+    // This is the only safe retry boundary. A dead pane, live modal, or a
+    // non-working frame without an input row is a proven refusal before we
+    // touch the composer. Once fillComposer starts, even its first failed
+    // tmux call can have delivered text; all later errors stay ambiguous.
+    const current = await this.state(name);
+    if (!current.alive || current.dead) throw new NativeQueuePreKeystrokeError('native queue pane is not alive');
+    // The manager may have chosen the busy route just before this pane became
+    // idle. Refuse before typing so it can use the tracked idle-send path;
+    // submitting here would create an untracked normal turn.
+    if (current.promptReady) throw new NativeQueuePreKeystrokeError('native queue pane became ready before typing');
+    const frame = current.visiblePane;
+    if (startupDialogAction(frame) || liveMenuBlock(frame)?.cursorRow !== undefined || paneShowsModelSelector(frame))
+      throw new NativeQueuePreKeystrokeError('native queue composer is blocked by a modal');
+    const lines = frame.split('\n');
+    while (lines.length > 0 && lines[lines.length - 1]!.trim() === '') lines.pop();
+    const hasComposerRow = lines
+      .slice(-30)
+      .some(line => /^\s*[│|]?\s*[>›❯»](?:[\s\u00a0]|$)/u.test(line) && !/^\s*[│|]?\s*[>›❯»]\s*\d+[.)]/u.test(line));
+    if (!hasComposerRow && !paneShowsActiveWork(frame))
+      throw new NativeQueuePreKeystrokeError('native queue composer is unavailable');
     // Landing verification (including the collapsed-paste case) lives in
     // fillComposer; this method owns only the SUBMIT semantics of a busy pane.
     const evidence = await this.fillComposer(name, text);
