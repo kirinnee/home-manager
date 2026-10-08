@@ -10,7 +10,7 @@
 // OAuth keychain entry). We probe each unique credential once and fan the result
 // back out to every binary that uses it.
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { probeCLIProxyUsage, type CLIProxyAvailability, type CLIProxyUnavailableReason } from './cliproxy-usage';
@@ -44,6 +44,14 @@ export interface AccountUsage {
   weeklyPercent?: number; // 0–100 utilization of the weekly/long window
   fiveHourResetAt?: number; // epoch ms the 5h window resets (when known)
   weeklyResetAt?: number; // epoch ms the weekly window resets (when known)
+  /** Utilization (0–100) of the org overage / usage-credit pool, from the
+   *  `anthropic-ratelimit-unified-overage-*` inference headers (monthly reset). */
+  overagePercent?: number;
+  overageResetAt?: number; // epoch ms the overage pool resets (when known)
+  /** True when the overage pool is what this account is billing against right
+   *  now (Anthropic sends no 5h/7d windows, or says the overage claim is in use).
+   *  Only then does the overage window count toward `atLimit`. */
+  overageInUse?: boolean;
   atLimit: boolean; // 5h OR weekly ≥ atLimitPercent (exhausted)
 }
 
@@ -57,6 +65,12 @@ interface Windows {
   weeklyPercent?: number;
   fiveHourResetAt?: number;
   weeklyResetAt?: number;
+  overagePercent?: number;
+  overageResetAt?: number;
+  overageInUse?: boolean;
+  /** HTTP status / Retry-After of a failed probe (internal: drives 429 backoff). */
+  httpStatus?: number;
+  retryAfterMs?: number;
   /** The provider explicitly rejected a quota window, even if its utilization
    *  value was malformed or temporarily exceeded the documented range. */
   providerAtLimit?: boolean;
@@ -87,6 +101,12 @@ function isoToMs(s: unknown): number | undefined {
   return Number.isNaN(t) ? undefined : t;
 }
 
+/** `Retry-After` in delta-seconds (the only form Anthropic sends), as ms. */
+function retryAfterMs(headers: Headers): number | undefined {
+  const seconds = Number(headers.get('retry-after')?.trim() || Number.NaN);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : undefined;
+}
+
 /** GET with a timeout; returns the parsed JSON body or throws. HTTP errors carry a
  *  `.status` so callers can tell an auth rejection (401/403) from a transient failure. */
 async function getJson(url: string, headers: Record<string, string>, timeoutMs: number): Promise<unknown> {
@@ -94,7 +114,11 @@ async function getJson(url: string, headers: Record<string, string>, timeoutMs: 
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, { headers, signal: ctrl.signal });
-    if (!res.ok) throw Object.assign(new Error(`http ${res.status}`), { status: res.status });
+    if (!res.ok)
+      throw Object.assign(new Error(`http ${res.status}`), {
+        status: res.status,
+        retryAfterMs: retryAfterMs(res.headers),
+      });
     return await res.json();
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw new Error(`timeout after ${Math.round(timeoutMs / 1000)}s`);
@@ -168,9 +192,107 @@ async function probeAnthropicStoredToken(token: string, timeoutMs: number, authO
     // A 403 can instead be an org/spend policy response from a token Claude Code
     // still reports as logged in, so it is inconclusive here (as are 429/5xx).
     // This preserves real auth failures without recreating the false exclusion.
-    const rejected = (e as { status?: number }).status === 401;
-    return { ok: false, error: (e as Error).message, authOk: rejected ? false : authOk };
+    const { status, retryAfterMs } = e as { status?: number; retryAfterMs?: number };
+    const rejected = status === 401;
+    return {
+      ok: false,
+      error: (e as Error).message,
+      authOk: rejected ? false : authOk,
+      httpStatus: status,
+      retryAfterMs,
+    };
   }
+}
+
+// GET /api/oauth/usage is rate-limited per account, and every caller of
+// `kfleet usage` (the `kfleet serve` loop, kteam's CLI fallback/re-check, a
+// human) is a separate process that would otherwise each make its own request.
+// A small on-disk cache shared by all of them keeps the request rate bounded:
+// a fresh reading is reused outright, a 429 starts a backoff, and during the
+// backoff (or on a 429) the last good reading is served while it is not too old.
+const STORED_USAGE_FRESH_MS = 120_000;
+const STORED_USAGE_STALE_MS = 30 * 60_000;
+const STORED_USAGE_BACKOFF_MIN_MS = 60_000;
+const STORED_USAGE_BACKOFF_DEFAULT_MS = 5 * 60_000;
+const STORED_USAGE_BACKOFF_MAX_MS = 30 * 60_000;
+
+type StoredUsageReading = Pick<Windows, 'fiveHourPercent' | 'weeklyPercent' | 'fiveHourResetAt' | 'weeklyResetAt'>;
+interface StoredUsageCacheEntry {
+  at?: number; // epoch ms of the last good reading
+  windows?: StoredUsageReading;
+  blockedUntil?: number; // epoch ms: no request before this (429 backoff)
+}
+type StoredUsageCache = Record<string, StoredUsageCacheEntry>;
+
+function defaultStoredUsageCachePath(): string {
+  const fleetHome = process.env.KFLEET_HOME ?? path.join(homedir(), '.kfleet');
+  return path.join(fleetHome, 'cache', 'anthropic-oauth-usage.json');
+}
+
+function readStoredUsageCache(file: string): StoredUsageCache {
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as StoredUsageCache) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Best-effort read-modify-write of one entry (temp + rename, never a torn file). */
+function writeStoredUsageCacheEntry(file: string, key: string, entry: StoredUsageCacheEntry): void {
+  try {
+    const cache = readStoredUsageCache(file);
+    cache[key] = entry;
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(temp, `${JSON.stringify(cache)}\n`, { mode: 0o600 });
+    renameSync(temp, file);
+  } catch {
+    /* a cache write failure only costs an extra request next time */
+  }
+}
+
+/** The stored-credential usage probe behind the shared cache (see above).
+ *  `cacheFile: false` disables caching. Exported for tests. */
+export async function probeAnthropicStoredUsage(
+  token: string,
+  opts: { credId: string; timeoutMs: number; authOk?: boolean; cacheFile?: string | false; now?: () => number },
+): Promise<Windows> {
+  const authOk = opts.authOk ?? true;
+  if (opts.cacheFile === false) return probeAnthropicStoredToken(token, opts.timeoutMs, authOk);
+  const file = opts.cacheFile ?? defaultStoredUsageCachePath();
+  const clock = opts.now ?? Date.now;
+  const key = createHash('sha256').update(opts.credId).digest('hex').slice(0, 16);
+  const entry = readStoredUsageCache(file)[key] ?? {};
+  const now = clock();
+  const age = typeof entry.at === 'number' && entry.windows ? now - entry.at : Number.POSITIVE_INFINITY;
+  const cached = (): Windows | undefined =>
+    age <= STORED_USAGE_STALE_MS ? { ok: true, authOk, ...entry.windows } : undefined;
+
+  if (age < STORED_USAGE_FRESH_MS) return cached()!;
+  if (typeof entry.blockedUntil === 'number' && now < entry.blockedUntil) {
+    const retryIn = Math.ceil((entry.blockedUntil - now) / 1000);
+    return cached() ?? { ok: false, error: `http 429 (usage endpoint rate-limited; retry in ${retryIn}s)`, authOk };
+  }
+
+  const result = await probeAnthropicStoredToken(token, opts.timeoutMs, authOk);
+  if (result.ok) {
+    const { fiveHourPercent, weeklyPercent, fiveHourResetAt, weeklyResetAt } = result;
+    writeStoredUsageCacheEntry(file, key, {
+      at: clock(),
+      windows: { fiveHourPercent, weeklyPercent, fiveHourResetAt, weeklyResetAt },
+    });
+    return result;
+  }
+  if (result.httpStatus === 429) {
+    const backoff = Math.min(
+      STORED_USAGE_BACKOFF_MAX_MS,
+      Math.max(STORED_USAGE_BACKOFF_MIN_MS, result.retryAfterMs ?? STORED_USAGE_BACKOFF_DEFAULT_MS),
+    );
+    writeStoredUsageCacheEntry(file, key, { ...entry, blockedUntil: clock() + backoff });
+    return cached() ?? { ...result, error: 'http 429 (usage endpoint rate-limited)' };
+  }
+  return result;
 }
 
 const ANTHROPIC_EXTERNAL_PROBE_MODEL = 'claude-haiku-4-5-20251001';
@@ -184,13 +306,18 @@ const ANTHROPIC_QUOTA_STATUSES = new Set(['allowed', 'rejected']);
 interface ParsedAnthropicInferenceHeaders {
   windows: Omit<Windows, 'ok'>;
   hasValidQuotaHeader: boolean;
+  /** Set when the account is shut off by org policy rather than exhausted:
+   *  the request was rejected, there is no subscription window to wait out,
+   *  and Anthropic names an overage-disabled reason (e.g. an admin set the
+   *  member's credit limit to zero). The raw reason is kept for display. */
+  adminDisabledReason?: string;
 }
 
 /** Parse ONE inference quota window. These utilization headers are fractions in
  *  the inclusive 0..1 range, unlike the stored OAuth JSON's 0..100 values. */
 function parseAnthropicInferenceWindow(
   headers: Headers,
-  window: '5h' | '7d',
+  window: '5h' | '7d' | 'overage',
 ): {
   percent?: number;
   resetAt?: number;
@@ -198,23 +325,15 @@ function parseAnthropicInferenceWindow(
   hasQuotaSignal: boolean;
 } {
   const prefix = `anthropic-ratelimit-unified-${window}-`;
-  const rawStatus = headers.get(`${prefix}status`)?.trim().toLowerCase();
-  const status = rawStatus && ANTHROPIC_QUOTA_STATUSES.has(rawStatus) ? rawStatus : undefined;
+  const status = anthropicQuotaStatus(headers.get(`${prefix}status`));
 
   const rawUtilization = headers.get(`${prefix}utilization`)?.trim();
   const utilization = rawUtilization ? Number(rawUtilization) : Number.NaN;
   const percent = Number.isFinite(utilization) && utilization >= 0 && utilization <= 1 ? utilization * 100 : undefined;
 
-  const rawReset = headers.get(`${prefix}reset`)?.trim();
-  const resetSeconds = rawReset ? Number(rawReset) : Number.NaN;
-  const resetAt =
-    Number.isFinite(resetSeconds) && resetSeconds >= 0 && resetSeconds <= Number.MAX_SAFE_INTEGER / 1000
-      ? resetSeconds * 1000
-      : undefined;
-
   return {
     percent,
-    resetAt,
+    resetAt: anthropicResetMs(headers.get(`${prefix}reset`)),
     rejected: status === 'rejected',
     // A reset timestamp or `allowed` label alone cannot prove utilization or
     // headroom. An explicit rejection is useful even when Anthropic reports an
@@ -223,18 +342,65 @@ function parseAnthropicInferenceWindow(
   };
 }
 
-function parseAnthropicInferenceHeaders(headers: Headers): ParsedAnthropicInferenceHeaders {
+function anthropicQuotaStatus(raw: string | null): string | undefined {
+  const status = raw?.trim().toLowerCase();
+  return status && ANTHROPIC_QUOTA_STATUSES.has(status) ? status : undefined;
+}
+
+/** Epoch-seconds reset header → epoch ms, or undefined when malformed. */
+function anthropicResetMs(raw: string | null): number | undefined {
+  const trimmed = raw?.trim();
+  const seconds = trimmed ? Number(trimmed) : Number.NaN;
+  return Number.isFinite(seconds) && seconds >= 0 && seconds <= Number.MAX_SAFE_INTEGER / 1000
+    ? seconds * 1000
+    : undefined;
+}
+
+/** The exhausted-pool reason; every other overage-disabled reason
+ *  (`member_zero_credit_limit`, `org_level_disabled`, …) is org policy. */
+const ANTHROPIC_OVERAGE_EXHAUSTED_REASON = 'out_of_credits';
+
+/** Parse the unified quota headers. Accounts on a subscription plan send 5h/7d
+ *  windows; accounts billing an org overage / usage-credit pool send only the
+ *  overall `unified-status` plus `unified-overage-*` (monthly reset), e.g.
+ *  `overage-status: allowed`, `overage-utilization: 0.0`, `overage-in-use: true`.
+ *  Exported for header-fixture tests. */
+export function parseAnthropicInferenceHeaders(headers: Headers): ParsedAnthropicInferenceHeaders {
+  const unified = 'anthropic-ratelimit-unified-';
   const fiveHour = parseAnthropicInferenceWindow(headers, '5h');
   const weekly = parseAnthropicInferenceWindow(headers, '7d');
+  const overage = parseAnthropicInferenceWindow(headers, 'overage');
+  const overallRejected = anthropicQuotaStatus(headers.get(`${unified}status`)) === 'rejected';
+  const windowed = fiveHour.hasQuotaSignal || weekly.hasQuotaSignal;
+  // The overage pool governs when Anthropic says so, or when it is the only
+  // window this account has. Otherwise (a subscription account whose overage
+  // is merely disabled) an overage rejection must not read as at-limit.
+  const overageInUse =
+    overage.hasQuotaSignal &&
+    (headers.get(`${unified}overage-in-use`)?.trim().toLowerCase() === 'true' ||
+      headers.get(`${unified}representative-claim`)?.trim().toLowerCase() === 'overage' ||
+      !windowed);
+  const disabledReason = headers.get(`${unified}overage-disabled-reason`)?.trim() || undefined;
   return {
     windows: {
       fiveHourPercent: fiveHour.percent,
       weeklyPercent: weekly.percent,
       fiveHourResetAt: fiveHour.resetAt,
       weeklyResetAt: weekly.resetAt,
-      providerAtLimit: fiveHour.rejected || weekly.rejected,
+      ...(overage.hasQuotaSignal
+        ? {
+            overagePercent: overage.percent,
+            overageResetAt: overage.resetAt ?? anthropicResetMs(headers.get(`${unified}reset`)),
+            overageInUse,
+          }
+        : {}),
+      providerAtLimit: fiveHour.rejected || weekly.rejected || overallRejected || (overageInUse && overage.rejected),
     },
-    hasValidQuotaHeader: fiveHour.hasQuotaSignal || weekly.hasQuotaSignal,
+    hasValidQuotaHeader: windowed || overage.hasQuotaSignal || overallRejected,
+    adminDisabledReason:
+      overallRejected && !windowed && disabledReason && disabledReason !== ANTHROPIC_OVERAGE_EXHAUSTED_REASON
+        ? disabledReason
+        : undefined,
   };
 }
 
@@ -285,6 +451,16 @@ async function probeAnthropicExternalToken(token: string, timeoutMs: number): Pr
         unavailable: rejected || res.status === 403,
       };
     }
+    if (parsed.adminDisabledReason) {
+      // Logged in fine, but org policy will not serve this account: not a quota
+      // that resets, so it is unavailable rather than merely at-limit.
+      return {
+        ok: false,
+        error: `disabled by admin (${parsed.adminDisabledReason})`,
+        authOk: true,
+        unavailable: true,
+      };
+    }
     if (!parsed.hasValidQuotaHeader) {
       const prefix = res.ok ? '' : `http ${res.status}: `;
       return { ok: false, error: `${prefix}missing or invalid Anthropic quota headers`, authOk: true };
@@ -303,7 +479,11 @@ async function probeAnthropicExternalToken(token: string, timeoutMs: number): Pr
  *  .credentials.json keyed by config dir. Declared external-token agents bypass
  *  this function entirely: falling back to an unrelated stored credential would
  *  attach the wrong account's quota and auth verdict to that binary. */
-async function probeAnthropic(configDir: string, timeoutMs: number): Promise<Windows> {
+async function probeAnthropic(
+  configDir: string,
+  timeoutMs: number,
+  cache: { credId: string; cacheFile?: string | false },
+): Promise<Windows> {
   const blob = await readClaudeCred(configDir, timeoutMs);
   if (!blob) return { ok: false, error: 'not logged in (no stored credential)', authOk: false };
   let creds: Record<string, unknown>;
@@ -321,7 +501,7 @@ async function probeAnthropic(configDir: string, timeoutMs: number): Promise<Win
   const authOk = oauthTokenUsable({ accessToken: token, expiresAt });
   if (!token) return { ok: false, error: 'no access token', authOk };
   if (expired) return { ok: false, error: 'token expired', authOk };
-  return await probeAnthropicStoredToken(token, timeoutMs, authOk);
+  return await probeAnthropicStoredUsage(token, { ...cache, timeoutMs, authOk });
 }
 interface UtilWindow {
   utilization?: number;
@@ -826,6 +1006,7 @@ function planTargets(
   env: NodeJS.ProcessEnv,
   donorDirs: Map<string, string> = new Map(),
   resolveExternal: ExternalCredentialResolver = createExternalCredentialResolver(env),
+  storedUsageCacheFile?: string | false,
 ): CredTarget[] {
   const byCred = new Map<string, CredTarget>();
   for (const agent of agents) {
@@ -854,7 +1035,7 @@ function planTargets(
       : cls.provider === 'anthropic'
         ? external
           ? t => probeAnthropicExternalToken(external.value!, t)
-          : t => probeAnthropic(probeDir, t)
+          : t => probeAnthropic(probeDir, t, { credId: cls.credId, cacheFile: storedUsageCacheFile })
         : cls.provider === 'codex'
           ? t => probeCodex(probeDir, t)
           : cls.provider === 'minimax'
@@ -922,6 +1103,9 @@ export async function probeUsage(
     /** Override only for tests; production always resolves declared keys from
      *  the ambient env or the fixed generated `~/.secrets` file. */
     resolveExternalCredential?: ExternalCredentialResolver;
+    /** Shared on-disk cache for GET /api/oauth/usage readings (default under
+     *  ~/.kfleet/cache); `false` disables it. */
+    storedUsageCacheFile?: string | false;
   } = {},
 ): Promise<AccountUsage[]> {
   const env = opts.env ?? process.env;
@@ -942,7 +1126,7 @@ export async function probeUsage(
   // healing dead copies from valid siblings first unless disabled.
   const { donorDirs, authByBinary } = await scanOAuthAuth(agents, opts.sync !== false);
 
-  const targets = planTargets(agents, env, donorDirs, opts.resolveExternalCredential);
+  const targets = planTargets(agents, env, donorDirs, opts.resolveExternalCredential, opts.storedUsageCacheFile);
   const results = await runProbes(targets, concurrency, timeoutMs);
 
   // Map each credential's windows back onto its member binaries. Quota numbers
@@ -999,7 +1183,8 @@ function windowsToUsage(
   const atLimit =
     w.providerAtLimit === true ||
     (w.fiveHourPercent ?? 0) >= atLimitPercent ||
-    (w.weeklyPercent ?? 0) >= atLimitPercent;
+    (w.weeklyPercent ?? 0) >= atLimitPercent ||
+    (w.overageInUse === true && (w.overagePercent ?? 0) >= atLimitPercent);
   return {
     binary: m.binary,
     kind: m.kind,
@@ -1015,6 +1200,9 @@ function windowsToUsage(
     weeklyPercent: w.weeklyPercent,
     fiveHourResetAt: w.fiveHourResetAt,
     weeklyResetAt: w.weeklyResetAt,
+    ...(w.overageInUse !== undefined
+      ? { overagePercent: w.overagePercent, overageResetAt: w.overageResetAt, overageInUse: w.overageInUse }
+      : {}),
     atLimit: w.ok ? atLimit : w.unavailable === true, // ordinary probe failure is unknown; missing configured token is unavailable
   };
 }

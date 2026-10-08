@@ -70,3 +70,45 @@ describe('usage limit summary', () => {
     });
   });
 });
+
+describe('overage-pool accounts (no 5h/weekly windows)', () => {
+  const overage = (over: Partial<AccountUsage> = {}): AccountUsage =>
+    anthropic({
+      fiveHourPercent: undefined,
+      weeklyPercent: undefined,
+      overagePercent: 0,
+      overageResetAt: Date.now() + 25 * 86_400_000 + 60_000,
+      overageInUse: true,
+      ...over,
+    });
+
+  test('renders the overage reading and reset instead of "usage unavailable"', () => {
+    const rendered = usageRow(overage(), 18);
+    expect(rendered).toContain('overage 0%');
+    expect(rendered).toContain('↻ 25d0h');
+    expect(rendered).not.toContain('usage unavailable');
+    expect(rendered).not.toContain('AT LIMIT');
+  });
+
+  test('an in-use overage reading is a complete headroom verdict', () => {
+    expect(usageLimitSummary([overage()]).state).toBe('confirmed-headroom');
+    expect(usageLimitSummary([overage({ overageInUse: false })]).state).toBe('unknown');
+  });
+
+  test('an admin-disabled account renders as unavailable, not as a transient miss', () => {
+    const rendered = usageRow(
+      anthropic({
+        ok: false,
+        unavailable: true,
+        atLimit: true,
+        error: 'disabled by admin (member_zero_credit_limit)',
+        fiveHourPercent: undefined,
+        weeklyPercent: undefined,
+      }),
+      18,
+    );
+    expect(rendered).toContain('UNAVAILABLE');
+    expect(rendered).toContain('disabled by admin (member_zero_credit_limit)');
+    expect(rendered).not.toContain('usage unavailable');
+  });
+});

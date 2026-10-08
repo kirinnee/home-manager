@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { ResolvedAgent } from './types';
 import { configSchema } from './types';
 import {
@@ -7,7 +10,9 @@ import {
   corroborateAuthFailure,
   jwtExpMs,
   oauthTokenUsable,
+  parseAnthropicInferenceHeaders,
   parseAnthropicStoredUsage,
+  probeAnthropicStoredUsage,
   probeUsage,
 } from './usage';
 
@@ -563,5 +568,235 @@ describe('jwtExpMs (codex token expiry decode)', () => {
     expect(jwtExpMs(undefined)).toBeUndefined();
     expect(jwtExpMs('not-a-jwt')).toBeUndefined();
     expect(jwtExpMs(jwt({ sub: 'x' }))).toBeUndefined();
+  });
+});
+
+// Live headers observed 2026-10-08. Accounts billing an org overage /
+// usage-credit pool get no 5h/7d windows at all.
+const OVERAGE_ALLOWED = {
+  'anthropic-ratelimit-unified-status': 'allowed',
+  'anthropic-ratelimit-unified-reset': '1793491200',
+  'anthropic-ratelimit-unified-representative-claim': 'overage',
+  'anthropic-ratelimit-unified-overage-in-use': 'true',
+  'anthropic-ratelimit-unified-overage-status': 'allowed',
+  'anthropic-ratelimit-unified-overage-utilization': '0.0',
+  'anthropic-ratelimit-unified-overage-reset': '1793491200',
+  'anthropic-ratelimit-unified-fallback-percentage': '0.5',
+};
+// loge4..6: HTTP 429, member credit limit set to zero by an org admin.
+const OVERAGE_ADMIN_DISABLED = {
+  'anthropic-ratelimit-unified-fallback-percentage': '0.5',
+  'anthropic-ratelimit-unified-overage-disabled-reason': 'member_zero_credit_limit',
+  'anthropic-ratelimit-unified-overage-status': 'rejected',
+  'anthropic-ratelimit-unified-reset': '1793491200',
+  'anthropic-ratelimit-unified-status': 'rejected',
+  'retry-after': '1995495',
+};
+
+describe('parseAnthropicInferenceHeaders: overage pool', () => {
+  test('overage-only headers are a valid in-use quota window', () => {
+    const parsed = parseAnthropicInferenceHeaders(new Headers(OVERAGE_ALLOWED));
+    expect(parsed.hasValidQuotaHeader).toBe(true);
+    expect(parsed.adminDisabledReason).toBeUndefined();
+    expect(parsed.windows).toMatchObject({
+      overagePercent: 0,
+      overageResetAt: 1_793_491_200_000,
+      overageInUse: true,
+      providerAtLimit: false,
+    });
+    expect(parsed.windows.fiveHourPercent).toBeUndefined();
+    expect(parsed.windows.weeklyPercent).toBeUndefined();
+  });
+
+  test('a disabled overage on a subscription account does not read as at-limit', () => {
+    const parsed = parseAnthropicInferenceHeaders(
+      new Headers({
+        'anthropic-ratelimit-unified-status': 'allowed',
+        'anthropic-ratelimit-unified-5h-status': 'allowed',
+        'anthropic-ratelimit-unified-5h-utilization': '0.2',
+        'anthropic-ratelimit-unified-7d-status': 'allowed',
+        'anthropic-ratelimit-unified-7d-utilization': '0.3',
+        'anthropic-ratelimit-unified-representative-claim': 'five_hour',
+        'anthropic-ratelimit-unified-overage-status': 'rejected',
+        'anthropic-ratelimit-unified-overage-disabled-reason': 'org_level_disabled',
+      }),
+    );
+    expect(parsed.windows).toMatchObject({ fiveHourPercent: 20, weeklyPercent: 30, overageInUse: false });
+    expect(parsed.windows.providerAtLimit).toBe(false);
+    expect(parsed.adminDisabledReason).toBeUndefined();
+  });
+
+  test('an exhausted overage pool is at-limit, not admin-disabled', () => {
+    const parsed = parseAnthropicInferenceHeaders(
+      new Headers({
+        ...OVERAGE_ADMIN_DISABLED,
+        'anthropic-ratelimit-unified-overage-disabled-reason': 'out_of_credits',
+        'anthropic-ratelimit-unified-overage-utilization': '1.0',
+      }),
+    );
+    expect(parsed.hasValidQuotaHeader).toBe(true);
+    expect(parsed.adminDisabledReason).toBeUndefined();
+    expect(parsed.windows).toMatchObject({ overagePercent: 100, overageInUse: true, providerAtLimit: true });
+  });
+
+  test('an overall rejection alone is at-limit', () => {
+    const parsed = parseAnthropicInferenceHeaders(new Headers({ 'anthropic-ratelimit-unified-status': 'rejected' }));
+    expect(parsed.hasValidQuotaHeader).toBe(true);
+    expect(parsed.windows.providerAtLimit).toBe(true);
+  });
+
+  test('an allowed status with only a reset proves nothing', () => {
+    const parsed = parseAnthropicInferenceHeaders(
+      new Headers({
+        'anthropic-ratelimit-unified-status': 'allowed',
+        'anthropic-ratelimit-unified-reset': '1793491200',
+      }),
+    );
+    expect(parsed.hasValidQuotaHeader).toBe(false);
+  });
+});
+
+describe('probeUsage: overage and admin-disabled external Claude tokens', () => {
+  const probe = async (status: number, headers: Record<string, string>, atLimitPercent?: number) => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response('{}', { status, headers })) as typeof fetch;
+    try {
+      const rows = await probeUsage(
+        configSchema.parse({
+          agents: [
+            { name: 'loge1', kind: 'claude', credential: { source: 'secrets-file', key: 'LOGE_CLAUDE_1_TOKEN' } },
+          ],
+        }),
+        {
+          env: {},
+          relogin: false,
+          sync: false,
+          atLimitPercent,
+          resolveExternalCredential: agent => ({ key: agent.credential!.key, value: 'loge1-token' }),
+        },
+      );
+      return rows.find(row => row.binary === 'claude-loge1')!;
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  };
+
+  test('HTTP 200 overage headers give an ok account with real usage', async () => {
+    const row = await probe(200, OVERAGE_ALLOWED);
+    expect(row.ok).toBe(true);
+    expect(row.error).toBeUndefined();
+    expect(row.authOk).toBe(true);
+    expect(row.overagePercent).toBe(0);
+    expect(row.overageResetAt).toBe(1_793_491_200_000);
+    expect(row.overageInUse).toBe(true);
+    expect(row.atLimit).toBe(false);
+  });
+
+  test('an in-use overage at the cutoff is at-limit', async () => {
+    const row = await probe(200, { ...OVERAGE_ALLOWED, 'anthropic-ratelimit-unified-overage-utilization': '0.9' }, 85);
+    expect(row.ok).toBe(true);
+    expect(row.overagePercent).toBe(90);
+    expect(row.atLimit).toBe(true);
+  });
+
+  test('a rejected overage that is in use is at-limit', async () => {
+    const row = await probe(429, {
+      ...OVERAGE_ALLOWED,
+      'anthropic-ratelimit-unified-status': 'rejected',
+      'anthropic-ratelimit-unified-overage-status': 'rejected',
+      'anthropic-ratelimit-unified-overage-utilization': '1.0',
+    });
+    expect(row.ok).toBe(true);
+    expect(row.atLimit).toBe(true);
+  });
+
+  test('an admin-disabled 429 is logged in but unavailable, with the reason', async () => {
+    const row = await probe(429, OVERAGE_ADMIN_DISABLED);
+    expect(row.ok).toBe(false);
+    expect(row.authOk).toBe(true);
+    expect(row.unavailable).toBe(true);
+    expect(row.atLimit).toBe(true);
+    expect(row.error).toBe('disabled by admin (member_zero_credit_limit)');
+  });
+});
+
+describe('probeAnthropicStoredUsage: shared cache and 429 backoff', () => {
+  const body = JSON.stringify({
+    five_hour: { utilization: 3, resets_at: '2026-10-09T02:20:01Z' },
+    seven_day: { utilization: 40, resets_at: '2026-10-11T18:00:00Z' },
+  });
+
+  const withCache = async (
+    fn: (cacheFile: string, calls: { n: number }, respond: (r: () => Response) => void) => Promise<void>,
+  ) => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'kfleet-usage-cache-'));
+    const originalFetch = globalThis.fetch;
+    const calls = { n: 0 };
+    let responder: () => Response = () => new Response(body, { status: 200 });
+    globalThis.fetch = (async () => {
+      calls.n++;
+      return responder();
+    }) as typeof fetch;
+    try {
+      await fn(path.join(dir, 'cache.json'), calls, r => {
+        responder = r;
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  test('a fresh reading is reused across processes without a request', async () => {
+    await withCache(async (cacheFile, calls) => {
+      let now = 1_000_000;
+      const opts = { credId: 'anthropic:id:kirin', timeoutMs: 1000, cacheFile, now: () => now };
+      expect(await probeAnthropicStoredUsage('t', opts)).toMatchObject({ ok: true, weeklyPercent: 40 });
+      now += 60_000;
+      expect(await probeAnthropicStoredUsage('t', opts)).toMatchObject({ ok: true, weeklyPercent: 40 });
+      expect(calls.n).toBe(1);
+      now += 120_000; // past the fresh window: probe again
+      await probeAnthropicStoredUsage('t', opts);
+      expect(calls.n).toBe(2);
+    });
+  });
+
+  test('a 429 serves the last good reading and backs off instead of re-probing', async () => {
+    await withCache(async (cacheFile, calls, respond) => {
+      let now = 1_000_000;
+      const opts = { credId: 'anthropic:id:kirin', timeoutMs: 1000, cacheFile, now: () => now };
+      await probeAnthropicStoredUsage('t', opts);
+      now += 180_000;
+      respond(() => new Response('{}', { status: 429, headers: { 'retry-after': '600' } }));
+      expect(await probeAnthropicStoredUsage('t', opts)).toMatchObject({ ok: true, weeklyPercent: 40 });
+      expect(calls.n).toBe(2);
+      now += 300_000; // inside the 600s Retry-After: no request
+      expect(await probeAnthropicStoredUsage('t', opts)).toMatchObject({ ok: true, weeklyPercent: 40 });
+      expect(calls.n).toBe(2);
+    });
+  });
+
+  test('a 429 with no recent reading is a labeled rate-limit, not an auth failure', async () => {
+    await withCache(async (cacheFile, calls, respond) => {
+      let now = 1_000_000;
+      const opts = { credId: 'anthropic:id:liftoff', timeoutMs: 1000, cacheFile, now: () => now };
+      respond(() => new Response('{}', { status: 429 }));
+      const first = await probeAnthropicStoredUsage('t', opts);
+      expect(first).toMatchObject({ ok: false, authOk: true, error: 'http 429 (usage endpoint rate-limited)' });
+      now += 30_000;
+      const second = await probeAnthropicStoredUsage('t', opts);
+      expect(second.ok).toBe(false);
+      expect(second.error).toContain('rate-limited; retry in');
+      expect(calls.n).toBe(1);
+    });
+  });
+
+  test('cacheFile:false always probes', async () => {
+    await withCache(async (_cacheFile, calls) => {
+      const opts = { credId: 'anthropic:id:kirin', timeoutMs: 1000, cacheFile: false as const };
+      await probeAnthropicStoredUsage('t', opts);
+      await probeAnthropicStoredUsage('t', opts);
+      expect(calls.n).toBe(2);
+    });
   });
 });

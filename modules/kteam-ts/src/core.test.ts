@@ -884,3 +884,72 @@ describe('Fable usage-credit consent marks (model-availability.ts → AgentUsage
     expect(unmarked.some(option => option.model === 'fable51')).toBe(true);
   });
 });
+
+describe('overage-billed Anthropic accounts (no 5h/weekly windows)', () => {
+  const reset = Date.parse('2026-11-01T00:00:00.000Z');
+  const overage = (binary: string, over: Record<string, unknown> = {}) => ({
+    binary,
+    account: binary.replace(/^claude-auto-/, ''),
+    provider: 'anthropic',
+    ok: true,
+    authOk: true,
+    usageBased: true,
+    atLimit: false,
+    overagePercent: 10,
+    overageResetAt: reset,
+    overageInUse: true,
+    ...over,
+  });
+
+  test('an in-use overage reading is positive headroom and drives the loge cutoff', () => {
+    const guide = recommendDecisionGuide('Fix a bug', ['claude-auto-loge1', 'claude-auto-loge2', 'claude-auto-loge4'], {
+      usage: [
+        overage('claude-auto-loge1'),
+        overage('claude-auto-loge2', { overagePercent: LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT }),
+        {
+          binary: 'claude-auto-loge4',
+          account: 'loge4',
+          provider: 'anthropic',
+          ok: false,
+          authOk: true,
+          usageBased: true,
+          unavailable: true,
+          atLimit: true,
+          error: 'disabled by admin (member_zero_credit_limit)',
+        },
+      ],
+    });
+    const byBinary = new Map(guide.accounts.map(account => [account.binary, account]));
+    expect(byBinary.get('claude-auto-loge1')).toMatchObject({
+      usable: 'usable',
+      quotaState: 'live',
+      fiveHourPercent: null,
+      weeklyPercent: null,
+      overagePercent: 10,
+      overageResetAt: reset,
+      logePreferenceEligible: true,
+    });
+    expect(byBinary.get('claude-auto-loge2')).toMatchObject({ usable: 'usable', logePreferenceEligible: false });
+    expect(byBinary.get('claude-auto-loge4')).toMatchObject({
+      usable: 'unusable',
+      usabilityReason: 'disabled by admin (member_zero_credit_limit)',
+    });
+    expect(guide.quota.anyRealNumbers).toBe(true);
+    const rendered = renderRecommendationDecisionGuide(guide);
+    expect(rendered).toContain('overage 10% used (reset 2026-11-01T00:00:00.000Z)');
+  });
+
+  test('a rejected overage is at-limit, and overage not in use is ignored', () => {
+    const guide = recommendDecisionGuide('Fix a bug', ['claude-auto-loge1', 'claude-auto-loge2'], {
+      usage: [
+        overage('claude-auto-loge1', { atLimit: true, overagePercent: 100 }),
+        overage('claude-auto-loge2', { overageInUse: false }),
+      ],
+    });
+    const byBinary = new Map(guide.accounts.map(account => [account.binary, account]));
+    expect(byBinary.get('claude-auto-loge1')).toMatchObject({ usable: 'unusable' });
+    expect(byBinary.get('claude-auto-loge2')).toMatchObject({ usable: 'unknown', overagePercent: null });
+    expect(usageScore(overage('claude-auto-loge1', { overagePercent: 40 }))).toBe(40);
+    expect(usageScore(overage('claude-auto-loge1', { overagePercent: 40, overageInUse: false }))).toBe(0);
+  });
+});

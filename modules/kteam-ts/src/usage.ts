@@ -69,6 +69,10 @@ export class UsageFeed {
   private retryAfter = 0;
   private recheckPending?: Promise<AgentUsage[]>;
   private recheckAfter = 0;
+  /** Binaries the last live probe condemned, and how many consecutive live
+   *  probes condemned nothing new (see noteLiveProbe). */
+  private confirmed = new Set<string>();
+  private confirmations = 0;
   private readonly fetcher: Fetcher;
   private readonly fallback?: Fallback;
   private readonly clock: () => number;
@@ -128,11 +132,27 @@ export class UsageFeed {
     return signal?.aborted ? [] : accounts;
   }
 
+  /** Every live re-check runs `kfleet usage`, which probes EVERY provider
+   *  account. A permanently condemned account (logged out, disabled by an
+   *  admin) used to re-trigger that every recheckMs forever, which is what
+   *  rate-limited Anthropic's per-account usage endpoint (HTTP 429). Back off
+   *  exponentially while consecutive probes re-confirm the same condemnations,
+   *  capped at the refresh interval; anything new resets the spacing. */
+  private noteLiveProbe(accounts: AgentUsage[]): void {
+    const condemned = new Set(accounts.filter(condemns).map(account => account.binary));
+    const nothingNew = [...condemned].every(binary => this.confirmed.has(binary));
+    this.confirmations = condemned.size === 0 ? 0 : nothingNew ? this.confirmations + 1 : 1;
+    this.confirmed = condemned;
+    const backoff = this.recheckMs * 2 ** Math.max(0, this.confirmations - 1);
+    this.recheckAfter = this.clock() + Math.min(Math.max(this.refreshMs, this.recheckMs), backoff);
+  }
+
   private async recheck(): Promise<AgentUsage[]> {
     this.recheckAfter = this.clock() + this.recheckMs;
     const accounts = await this.fallback?.().catch(() => undefined);
     // A failed or empty probe proves nothing; keep the snapshot we have.
     if (accounts === undefined || accounts.length === 0) return this.cached?.accounts ?? [];
+    this.noteLiveProbe(accounts);
     this.cached = { at: this.clock(), accounts };
     this.retryAfter = 0;
     return accounts;
@@ -149,7 +169,10 @@ export class UsageFeed {
       // This IS a live probe; a condemning answer needs no immediate re-check.
       this.recheckAfter = this.clock() + this.recheckMs;
       const fallback = await this.fallback().catch(() => undefined);
-      if (fallback !== undefined) accounts = fallback;
+      if (fallback !== undefined) {
+        accounts = fallback;
+        if (fallback.length) this.noteLiveProbe(fallback);
+      }
     }
     if (accounts === undefined) {
       this.retryAfter = this.clock() + this.refreshMs;

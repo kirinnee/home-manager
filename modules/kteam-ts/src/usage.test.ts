@@ -470,4 +470,49 @@ describe('CLI quota formatting', () => {
     expect(usageQuotaLabel({ usageAuthOk: false })).toBe('AUTH REQUIRED');
     expect(compactUsageQuota({ usageAuthOk: false })).toBe('AUTH!');
   });
+
+  test('backs off re-checks that keep re-confirming the same condemnation', async () => {
+    let at = 0;
+    let fallbackCalls = 0;
+    const calls: number[] = [];
+    const feed = new UsageFeed('http://usage.test/usage', {
+      now: () => at,
+      fetcher: async () =>
+        new Response(JSON.stringify([{ binary: 'claude-auto-glm52a', ok: true, authOk: false, provider: 'zai' }])),
+      fallback: async () => {
+        fallbackCalls += 1;
+        calls.push(at);
+        return [{ binary: 'claude-auto-glm52a', ok: true, authOk: false, provider: 'zai' }];
+      },
+    });
+
+    // Read every 10s for 15 minutes: a permanently dead account must not
+    // trigger a fleet-wide probe every USAGE_RECHECK_MS forever.
+    for (at = 0; at <= 900_000; at += 10_000) await feed.accounts();
+    expect(calls).toEqual([0, 60_000, 180_000, 420_000, 720_000]);
+    expect(fallbackCalls).toBeLessThan(900_000 / USAGE_RECHECK_MS);
+  });
+
+  test('a recovered or newly condemned account resets the re-check spacing', async () => {
+    let at = 0;
+    const calls: number[] = [];
+    let answer: Array<{ binary: string; ok: boolean; authOk: boolean; provider: string }> = [
+      { binary: 'claude-auto-glm52a', ok: true, authOk: false, provider: 'zai' },
+    ];
+    const feed = new UsageFeed('http://usage.test/usage', {
+      now: () => at,
+      fetcher: async () =>
+        new Response(JSON.stringify([{ binary: 'claude-auto-glm52a', ok: true, authOk: false, provider: 'zai' }])),
+      fallback: async () => {
+        calls.push(at);
+        return answer;
+      },
+    });
+
+    for (at = 0; at <= 180_000; at += 10_000) await feed.accounts(); // 0, 60s, 180s: backing off
+    answer = [...answer, { binary: 'claude-auto-glm52b', ok: true, authOk: false, provider: 'zai' }];
+    for (; at <= 480_000; at += 10_000) await feed.accounts();
+    // 420s confirms the new condemnation: spacing drops back to 60s.
+    expect(calls).toEqual([0, 60_000, 180_000, 420_000, 480_000]);
+  });
 });

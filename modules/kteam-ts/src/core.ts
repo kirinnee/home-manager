@@ -108,6 +108,11 @@ export interface AgentUsage {
   weeklyPercent?: number | null;
   fiveHourResetAt?: number | null;
   weeklyResetAt?: number | null;
+  /** Org overage / usage-credit pool utilization (0–100), for accounts that
+   *  bill it instead of 5h/weekly windows. Counts only when `overageInUse`. */
+  overagePercent?: number | null;
+  overageResetAt?: number | null;
+  overageInUse?: boolean;
   /** Set (to the reason) when kteam saw this account's interactive TUI demand
    *  usage-credit consent for Fable (model-availability.ts). Not from kfleet:
    *  `claude -p` serves Fable on such accounts, so only the TUI reveals it. */
@@ -117,7 +122,11 @@ export interface AgentUsage {
 /** How "spent" an account is: the tighter of its 5h and weekly windows. */
 export function usageScore(usage: AgentUsage | undefined): number {
   if (!usage) return 0;
-  return Math.max(usage.fiveHourPercent ?? 0, usage.weeklyPercent ?? 0);
+  return Math.max(
+    usage.fiveHourPercent ?? 0,
+    usage.weeklyPercent ?? 0,
+    usage.overageInUse === true ? (usage.overagePercent ?? 0) : 0,
+  );
 }
 
 export function usableAgent(usage: AgentUsage | undefined): boolean {
@@ -142,7 +151,9 @@ function unavailableAgentReason(usage: AgentUsage): string {
           ? 'no active proxy credentials'
           : usage.unavailableReason === 'auth'
             ? 'all proxy credentials were rejected'
-            : 'proxy/provider unavailable';
+            : usage.availability === undefined && usage.error
+              ? usage.error
+              : 'proxy/provider unavailable';
   const retry = typeof usage.retryAt === 'number' ? ` (retry after ${new Date(usage.retryAt).toISOString()})` : '';
   return `${reason}${retry}`;
 }
@@ -268,6 +279,10 @@ export interface RecommendationAccountState {
   weeklyRemainingPercent: number | null;
   weeklyResetAt: number | null;
   weeklyResetAtIso: string | null;
+  /** In-use overage-pool utilization; null when the account has no in-use
+   *  overage reading (then the 5h/weekly fields are what matter). */
+  overagePercent: number | null;
+  overageResetAt: number | null;
   /** null means the threshold cannot be evaluated from real weekly quota. */
   logePreferenceEligible: boolean | null;
   /** Whether Fable may be selected on this account at all: it is the priciest model
@@ -351,7 +366,11 @@ function usabilityFor(
   if (usage.atLimit === true) return { usable: 'unusable', reason: 'at its reported usage limit' };
   if (usage.availability === 'available')
     return { usable: 'usable', reason: 'usage/availability feed positively reports headroom' };
-  const completeQuota = percentOrNull(usage.fiveHourPercent) !== null && percentOrNull(usage.weeklyPercent) !== null;
+  // An account billing an overage pool has no 5h/weekly windows; its in-use
+  // overage reading is the complete quota verdict.
+  const completeQuota =
+    (percentOrNull(usage.fiveHourPercent) !== null && percentOrNull(usage.weeklyPercent) !== null) ||
+    (usage.overageInUse === true && percentOrNull(usage.overagePercent) !== null);
   if (usage.ok === true && usage.usageBased !== false && usage.atLimit === false && completeQuota)
     return { usable: 'usable', reason: 'usage/availability feed positively reports headroom' };
   if (usage.ok === true)
@@ -389,6 +408,11 @@ export function recommendDecisionGuide(
     const weeklyPercent = numericalQuota ? percentOrNull(feed?.weeklyPercent) : null;
     const weeklyRemainingPercent = weeklyPercent === null ? null : Math.max(0, 100 - weeklyPercent);
     const weeklyResetAt = numericalQuota ? timestampOrNull(feed?.weeklyResetAt) : null;
+    const overagePercent = numericalQuota && feed?.overageInUse === true ? percentOrNull(feed.overagePercent) : null;
+    const overageResetAt = overagePercent === null ? null : timestampOrNull(feed?.overageResetAt);
+    // The loge cutoff is about the pool the account actually spends; for an
+    // overage-billed account that is the overage pool, not a weekly window.
+    const logePoolPercent = weeklyPercent ?? overagePercent;
     const verdict = usabilityFor(binary, feed, usageProbed);
     return {
       binary,
@@ -397,14 +421,20 @@ export function recommendDecisionGuide(
       usable: verdict.usable,
       usabilityReason: verdict.reason,
       provider: feed?.provider ?? null,
-      quotaState: !usageProbed ? 'skipped' : fiveHourPercent !== null || weeklyPercent !== null ? 'live' : 'unknown',
+      quotaState: !usageProbed
+        ? 'skipped'
+        : fiveHourPercent !== null || weeklyPercent !== null || overagePercent !== null
+          ? 'live'
+          : 'unknown',
       fiveHourPercent,
       weeklyPercent,
       weeklyRemainingPercent,
       weeklyResetAt,
       weeklyResetAtIso: weeklyResetAt === null ? null : new Date(weeklyResetAt).toISOString(),
+      overagePercent,
+      overageResetAt,
       logePreferenceEligible:
-        pool !== 'loge' || weeklyPercent === null ? null : weeklyPercent < LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
+        pool !== 'loge' || logePoolPercent === null ? null : logePoolPercent < LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
       fableEligible: feed?.fableUnavailable
         ? false
         : weeklyPercent === null
@@ -415,7 +445,9 @@ export function recommendDecisionGuide(
     };
   });
 
-  const anyRealNumbers = accounts.some(account => account.fiveHourPercent !== null || account.weeklyPercent !== null);
+  const anyRealNumbers = accounts.some(
+    account => account.fiveHourPercent !== null || account.weeklyPercent !== null || account.overagePercent !== null,
+  );
   const warnings = !usageProbed
     ? ['Quota inputs are missing because --no-usage skipped probing; every quota field is unknown.']
     : anyRealNumbers
@@ -486,7 +518,13 @@ export function renderRecommendationDecisionGuide(guide: RecommendationDecisionG
       return (
         `  - ${account.binary} [${account.pool}]: usability ${account.usable}; ` +
         `5h ${formatQuotaPercent(account.fiveHourPercent)}; weekly ${formatQuotaPercent(account.weeklyPercent)} ` +
-        `(remaining ${remaining}); weekly reset ${reset}${preference}; ${account.usabilityReason}` +
+        `(remaining ${remaining}); weekly reset ${reset}` +
+        (account.overagePercent === null
+          ? ''
+          : `; overage ${formatQuotaPercent(account.overagePercent)} (reset ${
+              account.overageResetAt === null ? 'unknown' : new Date(account.overageResetAt).toISOString()
+            })`) +
+        `${preference}; ${account.usabilityReason}` +
         (account.fableUnavailableReason ? `; Fable unavailable: ${account.fableUnavailableReason}` : '')
       );
     }),

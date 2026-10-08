@@ -128,7 +128,7 @@ export function createUsageCommand(): Command {
         const limitSummary = usageLimitSummary(rows);
         const loggedOut = rows.filter(r => r.authOk === false && r.availability === undefined);
         // "Errored" = couldn't read usage but the creds ARE fine (transient/endpoint) — distinct from logged-out.
-        const errored = rows.filter(r => r.usageBased && !r.ok && r.authOk !== false);
+        const errored = rows.filter(r => r.usageBased && !r.ok && r.authOk !== false && r.unavailable !== true);
         console.log(
           limitSummary.state === 'confirmed-headroom'
             ? pc.green(`\n${limitSummary.message}`)
@@ -139,7 +139,7 @@ export function createUsageCommand(): Command {
         if (down.length)
           logWarn(
             `${down.length} CLI unavailable: ${down
-              .map(r => `${r.binary} (${(r.unavailableReason ?? 'provider').replaceAll('_', ' ')})`)
+              .map(r => `${r.binary} (${r.unavailableReason?.replaceAll('_', ' ') ?? r.error ?? 'provider'})`)
               .join(', ')}`,
           );
         if (errored.length)
@@ -161,9 +161,12 @@ export function usageLimitSummary(rows: AccountUsage[]): {
       message: `${exhausted.length} at limit: ${exhausted.map(r => r.binary).join(', ')}`,
     };
 
-  const unknown = tracked.filter(
-    r => !r.ok || r.authOk === false || typeof r.fiveHourPercent !== 'number' || typeof r.weeklyPercent !== 'number',
-  );
+  // An account billing an overage pool has no 5h/weekly windows: its in-use
+  // overage reading is a complete verdict on its own.
+  const knownWindows = (r: AccountUsage): boolean =>
+    (typeof r.fiveHourPercent === 'number' && typeof r.weeklyPercent === 'number') ||
+    (r.overageInUse === true && typeof r.overagePercent === 'number');
+  const unknown = tracked.filter(r => !r.ok || r.authOk === false || !knownWindows(r));
   if (unknown.length)
     return {
       state: 'unknown',
@@ -171,6 +174,15 @@ export function usageLimitSummary(rows: AccountUsage[]): {
     };
 
   return { state: 'confirmed-headroom', message: 'all tracked accounts have confirmed usage left' };
+}
+
+/** `overage 0% ↻ 25d0h` for an account billing an org overage / usage-credit
+ *  pool (heat-colored only while that pool is the one in use). */
+function overageNote(r: AccountUsage): string {
+  if (r.overagePercent === undefined && r.overageInUse === undefined) return '';
+  const reset = until(r.overageResetAt);
+  const text = `overage ${pct(r.overagePercent)}${reset ? ` ↻ ${reset}` : ''}`;
+  return r.overageInUse ? heat(r.overagePercent, text) : pc.dim(text);
 }
 
 /** One aligned table row: `{mark} {binary} {provider}  {5h bar+%}  {wk bar+%}  {5h↻} {wk↻}  {note}`.
@@ -200,12 +212,16 @@ export function usageRow(r: AccountUsage, binW: number): string {
   if (r.authOk === false) {
     return cols(pc.red('⚠'), blank, blank, '—', '—', `${pc.red('not logged in')} ${pc.dim(`(${r.error ?? ''})`)}`);
   }
+  // Logged in, but the provider will not serve it (e.g. disabled by an org admin).
+  if (!r.ok && r.unavailable === true) {
+    return cols(pc.red('✗'), blank, blank, '—', '—', `${pc.red('UNAVAILABLE')} ${pc.dim(`(${r.error ?? ''})`)}`);
+  }
   if (!r.ok) {
     return cols(pc.yellow('?'), blank, blank, '—', '—', pc.dim(`usage unavailable (${r.error ?? 'probe failed'})`));
   }
   const mark = r.atLimit ? pc.red('✗') : pc.green('✓');
   const r5 = until(r.fiveHourResetAt) || '—';
   const rwk = until(r.weeklyResetAt) || '—';
-  const note = r.atLimit ? pc.red('AT LIMIT') : '';
-  return cols(mark, cell(r.fiveHourPercent), cell(r.weeklyPercent), r5, rwk, note);
+  const notes = [overageNote(r), r.atLimit ? pc.red('AT LIMIT') : ''].filter(Boolean);
+  return cols(mark, cell(r.fiveHourPercent), cell(r.weeklyPercent), r5, rwk, notes.join('  '));
 }
