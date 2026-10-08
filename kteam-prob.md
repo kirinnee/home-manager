@@ -3991,3 +3991,9 @@ Known flaky under full-suite load (passes alone): attention-service "permission 
 Open human decisions: run kteam from a built snapshot (3426/3454), per-teammate worktrees (1220/2229),
 ghost-session policy (923), cross-harness migrate (2874), WatchdogSec (489), warden token isolation (364),
 peer-relayed answers (1323).
+
+## 2026-10-08 — `kteam send <teammate-name>` says "unknown kteam session" for a live session
+
+- **Problem:** `kteam send monica "…"` failed with `kteam: unknown kteam session "monica"`, while `kteam status mtw0rabm-e87b92c1` showed `monica … awaiting_user … interactive` (label `pe8755-trd`). The same send by session ID worked (landed in `channel/inbox.jsonl`).
+- **Suspected path:** name→id resolution in the send path ignores interactive/awaiting_user sessions, or picks the most recent "monica" record and rejects it (an older monica, `mtw0rabm`, was listed as `failed` on 2026-09-24 before being resumed). Check the session lookup used by `send` in `modules/kteam-ts/src/session-manager.ts` / `api-server.ts`.
+- **Workaround:** send by session ID.
