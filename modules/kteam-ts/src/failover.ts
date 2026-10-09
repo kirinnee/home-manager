@@ -1,4 +1,12 @@
-import { confirmedUsableAgent, inferHarness, modelHint, usableAgent, usageScore, type AgentUsage } from './core';
+import {
+  confirmedUsableAgent,
+  inferHarness,
+  modelHint,
+  routingExclusionReason,
+  usableAgent,
+  usageScore,
+  type AgentUsage,
+} from './core';
 import type { Harness } from './types';
 
 export interface FailoverCandidateInput {
@@ -19,17 +27,22 @@ export interface FailoverCandidateInput {
 }
 
 /** Usable same-KIND wrappers other than the current one, ranked for failover:
- *  same model family first (a glm52a → glm52b swap keeps the model), then the
+ *  same model family first (a loge1 → loge2 swap keeps the account class), then the
  *  least-used account within each group. Pure — no I/O, deterministic.
  *
  *  Cross-KIND (claude↔codex) is never a candidate: harness session state only
- *  pools within a kind, so a codex wrapper cannot `--resume` a claude session. */
+ *  pools within a kind, so a codex wrapper cannot `--resume` a claude session.
+ *
+ *  Only Claude 5.5 routing targets qualify (routingExclusionReason): a failover
+ *  must never land a session on GLM/MiniMax/DeepSeek, a codex GPT model or a
+ *  daily-driver account. A codex session therefore has no failover target. */
 export function rankFailoverCandidates(input: FailoverCandidateInput): string[] {
   const usageByBinary = new Map(input.usage.map(item => [item.binary, item]));
   const family = modelHint(input.currentBinary);
   const isUsable = input.requireConfirmedUsage ? confirmedUsableAgent : usableAgent;
   const pool = input.agents.filter(agent => {
     if (agent === input.currentBinary) return false;
+    if (routingExclusionReason(agent)) return false;
     let kind: Harness;
     try {
       kind = inferHarness(agent);

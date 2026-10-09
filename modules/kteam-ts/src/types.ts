@@ -601,9 +601,3 @@ export interface SignalOptions {
    *  on nobody. The daemon ends the wait when that peer sends back. */
   peer?: string;
 }
-
-export interface Recommendation {
-  binary: string;
-  role: string;
-  reason: string;
-}

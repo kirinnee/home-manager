@@ -64,11 +64,12 @@ then `CLAUDE_CONFIG_DIR=~/.claude-auto-atomi $P/bin/claude -p --model '<id>[1m]'
 
 ## Decision rules the human has set (keep unless told otherwise)
 
-- Newest Anthropic flagship = `opus` alias; newest Fable = `fable`. Fable stays gated by the
-  weekly-utilization rule in `core.ts` (`FABLE_MAX_WEEKLY_UTILIZATION_PERCENT`).
+- kteam routes ONLY to Opus 5.5 / Sonnet 5.5 / Haiku 5.5 (`ROUTING_MODELS` in
+  `modules/kteam-ts/src/core.ts`, 2026-10-09). A new Opus/Sonnet/Haiku replaces its slot there;
+  Fable, Codex GPT, GLM, MiniMax and DeepSeek are refreshed as wrappers for manual use only and
+  never enter routing (`routingExclusionReason`).
 - `claude-auto-kirin` / `codex-auto-personal` are daily drivers: never route kteam work there
   (`HARD_ACCOUNT_EXCLUSIONS`). Smoke-test on `atomi`/`loge1` and `codex-auto-loai` instead.
-- MiniMax M3 / DeepSeek: never product-facing; DeepSeek V4 Pro banned (`dsv4p`).
 - Prices: append, never rewrite history (peer cost comparisons key on `pricingKey`).
 - A model the locked CLI cannot use, or that a provider does not list, is reported, not configured.
 

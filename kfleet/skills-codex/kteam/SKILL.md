@@ -1,11 +1,11 @@
 ---
 name: kteam
-description: Coordinate full-strength Claude and Codex teammates in detached tmux sessions with external stall monitoring, durable file channels, completion markers, and resumable conversations. Use when work can be divided into independent tasks, when the user asks for teammates or subagents, or when delegating research, implementation, frontend, review, or long-running work across model accounts.
+description: Coordinate full-strength Claude teammates (Opus, Sonnet and Haiku 5.5 only) in detached tmux sessions with external stall monitoring, durable file channels, completion markers, and resumable conversations. Use when work can be divided into independent tasks, when the user asks for teammates or subagents, or when delegating research, implementation, frontend, review, or long-running work across model accounts.
 ---
 
 # KTeam
 
-Use `kteam` instead of harness-native subagents. Keep the current conversation as team lead; delegate bounded tasks to full-strength Claude or Codex harnesses. Teammates always run as interactive TUIs inside tmux; never replace that base with Claude `--print` or Codex `exec`.
+Use `kteam` instead of harness-native subagents. Keep the current conversation as team lead; delegate bounded tasks to full-strength Claude harnesses running Opus, Sonnet or Haiku 5.5. Teammates always run as interactive TUIs inside tmux; never replace that base with Claude `--print` or Codex `exec`.
 
 `kteam` is a client of the long-running `kteamd` daemon. Check `kteam daemon status`; start or install it when unavailable. The daemon owns tmux, transcript watching, state, health, attachments, and event streaming.
 
@@ -116,71 +116,61 @@ kteam task link '#F12' --doc ~/.kteam/<id>/brief-parser.md
 
 Whenever you use kteam (one member or many) — both when proposing the team AND after launching it — list the assignments to the user as a 3-column table: which CLI wrapper, which model it will actually run, and the task it was given.
 
-| CLI                 | Model               | Task                              |
-| ------------------- | ------------------- | --------------------------------- |
-| `codex-auto-atomi`  | gpt-6-astra         | implement the migration checklist |
-| `claude-auto-atomi` | claude-opus-5-5[1m] | fix the flaky session tests       |
+| CLI                 | Model                 | Task                         |
+| ------------------- | --------------------- | ---------------------------- |
+| `claude-auto-loge1` | claude-opus-5-5[1m]   | plan the migration checklist |
+| `claude-auto-loge2` | claude-sonnet-5-5[1m] | fix the flaky session tests  |
 
 Fill the Model column with the resolved model (the wrapper's `KTEAM_MODEL` default, or the `--model` override you passed) — never leave it implied.
 
 ### Pick the MODEL first, then the account
 
-Model choice is driven by the task: how much thinking it needs, how confident you must be in correctness, and how fast/cheap it should run. Wrappers default to their kfleet `KTEAM_MODEL`; `--model <alias|id>` selects any other model the account serves (Claude aliases `opus`/`sonnet`/`haiku`/`fable` resolve per account).
+kteam routes to **exactly three models: Opus 5.5, Sonnet 5.5 and Haiku 5.5** (the owner, 2026-10-09: "that's the best 3"). Model choice is driven by the task: how much thinking it needs, how confident you must be in correctness, and how fast/cheap it should run. Claude wrappers default to `opus` (kfleet `KTEAM_MODEL`); pass `--model sonnet` or `--model haiku` for the other two.
 
-| Model                                  | Role — use when                                                                                                                                                                                                                                      | Speed   | How to get it                                                                                                                                                                                                                                |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Fable 5.1 / GPT-6 Astra                | smartest tier — plan hard problems, understand complex relations and concepts, map blindspots; pin the design down BEFORE implementation starts. Astra ($10/$50, ultra effort) is also the codex top implementer for the hardest, most critical work | slow    | `claude-auto-liftoff` + `--model fable`, or `claude-auto-loge` + `--model claude-fable-5-1[1m]` (proxy, real id) — Fable is NOT offered on loge1..6 (needs usage credits) or atomi; `codex-auto-{loai,ernest,atomi}` + `--model gpt-6-astra` |
-| GPT-6 Sol                              | Opus-tier: strong implementer AND the default reviewer (replaced GPT-5.6-terra); cheaper than Opus 5.5 ($2/$10). No plan needed                                                                                                                      | medium  | `codex-auto-{loai,ernest,atomi}` (default)                                                                                                                                                                                                   |
-| Opus 5.5                               | TOP IMPLEMENTER TIER — same tier as GPT-6 Sol: hardest, most critical implementations (and strong planning); $4/$20                                                                                                                                  | medium  | first-party Anthropic accounts and `claude-auto-loge1..6` (default via `opus`)                                                                                                                                                               |
-| Opus 5 / Opus 4.8                      | previous generations — Opus 5.5 is both smarter and cheaper, so only reach for these when an account cannot serve 5.5                                                                                                                                | medium  | Anthropic accounts + `--model claude-opus-5[1m]` / `--model claude-opus-4-8[1m]`                                                                                                                                                             |
-| GPT-5.6-terra / GPT-5.6-sol            | previous generation — terra is still a fine second-opinion reviewer and plan-following implementer                                                                                                                                                   | medium  | codex accounts + `--model gpt-5.6-terra`                                                                                                                                                                                                     |
-| GLM-5.3                                | Opus-class substitute for implementation; downside: SLOW                                                                                                                                                                                             | slow    | `claude-auto-glm52{a,b}` (default)                                                                                                                                                                                                           |
-| MiniMax M3 / Sonnet 5.5                | super well-guarded tasks — mechanical plus a bit of smarts (Sonnet 5.5: $2/$10); M3 is also strong at frontend/UI/screenshot-to-code/SVG                                                                                                             | fast    | `claude-auto-mm3`; Anthropic accounts + `--model sonnet`                                                                                                                                                                                     |
-| DeepSeek V4.1 Flash                    | very well-scoped tasks only — no blindspots, everything written out; pure mechanical                                                                                                                                                                 | fast    | `claude-auto-dsv4f` (default, id `deepseek-flash`)                                                                                                                                                                                           |
-| Haiku 5.5 / GPT-6 Luna / GLM-5.3-Flash | trivial mechanical work only (Luna and Haiku 5.5: $0.10/$0.50; Haiku bills 5x past 100k-token prompts)                                                                                                                                               | fastest | Anthropic accounts + `--model haiku`; codex + `--model gpt-6-luna`; `glm52{a,b}` + `--model haiku`                                                                                                                                           |
+| Model      | Role — use when                                                                                                                         | Speed   | How to get it                                                                                     |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------- |
+| Opus 5.5   | planning (normal and mission-critical), the hardest and most critical implementation, big-context work, and review ($4/$20, 1M context) | medium  | default on every Claude account (`opus`); `claude-auto-loge` proxy: `--model claude-opus-5-5[1m]` |
+| Sonnet 5.5 | generic implementation and mid-complexity work — features, bug fixes, research, docs/HTML, frontend ($2/$10, 1M context)                | fast    | `--model sonnet`; `claude-auto-loge` proxy: `--model claude-sonnet-5-5[1m]`                       |
+| Haiku 5.5  | trivial / mechanical work — renames, formatting, bulk 1-file-per-agent chores ($0.10/$0.50; bills 5x past 100k-token prompts)           | fastest | `--model haiku`; `claude-auto-loge` proxy: `--model claude-haiku-5-5`                             |
+
+**Never route to any other model** — no Fable, no GPT (Astra/Sol/Luna/terra), no GLM, no MiniMax, no DeepSeek. Those wrappers (`codex-auto-*`, `claude-auto-glm52{a,b}`, `claude-auto-mm3`, `claude-auto-dsv4{f,p}`) and the `fable` alias still exist for the human to use by hand, but `kteam recommend` lists them only as exclusions and automatic failover / the warden never land on them.
 
 ### Handoff chain (main thread → planner → implementer → reviewer)
 
-The standard chain: **main thread (Fable) → planner session → implementer session(s) → reviewer**.
+The standard chain: **main thread → Opus 5.5 planner → Sonnet 5.5 (or Opus 5.5) implementer(s) → Opus 5.5 reviewer**.
 
-- The main thread stays team lead and judges complexity, but OFFLOADS the planning itself: send it to a kteam **Fable** session. For simpler, low-ambiguity plans the planner can be **GPT-6 Sol or Opus 5.5** instead.
-- A planner session may spawn its own implementer teammates — ideally **Opus 5.5, GPT-6 Sol, or GLM-5.3** — for generic to mid-high difficulty tasks.
+- The main thread stays team lead and judges complexity, but OFFLOADS the planning itself to a kteam **Opus 5.5** session.
+- A planner session may spawn its own implementer teammates.
 - Implementer selection:
-  - **GPT-6 Astra / Opus 5.5 / GPT-6 Sol** — the top implementer tier: long, big workloads with many checkpoints/checklists, and the hardest critical implementations. Expensive; don’t spend them on small tasks. (Opus 5.5 is served by every first-party Anthropic account and loge1..6.)
-  - **Opus 5.5 / GPT-6 Sol** — generic to mid-high difficulty (GPT-5.6-terra only where Sol is not rolled out yet).
-  - **GLM-5.3** — mechanical or frontend work; use sparingly.
-- **GPT-5.6-terra / GPT-5.5 may implement ONLY when a smarter model (Fable, Astra, GPT-6 Sol, or Opus 5.5) wrote the plan.** Never let terra plan-and-implement nontrivial work on its own.
-- **Product-facing work: NEVER MiniMax M3 or DeepSeek V4** — too weak; GLM-5.3 sparingly.
-- **GLM-5.3 and MiniMax M3 are the mass-chore tier**: divide-and-conquer jobs, 1 file = 1 agent style. That is their only broad-use niche.
-- **Big-context tasks need at least Opus 5.5 or GPT-6 Sol — and if a big-context task is being IMPLEMENTED, the implementer must be GPT-6 Astra, Opus 5.5, GPT-6 Sol, or Fable** (Fable implementing is fine there).
+  - **Opus 5.5** — the hardest, most critical implementations, long workloads with many checkpoints, and anything big-context.
+  - **Sonnet 5.5** — generic to mid-complexity implementation; the default implementer.
+  - **Haiku 5.5** — trivial, fully written-out mechanical work; mass chores (1 file = 1 agent).
+- **Review is always Opus 5.5.**
 
 Other rules of thumb:
 
-- The less scoped and more ambiguous a task, the higher up the table; fully written-out mechanical work goes to the bottom.
-- Do NOT use `claude-auto-dsv4p` (DeepSeek V4 Pro): too expensive for what it gives.
-- Fable only on `claude-auto-liftoff` (`--model fable`) and the `claude-auto-loge` proxy (`--model claude-fable-5-1[1m]`); the old `f5-*` wrappers were removed.
-- Quota: `glm52a`/`glm52b` are separate keys (parallel-safe).
+- The less scoped and more ambiguous a task, the higher up the table; fully written-out mechanical work goes to Haiku.
+- If Haiku stumbles, step up to Sonnet; if Sonnet stumbles, step up to Opus — never sideways to another vendor.
 
 ### Then pick the account
 
 - NEVER route kteam work to `claude-auto-kirin` or `codex-auto-personal` — those are the user's personal daily-driver accounts.
-- Among accounts that can serve the chosen model, prefer loge at roughly **9:1** over non-loge (about one in ten selections goes to non-loge).
+- Among Claude accounts, prefer loge at roughly **9:1** over non-loge (about one in ten selections goes to non-loge).
 - When a loge account reaches **85% weekly utilization** (about 15% remaining), stop preferring it and move to the atomi/liftoff fallbacks. Unknown weekly usage stays unknown; never treat it as zero.
-- `claude-auto-loge1..6` are direct first-party accounts and use native aliases, but offer no Fable (since 2026-10-08 its interactive TUI demands usage credits there). Only the loge accounts with a token upstream exist: `kfleet apply` skips any `LOGE_CLAUDE_N_TOKEN` missing from `~/.secrets`. The pooled `claude-auto-loge` proxy uses real model IDs (no aliases) and serves Fable as `claude-fable-5-1[1m]`.
-- A doctrine-required provider-only model (GLM / MiniMax / DeepSeek) overrides the ratio because no loge account can serve it.
+- `claude-auto-loge1..6` are direct first-party accounts and use the native aliases. Only the loge accounts with a token upstream exist: `kfleet apply` skips any `LOGE_CLAUDE_N_TOKEN` missing from `~/.secrets`. An account whose org admin disabled its usage allocation (seen on loge4..6, 2026-10-09) fails EVERY model — `kteam recommend` shows it unusable; route elsewhere. The pooled `claude-auto-loge` proxy uses real model IDs (no aliases).
 
 ## Launch and supervise
 
 Start one approved teammate per task. ALWAYS pass `--name` (a succinct summary of what the session is supposed to do) and `--label` (an ownership slug for YOUR batch — e.g. your session/repo/ticket identifier) so you can later list just your own teammates with `kteam ps --label <label>`:
 
 ```bash
-kteam start --agent claude-auto-mm3 --mode auto --cwd "$PWD" --name build-claims-frontend --label tesla-infographic --image reference.png "Build the requested frontend and verify it"
-kteam start --agent codex-auto-atomi --mode interactive --cwd "$PWD" --name review-current-diff --label tesla-infographic "Review the current diff with me"
+kteam start --agent claude-auto-loge1 --model sonnet --mode auto --cwd "$PWD" --name build-claims-frontend --label tesla-infographic --image reference.png "Build the requested frontend and verify it"
+kteam start --agent claude-auto-loge2 --mode interactive --cwd "$PWD" --name review-current-diff --label tesla-infographic "Review the current diff with me"
 ```
 
 For LONG prompts (more than a few sentences), write the brief to a file and pass `--prompt-file <file>` instead of inlining it on the command line (`kteam send` takes `--message-file` for the same reason); command-line and file content are combined when both are given. The daemon already delivers every prompt to the TUI via a turn file, so file-based briefs lose nothing.
 
-Each wrapper already carries its own default model (kfleet's `KTEAM_MODEL`: `opus` for standard Claude accounts, `fable` where Fable is allowed (`opus` → Opus 5.5, `fable` → Fable 5.1 on Anthropic accounts), `gpt-6-sol` for Codex, real ids only), so you normally omit the model. Override only when a task needs a specific one with `--model <alias|id>`, e.g. `kteam start --agent claude-auto-kirin --model sonnet --cwd "$PWD" "…"`. Leave it off to keep the account default.
+Each Claude wrapper already carries its own default model (kfleet's `KTEAM_MODEL`: `opus` → Opus 5.5; the `claude-auto-loge` proxy defaults to the real id `claude-opus-5-5[1m]`), so you omit the model for Opus 5.5 work. Pass `--model sonnet` / `--model haiku` (proxy: `claude-sonnet-5-5[1m]` / `claude-haiku-5-5`) for Sonnet 5.5 / Haiku 5.5 work. Override only when a task needs a specific one with `--model <alias|id>`, e.g. `kteam start --agent claude-auto-loge3 --model sonnet --cwd "$PWD" "…"`. Leave it off to keep the account default.
 
 Every session gets an auto-assigned teammate NAME (e.g. mordecai) plus its model, both shown by `kteam ps` and `kteam status`. Always refer to teammates by NAME when reporting to the user — never by raw session ID — and present the team as a three-column table: Name | Model | Task. Names resolve anywhere an id is accepted (`kteam send mordecai "…"`), matched against sessions from the last 5 days, most recent wins.
 
