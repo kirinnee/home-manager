@@ -20,8 +20,9 @@
 // consecutive strikes. Demotion is always a cooldown, never a latch — recovery
 // is automatic, and positive feed evidence clears a demotion early.
 
-import { confirmedUsableAgent, usableAgent, type AgentUsage } from './core';
+import { confirmedUsableAgent, routingExclusionReason, usableAgent, type AgentUsage } from './core';
 import {
+  DEFAULT_WARDEN_ACCOUNT,
   defaultWardenFailoverConfig,
   type WardenAccount,
   type WardenConfig,
@@ -86,7 +87,12 @@ export function effectiveFailoverConfig(config: WardenConfig): Required<WardenCo
 /** The effective ordered account list. `accounts` (with string shorthand)
  *  wins when present and non-empty; otherwise the legacy single
  *  `wrapper`/`model` pair — today's behavior, byte-for-byte. Deduped by
- *  wrapper name keeping the FIRST occurrence (its `model` wins). */
+ *  wrapper name keeping the FIRST occurrence (its `model` wins).
+ *
+ *  When NO entry is a Claude 5.5 routing target (an old config naming
+ *  claude-auto-glm52a, a codex wrapper…), DEFAULT_WARDEN_ACCOUNT is appended as
+ *  the last resort: those entries stay listed (and are reported ineligible) so
+ *  the switch is visible, but a warden never runs on another model. */
 export function normalizeWardenAccounts(config: WardenConfig): WardenAccount[] {
   const raw: (WardenAccount | string)[] =
     config.accounts && config.accounts.length > 0
@@ -101,6 +107,8 @@ export function normalizeWardenAccounts(config: WardenConfig): WardenAccount[] {
     seen.add(wrapper);
     accounts.push({ wrapper, ...(account.model !== undefined ? { model: account.model } : {}) });
   }
+  if (!accounts.some(account => !routingExclusionReason(account.wrapper)) && !seen.has(DEFAULT_WARDEN_ACCOUNT.wrapper))
+    accounts.push({ ...DEFAULT_WARDEN_ACCOUNT });
   return accounts;
 }
 
@@ -129,6 +137,8 @@ export function ineligibilityReason(
   // absent or unreadable (hermetic tests, a box mid-provision), and skipping
   // every account on that would disable supervision exactly when the feed is
   // also blind. Only a non-empty listing that omits the wrapper condemns it.
+  const excluded = routingExclusionReason(account.wrapper);
+  if (excluded) return `not a kteam routing target: ${excluded}`;
   if (input.installedAgents.length > 0 && !input.installedAgents.includes(account.wrapper)) {
     return 'not installed in ~/.kfleet/bin';
   }

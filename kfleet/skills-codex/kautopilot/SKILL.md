@@ -98,7 +98,7 @@ Fall back to a delegated native subagent only when kteamd is unavailable or the
 step is too small to justify a session (single quick read/summarize); the
 subagent then writes `d.contract.outputFile` itself.
 For visual HTML generation, prefer a wrapper whose model is strong at visual
-work (e.g. `claude-auto-mm3`); with native subagents, request the strongest
+work (Sonnet 5.5, e.g. `claude-auto-loge1 --model sonnet`); with native subagents, request the strongest
 available visual/code-writing subagent and continue.
 Interactive (`d.kind == "interactive"`) steps run inline either way.
 

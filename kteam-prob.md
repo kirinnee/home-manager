@@ -3997,3 +3997,16 @@ peer-relayed answers (1323).
 - **Problem:** `kteam send monica "…"` failed with `kteam: unknown kteam session "monica"`, while `kteam status mtw0rabm-e87b92c1` showed `monica … awaiting_user … interactive` (label `pe8755-trd`). The same send by session ID worked (landed in `channel/inbox.jsonl`).
 - **Suspected path:** name→id resolution in the send path ignores interactive/awaiting_user sessions, or picks the most recent "monica" record and rejects it (an older monica, `mtw0rabm`, was listed as `failed` on 2026-09-24 before being resumed). Check the session lookup used by `send` in `modules/kteam-ts/src/session-manager.ts` / `api-server.ts`.
 - **Workaround:** send by session ID.
+
+## 2026-10-09 — loge4..6 still refuse `kteam start` with `unrecognized_model` after the probe fix
+
+- **Problem:** `kteam start --agent claude-auto-loge{4,5,6}` refused with
+  `[claude-code:unrecognized_model] {"model":"claude-sonnet-5-5[1m]","query_source":"sdk"}`.
+- **Evidence:** `kfleet/skills/llm-refresh/scripts/smoke.sh` on the same CLI (2.1.281): loge1 serves
+  `claude-sonnet-5-5[1m]` (ctx 1000000), `claude-opus-5-5[1m]` and `claude-haiku-5-5`; loge4/5/6 fail EVERY
+  model with "Your usage allocation has been disabled by your admin · ask your admin for a higher limit".
+  Not a model/alias/catalog/CLI-version problem (loge1..6 are direct OAuth, they never touch kloge).
+- **Suspected code path:** the classification already exists at HEAD (`ACCOUNT_DISABLED_PATTERN` in
+  `modules/kfleet-ts/src/core/harness-probe.ts`, cc205d7), so the verbatim SDK tag means the running kteamd
+  predates it. **Workaround:** `kteam daemon restart`; route to loge1..3 until the org admin re-enables
+  loge4..6.
