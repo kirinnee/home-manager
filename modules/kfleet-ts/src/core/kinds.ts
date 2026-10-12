@@ -20,8 +20,10 @@ interface Asset {
   /** destination name(s) inside the config dir */
   dest: string[];
   type: 'file' | 'dir';
-  /** link = symlink to the ~/.kfleet source; copy = independent file the tool may rewrite */
-  mode: 'link' | 'copy';
+  /** link = symlink to the ~/.kfleet source; copy = independent file the tool may rewrite;
+   *  merge-mcp = merge the source's `mcpServers` into the runtime `dest` JSON
+   *  (claude's .claude.json) without owning the rest of it (see core/claude-mcp.ts) */
+  mode: 'link' | 'copy' | 'merge-mcp';
   /** structured-config format. When set, the field is a layered settings list:
    *  layers (file paths + inline objects) deep-merge then serialize to `dest`.
    *  A single file-path layer is emitted verbatim per `mode` (no parse → comments
@@ -73,7 +75,9 @@ export const KIND_SPECS: Record<Kind, KindSpec> = {
       },
       { field: 'memory', dest: ['CLAUDE.md'], type: 'file', mode: 'link' },
       { field: 'skills', dest: ['skills'], type: 'dir', mode: 'link' },
-      { field: 'mcp', dest: ['.mcp.json'], type: 'file', mode: 'link' },
+      // User-scope MCP servers: Claude reads them only from .claude.json
+      // ($CLAUDE_CONFIG_DIR/.mcp.json is never loaded), so merge rather than link.
+      { field: 'mcp', dest: ['.claude.json'], type: 'file', mode: 'merge-mcp' },
     ],
     // Session transcripts + everything a resumed session references. NOT shared:
     // .claude.json (OAuth/auth/trust), settings, plugins, cache, telemetry.

@@ -24,6 +24,11 @@ trust_level = "trusted"
 [sandbox_workspace_write]
 network_access = true
 
+# Slack via the per-machine kslack-proxy (modules/kslack-proxy-ts): it owns the
+# single rotating Slack login and adds auth itself, read-only by default.
+[mcp_servers.slack]
+url = "http://127.0.0.1:37373/mcp"
+
 [tui]
 status_line = ["model-with-reasoning", "context-used", "five-hour-limit", "weekly-limit", "current-dir"]
 

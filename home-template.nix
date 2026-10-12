@@ -373,6 +373,38 @@ rec {
   xdg.configFile."systemd/user/obsidian-sync-hq.service" = obsidianSyncUnit "HQ";
   xdg.configFile."systemd/user/obsidian-sync-main.service" = obsidianSyncUnit "Main";
 
+  # kslack-proxy: the machine's ONE Slack MCP login, served read-only on
+  # 127.0.0.1:37373 to every claude-*/codex-* account (kfleet wires them).
+  # Linux here; darwin uses launchd.agents below. Without a login it stays up and
+  # answers "run `kslack-proxy login`" instead of crash-looping.
+  xdg.configFile."systemd/user/kslack-proxy.service" = {
+    enable = profile.kernel == "linux";
+    text = ''
+      [Unit]
+      Description=kslack-proxy (shared Slack MCP login on 127.0.0.1:37373)
+
+      [Service]
+      ExecStart=${modules.kslack-proxy}/bin/kslack-proxy serve
+      Restart=always
+      RestartSec=5
+
+      [Install]
+      WantedBy=default.target
+    '';
+  };
+  launchd.agents.kslack-proxy = lib.mkIf (profile.kernel == "darwin") {
+    enable = true;
+    config = {
+      ProgramArguments = [ "${modules.kslack-proxy}/bin/kslack-proxy" "serve" ];
+      RunAtLoad = true;
+      KeepAlive = true;
+      ThrottleInterval = 10;
+      EnvironmentVariables.HOME = home.homeDirectory;
+      StandardOutPath = "${home.homeDirectory}/Library/Logs/kslack-proxy.log";
+      StandardErrorPath = "${home.homeDirectory}/Library/Logs/kslack-proxy.log";
+    };
+  };
+
   home.activation.load-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     export SECRETS_FILE="${./secrets.enc.yaml}"
     ${modules.load-secrets}/bin/load-secrets
@@ -481,6 +513,23 @@ rec {
         ''
       );
 
+  # Enable + (re)start kslack-proxy on Linux boxes. Same hand-made want as the
+  # units above (`enable` no-ops on nix-store symlinked units); restart so a
+  # switch picks up source changes. A box with no Slack login yet still starts.
+  home.activation.enable-kslack-proxy = lib.hm.dag.entryAfter [ "writeBoundary" ] (
+    lib.optionalString (profile.kernel == "linux") ''
+      export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+      ${systemctlPrelude}
+      if [ -n "$sctl" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+        wants="$HOME/.config/systemd/user/default.target.wants"
+        mkdir -p "$wants"
+        ln -sf "$HOME/.config/systemd/user/kslack-proxy.service" "$wants/kslack-proxy.service"
+        "$sctl" --user daemon-reload || true
+        "$sctl" --user restart kslack-proxy.service || true
+      fi
+    ''
+  );
+
   programs.home-manager.enable = true;
 
   #########################
@@ -583,6 +632,7 @@ rec {
       kfleet
       kloge
       kloge-deploy
+      kslack-proxy
       atomi.clickup_cli
       atomi.nsc
       grafana-loki

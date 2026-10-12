@@ -127,6 +127,17 @@ rec {
   kfleet = nixpkgs.writeShellScriptBin "kfleet" ''
     exec ${nixpkgs.bun}/bin/bun run ~/.config/home-manager/modules/kfleet-ts/src/index.ts "$@"
   '';
+  # kslack-proxy: per-machine Slack MCP proxy (one rotating Slack login shared by
+  # every claude-*/codex-* account; serves read-only MCP on 127.0.0.1:37373).
+  # Run-from-source; installs node_modules on a fresh checkout (it is gitignored)
+  # so the launchd/systemd service works on a just-cloned box.
+  kslack-proxy = nixpkgs.writeShellScriptBin "kslack-proxy" ''
+    dir="$HOME/.config/home-manager/modules/kslack-proxy-ts"
+    if [ ! -d "$dir/node_modules" ]; then
+      ${nixpkgs.bun}/bin/bun install --cwd "$dir" --frozen-lockfile >&2 || exit 1
+    fi
+    exec ${nixpkgs.bun}/bin/bun run "$dir/src/index.ts" "$@"
+  '';
   # loctl: run-from-source wrapper (matches the old `loctl-wrapper` package, which
   # bundled no extra tools and relied on host PATH). Replaces the `loctl` flake
   # input — a `path:` input copied the whole 328MB checkout (node_modules + compiled

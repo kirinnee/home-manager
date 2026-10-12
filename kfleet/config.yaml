@@ -13,6 +13,10 @@ profiles:
   claude:
     settings: ./templates/claude/settings.json
     skills: ./skills
+    # User-scope MCP servers, merged into each home's .claude.json (Claude never
+    # reads $CLAUDE_CONFIG_DIR/.mcp.json). `slack` is the per-machine kslack-proxy
+    # on 127.0.0.1:37373 — it owns the ONE Slack login, so no account holds its own.
+    mcp: ./templates/claude/mcp.json
     # KTEAM_MODEL is the default model kteam feeds via `--model` when a session is
     # started without an explicit override. Exported into every wrapper; inert for
     # normal CLI use (claude/codex ignore it), read only by kteam. Provider accounts

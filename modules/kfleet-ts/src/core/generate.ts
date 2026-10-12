@@ -18,6 +18,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { binDir, codexSharedSqliteDir, home, resolveAsset } from '../deps';
+import { mergeClaudeMcpServers, readMcpSource } from './claude-mcp';
 import { KIND_SPECS } from './kinds';
 import { type SettingsOutput, readRuntimeLayer, resolveSettings } from './settings';
 import { ensureCodexSharedSqliteDir, type SharedResult, materializeSharedHistory } from './shared-history';
@@ -184,6 +185,16 @@ function replaceWith(dest: string, make: () => void): void {
   make();
 }
 
+function readMcpSourceOrThrow(agent: string, ref: string): Record<string, unknown> {
+  const src = resolveAsset(ref);
+  if (!existsSync(src)) throw new Error(`agent "${agent}": mcp source not found: ${src}`);
+  try {
+    return readMcpSource(src);
+  } catch (e) {
+    throw new Error(`agent "${agent}": ${(e as Error).message}`);
+  }
+}
+
 /** Materialize one agent's config dir assets. Returns the dest paths written. */
 export function materializeAgent(
   r: ResolvedAgent,
@@ -256,6 +267,12 @@ export function materializeAgent(
         // Remove the ownership marker only after that materialization succeeds.
         removeCodexMarkerAfterWrite = true;
       }
+    }
+    if (asset.mode === 'merge-mcp') {
+      // Merged into a runtime file; with no source, fleet-owned entries are removed.
+      const servers = typeof ref === 'string' ? readMcpSourceOrThrow(r.name, ref) : {};
+      if (mergeClaudeMcpServers(dir, servers)) written.push(path.join(dir, asset.dest[0]));
+      continue;
     }
     if (ref === undefined) continue; // asset not provided by this agent
 
