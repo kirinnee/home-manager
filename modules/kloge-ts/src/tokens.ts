@@ -7,8 +7,8 @@
 // sidecar. If loge changes its normalization, update this to match.
 import { parse } from 'yaml';
 
-const DIRECT_LOGE_AGENT_RE = /^loge([1-6])$/;
-const DIRECT_CLAUDE_SECRET_RE = /^CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_([1-6])$/;
+const DIRECT_LOGE_AGENT_RE = /^loge[1-9]\d*$/;
+const DIRECT_CLAUDE_SECRET_RE = /^CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_([1-9]\d*)$/;
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export interface ClaudeSopsEnvToken {
@@ -48,7 +48,7 @@ export function hasDirectClaudeCredential(credentials: Readonly<Record<string, s
 }
 
 /**
- * Pick just the Secret slots backing the six direct `claude-logeN` wrappers.
+ * Pick just the Secret slots backing the declared direct `claude-logeN` wrappers.
  * The larger CLIProxyAPI pool is intentionally left unconstrained: its other
  * Claude credentials continue to be written only to the auth directory.
  */
@@ -60,9 +60,8 @@ export function claudeSopsEnvTokens(
     .flatMap(([source, value]) => {
       const slot = source.match(DIRECT_CLAUDE_SECRET_RE)?.[1];
       if (slot === undefined) return [];
-      const agent = `loge${slot}`;
-      const destination = destinations.get(agent);
-      if (destination === undefined) throw new Error(`kfleet agent ${agent} has no declared credential destination`);
+      const destination = destinations.get(`loge${slot}`);
+      if (destination === undefined) return [];
       return [{ source, destination, value: normalizeClaudeOAuthAccessToken(source, value) }];
     })
     .sort((a, b) => a.destination.localeCompare(b.destination, undefined, { numeric: true }));

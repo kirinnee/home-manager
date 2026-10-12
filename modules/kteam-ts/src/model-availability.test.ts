@@ -58,9 +58,9 @@ describe('model availability cache', () => {
     await writeFile(modelAvailabilityFile(p), JSON.stringify([record('claude-auto-loge3', old)]));
     expect(await readModelUnavailable(p)).toEqual([]);
     // A fresh mark also drops the expired neighbour from disk.
-    await markModelUnavailable(p, record('claude-auto-loge4', new Date().toISOString()));
+    await markModelUnavailable(p, record('claude-auto-loge3', new Date().toISOString()));
     const disk = JSON.parse(await readFile(modelAvailabilityFile(p), 'utf8')) as Array<{ binary: string }>;
-    expect(disk.map(item => item.binary)).toEqual(['claude-auto-loge4']);
+    expect(disk.map(item => item.binary)).toEqual(['claude-auto-loge3']);
   });
 
   test('a corrupt file reads as no marks', async () => {

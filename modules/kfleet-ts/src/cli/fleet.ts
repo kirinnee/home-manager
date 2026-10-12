@@ -26,7 +26,7 @@ interface ActiveFleet {
   agents: ResolvedAgent[];
   commands: CommandDef[];
   skipped: SkippedAgent[];
-  /** Skipped wrappers plus every command (e.g. yolo-loge4) that targets one. */
+  /** Skipped wrappers plus every command (e.g. yolo-loge2) that targets one. */
   gone: string[];
 }
 
