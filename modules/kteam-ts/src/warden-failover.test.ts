@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import type { AgentUsage } from './core';
-import { defaultWardenConfig, defaultWardenFailoverConfig, type WardenConfig } from './daemon-config';
+import {
+  DEFAULT_WARDEN_ACCOUNT,
+  defaultWardenConfig,
+  defaultWardenFailoverConfig,
+  type WardenConfig,
+} from './daemon-config';
 import {
   classifyWardenFailure,
   ineligibilityReason,
@@ -66,6 +71,41 @@ describe('normalizeWardenAccounts', () => {
     expect(normalizeWardenAccounts(config({ accounts: ['', '  ', 'claude-auto-b'] }))).toEqual([
       { wrapper: 'claude-auto-b' },
     ]);
+  });
+});
+
+describe('Claude 5.5 only (no GLM/MiniMax/DeepSeek/codex wardens)', () => {
+  test('the default warden is a Claude 5.5 account', () => {
+    expect(defaultWardenConfig().wrapper).toBe(DEFAULT_WARDEN_ACCOUNT.wrapper);
+    expect(DEFAULT_WARDEN_ACCOUNT.wrapper).toBe('claude-auto-loge1');
+  });
+
+  test('an old GLM-only config never spawns on GLM: it fails over to the default', () => {
+    const old = config({ wrapper: 'claude-auto-glm52a', accounts: undefined });
+    expect(normalizeWardenAccounts(old)).toEqual([{ wrapper: 'claude-auto-glm52a' }, { ...DEFAULT_WARDEN_ACCOUNT }]);
+    const selection = selectWardenAccount({
+      config: old,
+      installedAgents: [],
+      usage: [usage({ binary: 'claude-auto-glm52a' })],
+      state: {},
+      nowMs: NOW,
+    });
+    expect(selection.exhausted).toBe(false);
+    if (selection.exhausted) return;
+    expect(selection.account.wrapper).toBe('claude-auto-loge1');
+    expect(selection.skipped['claude-auto-glm52a']).toContain('not a kteam routing target');
+  });
+
+  test('non-Claude-5.5 entries are skipped even with headroom; Claude ones keep their order', () => {
+    const mixed = config({ accounts: ['claude-auto-mm3', 'codex-auto-loai', 'claude-auto-loge2'] });
+    expect(normalizeWardenAccounts(mixed).map(account => account.wrapper)).toEqual([
+      'claude-auto-mm3',
+      'codex-auto-loai',
+      'claude-auto-loge2',
+    ]);
+    const selection = selectWardenAccount({ config: mixed, installedAgents: [], usage: [], state: {}, nowMs: NOW });
+    expect(selection.exhausted).toBe(false);
+    if (!selection.exhausted) expect(selection.account.wrapper).toBe('claude-auto-loge2');
   });
 });
 

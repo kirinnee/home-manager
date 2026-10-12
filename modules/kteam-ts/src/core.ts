@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from 'fs';
 import path from 'path';
-import type { Harness, Recommendation, SessionConfig, SessionState } from './types';
+import type { Harness, SessionConfig, SessionState } from './types';
 import { authFailureRemedy, USAGE_REFRESH_MS } from './usage';
 
 export function inferHarness(binary: string): Harness {
@@ -162,8 +162,22 @@ function unavailableAgentReason(usage: AgentUsage): string {
 // `kteam recommend` — decision guide (the CLI-facing behavior)
 // ---------------------------------------------------------------------------
 
+/** The ONLY models kteam routes to. The owner (2026-10-09): "always use
+ *  opus5.5, or sonnet 5.5 or haiku 5.5 — that's the best 3". Fable, the codex
+ *  GPT models, GLM, MiniMax and DeepSeek stay DEFINED as wrappers for manual
+ *  use, but nothing in kteam recommends or auto-selects them. `alias` is the
+ *  `--model` value on direct Anthropic accounts; `proxyId` is the real id the
+ *  claude-auto-loge CLIProxyAPI lane needs (raw CLIProxyAPI has no aliases). */
+export const ROUTING_MODELS = [
+  { model: 'Opus 5.5', alias: 'opus', proxyId: 'claude-opus-5-5[1m]' },
+  { model: 'Sonnet 5.5', alias: 'sonnet', proxyId: 'claude-sonnet-5-5[1m]' },
+  { model: 'Haiku 5.5', alias: 'haiku', proxyId: 'claude-haiku-5-5' },
+] as const;
+
+export type RoutingModel = (typeof ROUTING_MODELS)[number]['model'];
+
 export interface RoutingDoctrineModel {
-  model: string;
+  model: RoutingModel;
   caution?: string;
 }
 
@@ -173,37 +187,24 @@ export interface RoutingDoctrineRow {
   models: RoutingDoctrineModel[];
 }
 
-/** Human-authored routing doctrine, encoded as editable data. The human
- *  confirmed on 2026-07-30 that both earlier phrases "gpt-5.5 terra" and
- *  "5.5 terra" meant the SINGLE model gpt-5.6-terra. GPT-5.5 is therefore not
- *  present in this doctrine. 2026-09-24: the GPT-6 generation took over the
- *  codex slots — GPT-6 Astra is Fable-tier (frontier planner, and the codex
- *  "only the hardest" implementer that gpt-5.6-sol held), GPT-6 Sol is
- *  Opus-tier and replaces gpt-5.6-terra as the default reviewer, GPT-6 Luna is
- *  Haiku-tier. 2026-10-08: Sonnet 5.5 and Haiku 5.5 took over the `sonnet` and
- *  `haiku` slots from Sonnet 5 and Haiku 4.5 in the same roles. */
+/** Human-authored routing doctrine, encoded as editable data. 2026-10-09: the
+ *  owner restricted routing to the three Claude 5.5 models — Opus 5.5 plans,
+ *  takes the hardest/most critical implementation and reviews; Sonnet 5.5 is
+ *  the generic implementer; Haiku 5.5 takes trivial/mechanical work. */
 export const ROUTING_DOCTRINE: RoutingDoctrineRow[] = [
   {
-    work: 'Mission-critical thinking/planning — where a blindspot or missed understanding causes large rework or impact',
-    models: [{ model: 'Fable 5.1' }, { model: 'GPT-6 Astra' }],
+    work: 'Planning — normal and mission-critical (where a blindspot causes large rework or impact)',
+    models: [{ model: 'Opus 5.5' }],
   },
-  { work: 'Normal planning', models: [{ model: 'Opus 5.5' }] },
+  { work: 'Hardest / most critical implementation', models: [{ model: 'Opus 5.5' }] },
+  { work: 'Review', models: [{ model: 'Opus 5.5' }] },
   {
-    work: 'Implementing',
-    models: [
-      { model: 'Opus 5.5' },
-      { model: 'GPT-6 Sol' },
-      { model: 'GPT-6 Astra', caution: 'only the hardest' },
-      { model: 'glm-5.3', caution: 'only if you must' },
-    ],
+    work: 'Generic implementation and mid-complexity work (incl. research, docs/HTML)',
+    models: [{ model: 'Sonnet 5.5' }, { model: 'Opus 5.5', caution: 'when it proves harder than expected' }],
   },
-  { work: 'Review', models: [{ model: 'GPT-6 Sol' }, { model: 'Opus 5.5' }] },
-  { work: 'Super-small mechanical', models: [{ model: 'MiniMax M3' }] },
-  { work: 'Internal docs/HTML', models: [{ model: 'MiniMax M3' }] },
-  { work: 'External docs/HTML', models: [{ model: 'GPT-6 Sol' }] },
   {
-    work: 'Small/medium mechanical',
-    models: [{ model: 'Sonnet 5.5' }, { model: 'glm-5.3' }, { model: 'gpt-5.6-terra' }, { model: 'GPT-6 Luna' }],
+    work: 'Trivial / mechanical',
+    models: [{ model: 'Haiku 5.5' }, { model: 'Sonnet 5.5', caution: 'when Haiku stumbles' }],
   },
 ];
 
@@ -212,23 +213,19 @@ export const LOGE_SELECTION_WEIGHT = 9;
 export const NON_LOGE_SELECTION_WEIGHT = 1;
 export const LOGE_WEEKLY_REMAINING_FLOOR_PERCENT = 15;
 export const LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT = 100 - LOGE_WEEKLY_REMAINING_FLOOR_PERCENT;
-/** Fable is the most expensive model in the fleet, so it is only affordable while an
- *  account still has plenty of its weekly allowance left. Past this much weekly
- *  utilization Fable stops being an option at all — pick a cheaper model instead,
- *  even for work the doctrine would otherwise send to Fable. */
-export const FABLE_MAX_WEEKLY_UTILIZATION_PERCENT = 50;
 
-/** The only Claude wrappers that offer Fable (2026-10-08): liftoff (native
- *  `fable` alias, no usage-credit dialog) and the loge CLIProxyAPI lane (real
- *  id, API billing). Direct loge1..6 hit the usage-credits dialog; kirin is the
- *  human's daily driver and atomi is logged out. */
+/** The Claude wrappers whose interactive TUI offers Fable (2026-10-08): liftoff
+ *  (native `fable` alias) and the loge CLIProxyAPI lane (real id). Only the
+ *  manual model picker uses this — Fable is not a routing target. */
 export const FABLE_ACCOUNTS = ['claude-auto-liftoff', 'claude-auto-loge'] as const;
 /** The loge proxy has no aliases, so Fable is requested by its real 1M id. */
 export const FABLE_PROXY_MODEL_ID = 'claude-fable-5-1[1m]';
 
-export const PRODUCT_FACING_MODEL_GUARD = {
-  rule: 'Never route product-facing work to MiniMax M3 or DeepSeek V4.',
-  models: ['MiniMax M3', 'DeepSeek V4'],
+export const MODEL_ALLOWLIST_GUARD = {
+  rule:
+    'Route ONLY to Opus 5.5, Sonnet 5.5 or Haiku 5.5. Never Fable, GPT (codex), GLM, MiniMax or DeepSeek — ' +
+    'those wrappers are for manual use only.',
+  models: ROUTING_MODELS.map(item => item.model),
 } as const;
 
 export const HARD_ACCOUNT_EXCLUSIONS = [
@@ -240,11 +237,27 @@ export const HARD_ACCOUNT_EXCLUSIONS = [
     binary: 'codex-auto-personal',
     reason: 'personal daily-driver account — never route kteam work here',
   },
-  {
-    binary: 'claude-auto-dsv4p',
-    reason: 'DeepSeek V4 Pro is too expensive for its capability — routed manually only',
-  },
 ] as const;
+
+/** Wrappers that cannot serve a ROUTING_MODELS model: they stay installed for
+ *  manual use, but recommend and every automatic failover skip them. */
+const NON_ROUTING_WRAPPERS: Array<{ match: RegExp; reason: string }> = [
+  { match: /^codex-/, reason: 'Codex (GPT) wrapper — kteam routes only Opus/Sonnet/Haiku 5.5; manual use only' },
+  {
+    match: /^claude-auto-(?:glm52[ab]?|mm3|dsv4[fp])$/,
+    reason: 'GLM/MiniMax/DeepSeek provider wrapper — not a Claude 5.5 model; manual use only',
+  },
+];
+
+/** Why `binary` must never be routed to (hard exclusion or non-Claude-5.5
+ *  wrapper), or undefined when it is a valid routing/failover target. */
+export function routingExclusionReason(binary: string): string | undefined {
+  const base = path.basename(binary);
+  return (
+    HARD_ACCOUNT_EXCLUSIONS.find(item => item.binary === base)?.reason ??
+    NON_ROUTING_WRAPPERS.find(item => item.match.test(base))?.reason
+  );
+}
 
 export const ACCOUNT_SELECTION_POLICY = {
   logeToNonLogeRatio: {
@@ -253,7 +266,6 @@ export const ACCOUNT_SELECTION_POLICY = {
   },
   logeWeeklyRemainingFloorPercent: LOGE_WEEKLY_REMAINING_FLOOR_PERCENT,
   logeWeeklyUtilizationCutoffPercent: LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
-  fableMaxWeeklyUtilizationPercent: FABLE_MAX_WEEKLY_UTILIZATION_PERCENT,
   ownAccountFallbacks: ['atomi', 'liftoff'],
   rules: [
     `Prefer loge accounts at roughly ${LOGE_SELECTION_WEIGHT}:${NON_LOGE_SELECTION_WEIGHT} over non-loge accounts ` +
@@ -261,13 +273,10 @@ export const ACCOUNT_SELECTION_POLICY = {
     `When a loge account reaches ${LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT}% weekly utilization ` +
       `(about ${LOGE_WEEKLY_REMAINING_FLOOR_PERCENT}% weekly quota remaining), stop preferring it.`,
     'After that cutoff, move to the own-account fallbacks atomi and liftoff; kirin remains a hard never-route daily driver.',
-    `Fable is NOT applicable once an account is above ${FABLE_MAX_WEEKLY_UTILIZATION_PERCENT}% weekly utilization — ` +
-      'it is the most expensive model in the fleet, so past that point choose a cheaper model even for work this ' +
-      'doctrine would otherwise send to Fable.',
-    `Fable is offered ONLY on ${FABLE_ACCOUNTS.join(' and ')} (the loge proxy by its real id ` +
-      `${FABLE_PROXY_MODEL_ID}); direct loge1..6 need usage credits for it, so they are Opus/Sonnet/Haiku only.`,
-    'Fable is also NOT applicable on an account marked "Fable unavailable": its interactive TUI demanded ' +
-      'usage-credit consent, which kteam refuses to answer — pick Fable on another account or the next model.',
+    'Pick the model with `--model`: on direct Anthropic accounts use the alias ' +
+      `(${ROUTING_MODELS.map(item => item.alias).join(' / ')}); on claude-auto-loge (CLIProxyAPI, no aliases) ` +
+      `use the real id (${ROUTING_MODELS.map(item => item.proxyId).join(' / ')}).`,
+    'Codex, GLM, MiniMax and DeepSeek wrappers are never routing targets, even when they have headroom.',
     'Unknown quota is unknown: do not invent utilization or silently treat it as zero.',
   ],
 } as const;
@@ -295,27 +304,17 @@ export interface RecommendationAccountState {
   overageResetAt: number | null;
   /** null means the threshold cannot be evaluated from real weekly quota. */
   logePreferenceEligible: boolean | null;
-  /** Whether Fable may be selected on this account at all: it is the priciest model
-   *  in the fleet, so it is off the table above
-   *  FABLE_MAX_WEEKLY_UTILIZATION_PERCENT weekly utilization. null means unknown
-   *  weekly quota, so the caller must not assume either way. false also when the
-   *  account does not offer Fable (FABLE_ACCOUNTS) or its interactive TUI
-   *  demanded usage-credit consent for Fable. */
-  fableEligible: boolean | null;
-  /** Why Fable is unavailable on this account regardless of quota (usage-credit
-   *  consent seen by kteam), or null. */
-  fableUnavailableReason: string | null;
   probeError: string | null;
 }
 
 export interface RecommendationDecisionGuide {
-  schemaVersion: 1;
+  schemaVersion: 2;
   kind: 'decision-guide';
   task: string;
   decisionOwner: 'calling-agent';
   doctrine: {
     rows: RoutingDoctrineRow[];
-    productFacingGuard: typeof PRODUCT_FACING_MODEL_GUARD;
+    modelGuard: typeof MODEL_ALLOWLIST_GUARD;
   };
   accountSelection: typeof ACCOUNT_SELECTION_POLICY;
   quota: {
@@ -348,8 +347,8 @@ const accountNameFor = (binary: string, usage?: AgentUsage): string =>
   usage?.account ?? binary.replace(/^(claude|codex)-auto-/, '');
 
 const accountPoolFor = (binary: string, account: string): RecommendationAccountPool => {
-  if (HARD_ACCOUNT_EXCLUSIONS.some(item => item.binary === binary)) return 'never-route';
-  if (/^(claude|codex)-auto-loge(?:[1-6])?$/.test(binary)) return 'loge';
+  if (routingExclusionReason(binary)) return 'never-route';
+  if (/^claude-auto-loge(?:[1-6])?$/.test(binary)) return 'loge';
   if ((ACCOUNT_SELECTION_POLICY.ownAccountFallbacks as readonly string[]).includes(account)) return 'own-fallback';
   return 'other';
 };
@@ -359,8 +358,8 @@ function usabilityFor(
   usage: AgentUsage | undefined,
   usageProbed: boolean,
 ): { usable: RecommendationUsability; reason: string } {
-  const hard = HARD_ACCOUNT_EXCLUSIONS.find(item => item.binary === binary);
-  if (hard) return { usable: 'unusable', reason: hard.reason };
+  const excluded = routingExclusionReason(binary);
+  if (excluded) return { usable: 'unusable', reason: excluded };
   if (!usageProbed) return { usable: 'unknown', reason: 'quota/availability probe skipped by --no-usage' };
   if (!usage) return { usable: 'unknown', reason: 'no usage record was returned for this account' };
   if (usage.authOk === false)
@@ -408,55 +407,57 @@ export function recommendDecisionGuide(
   const usage = options.usage ?? [];
   const usageProbed = options.usageProbed ?? true;
   const usageByBinary = new Map(usage.map(item => [item.binary, item]));
-  const accounts = [...new Set(agents)].sort().map((binary): RecommendationAccountState => {
-    const feed = usageByBinary.get(binary);
-    const account = accountNameFor(binary, feed);
-    const pool = accountPoolFor(binary, account);
-    // A failed/auth-rejected probe may carry stale fields from an older
-    // producer. Only a non-failed authenticated numerical record is real.
-    const numericalQuota = usageProbed && feed?.ok !== false && feed?.authOk !== false && feed?.usageBased !== false;
-    const fiveHourPercent = numericalQuota ? percentOrNull(feed?.fiveHourPercent) : null;
-    const weeklyPercent = numericalQuota ? percentOrNull(feed?.weeklyPercent) : null;
-    const weeklyRemainingPercent = weeklyPercent === null ? null : Math.max(0, 100 - weeklyPercent);
-    const weeklyResetAt = numericalQuota ? timestampOrNull(feed?.weeklyResetAt) : null;
-    const overagePercent = numericalQuota && feed?.overageInUse === true ? percentOrNull(feed.overagePercent) : null;
-    const overageResetAt = overagePercent === null ? null : timestampOrNull(feed?.overageResetAt);
-    // The loge cutoff is about the pool the account actually spends; for an
-    // overage-billed account that is the overage pool, not a weekly window.
-    const logePoolPercent = weeklyPercent ?? overagePercent;
-    const verdict = usabilityFor(binary, feed, usageProbed);
-    return {
-      binary,
-      account,
-      pool,
-      usable: verdict.usable,
-      usabilityReason: verdict.reason,
-      provider: feed?.provider ?? null,
-      quotaState: !usageProbed
-        ? 'skipped'
-        : fiveHourPercent !== null || weeklyPercent !== null || overagePercent !== null
-          ? 'live'
-          : 'unknown',
-      fiveHourPercent,
-      weeklyPercent,
-      weeklyRemainingPercent,
-      weeklyResetAt,
-      weeklyResetAtIso: weeklyResetAt === null ? null : new Date(weeklyResetAt).toISOString(),
-      overagePercent,
-      overageResetAt,
-      logePreferenceEligible:
-        pool !== 'loge' || logePoolPercent === null ? null : logePoolPercent < LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
-      // Accounts that do not offer Fable at all (see FABLE_ACCOUNTS) are never eligible.
-      fableEligible:
-        feed?.fableUnavailable || !offersFable(binary)
-          ? false
-          : weeklyPercent === null
-            ? null
-            : weeklyPercent <= FABLE_MAX_WEEKLY_UTILIZATION_PERCENT,
-      fableUnavailableReason: feed?.fableUnavailable ?? null,
-      probeError: usageProbed ? (feed?.error ?? null) : null,
-    };
-  });
+  const unique = [...new Set(agents)].sort();
+  // Non-routing wrappers (codex/GLM/MiniMax/DeepSeek, daily drivers) are not
+  // offered as accounts at all; they appear only in hardExclusions.
+  const excluded = new Map(HARD_ACCOUNT_EXCLUSIONS.map(item => [item.binary as string, item.reason as string]));
+  for (const binary of unique) {
+    const reason = routingExclusionReason(binary);
+    if (reason) excluded.set(binary, reason);
+  }
+  const accounts = unique
+    .filter(binary => !excluded.has(binary))
+    .map((binary): RecommendationAccountState => {
+      const feed = usageByBinary.get(binary);
+      const account = accountNameFor(binary, feed);
+      const pool = accountPoolFor(binary, account);
+      // A failed/auth-rejected probe may carry stale fields from an older
+      // producer. Only a non-failed authenticated numerical record is real.
+      const numericalQuota = usageProbed && feed?.ok !== false && feed?.authOk !== false && feed?.usageBased !== false;
+      const fiveHourPercent = numericalQuota ? percentOrNull(feed?.fiveHourPercent) : null;
+      const weeklyPercent = numericalQuota ? percentOrNull(feed?.weeklyPercent) : null;
+      const weeklyRemainingPercent = weeklyPercent === null ? null : Math.max(0, 100 - weeklyPercent);
+      const weeklyResetAt = numericalQuota ? timestampOrNull(feed?.weeklyResetAt) : null;
+      const overagePercent = numericalQuota && feed?.overageInUse === true ? percentOrNull(feed.overagePercent) : null;
+      const overageResetAt = overagePercent === null ? null : timestampOrNull(feed?.overageResetAt);
+      // The loge cutoff is about the pool the account actually spends; for an
+      // overage-billed account that is the overage pool, not a weekly window.
+      const logePoolPercent = weeklyPercent ?? overagePercent;
+      const verdict = usabilityFor(binary, feed, usageProbed);
+      return {
+        binary,
+        account,
+        pool,
+        usable: verdict.usable,
+        usabilityReason: verdict.reason,
+        provider: feed?.provider ?? null,
+        quotaState: !usageProbed
+          ? 'skipped'
+          : fiveHourPercent !== null || weeklyPercent !== null || overagePercent !== null
+            ? 'live'
+            : 'unknown',
+        fiveHourPercent,
+        weeklyPercent,
+        weeklyRemainingPercent,
+        weeklyResetAt,
+        weeklyResetAtIso: weeklyResetAt === null ? null : new Date(weeklyResetAt).toISOString(),
+        overagePercent,
+        overageResetAt,
+        logePreferenceEligible:
+          pool !== 'loge' || logePoolPercent === null ? null : logePoolPercent < LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
+        probeError: usageProbed ? (feed?.error ?? null) : null,
+      };
+    });
 
   const anyRealNumbers = accounts.some(
     account => account.fiveHourPercent !== null || account.weeklyPercent !== null || account.overagePercent !== null,
@@ -468,13 +469,13 @@ export function recommendDecisionGuide(
       : ['The usage feed returned no real 5h/weekly values; quota fields are unknown, not zero.'];
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: 'decision-guide',
     task,
     decisionOwner: 'calling-agent',
     doctrine: {
       rows: ROUTING_DOCTRINE.map(row => ({ ...row, models: row.models.map(model => ({ ...model })) })),
-      productFacingGuard: PRODUCT_FACING_MODEL_GUARD,
+      modelGuard: MODEL_ALLOWLIST_GUARD,
     },
     accountSelection: ACCOUNT_SELECTION_POLICY,
     quota: {
@@ -486,9 +487,10 @@ export function recommendDecisionGuide(
         : 'Quota probing was skipped with --no-usage; no quota inference was made.',
     },
     accounts,
-    hardExclusions: HARD_ACCOUNT_EXCLUSIONS.map(item => ({ ...item })),
+    hardExclusions: [...excluded].map(([binary, reason]) => ({ binary, reason })),
     instructions: [
       'Match the work to the routing-doctrine row; use its model order as the capability preference.',
+      `Route only to ${MODEL_ALLOWLIST_GUARD.models.join(', ')} — never any other model, whatever its headroom.`,
       'Remove hard exclusions and accounts positively reported unusable.',
       `Apply the ${LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT}% weekly-utilization cutoff to each loge account only when its real weekly value is known.`,
       `Among eligible accounts, maintain the rough ${LOGE_SELECTION_WEIGHT}:${NON_LOGE_SELECTION_WEIGHT} loge-to-non-loge selection ratio; after the cutoff use atomi/liftoff.`,
@@ -537,776 +539,18 @@ export function renderRecommendationDecisionGuide(guide: RecommendationDecisionG
           : `; overage ${formatQuotaPercent(account.overagePercent)} (reset ${
               account.overageResetAt === null ? 'unknown' : new Date(account.overageResetAt).toISOString()
             })`) +
-        `${preference}; ${account.usabilityReason}` +
-        (account.fableUnavailableReason ? `; Fable unavailable: ${account.fableUnavailableReason}` : '')
+        `${preference}; ${account.usabilityReason}`
       );
     }),
     '',
     'Hard exclusions:',
     ...guide.hardExclusions.map(item => `  - ${item.binary}: ${item.reason}`),
     '',
-    `Product-facing guard: ${guide.doctrine.productFacingGuard.rule}`,
+    `Model guard: ${guide.doctrine.modelGuard.rule}`,
   ];
   if (guide.warnings.length) lines.push('', 'Warnings:', ...guide.warnings.map(warning => `  - ${warning}`));
   lines.push('', ...guide.instructions.map((instruction, index) => `${index + 1}. ${instruction}`));
   return lines.join('\n');
-}
-
-// ---------------------------------------------------------------------------
-// `kteam recommend` — model/account doctrine
-//
-// The authority is kfleet/skills/kteam/SKILL.md ("Pick the right model", tiers
-// + handoff chain). This module ENCODES that table; when the skill changes,
-// change the catalog below and the tests that pin its floors. The old
-// implementation was a handful of keyword regexes that recommended GLM (5.2 at
-// the time) for anything matching /hard|complex/ — the exact opposite of the
-// doctrine, which restricts GLM to the mass-chore tier.
-// ---------------------------------------------------------------------------
-
-export type ModelKey =
-  | 'fable51'
-  | 'astra'
-  | 'sol'
-  | 'gpt6sol'
-  | 'opus55'
-  | 'opus48'
-  | 'terra'
-  | 'gpt55'
-  | 'glm52'
-  | 'mm3'
-  | 'sonnet55'
-  | 'dsv4f'
-  | 'gpt6luna'
-  | 'haiku';
-
-export type TeamRole = 'planner' | 'implementer' | 'researcher' | 'reviewer' | 'fan-out';
-export type Budget = 'cheap' | 'balanced' | 'max';
-export type Complexity = 'mechanical' | 'mid' | 'hard';
-export type TaskKind =
-  | 'frontend'
-  | 'backend'
-  | 'research'
-  | 'review'
-  | 'migration'
-  | 'bulk-chore'
-  | 'debugging'
-  | 'general';
-
-interface ModelSpec {
-  label: string;
-  family: Harness;
-  tier: string;
-  speed: 'fastest' | 'fast' | 'medium' | 'slow';
-  /** Relative spend, used by --budget and to break same-tier ties. */
-  cost: 'low' | 'medium' | 'high' | 'very-high';
-  /** Capability floor enforcement: doctrine tiers as a single number. */
-  power: number;
-  /** Per-role base scores. 0 = doctrine says never as PRIMARY for that role.
-   *  `implementer` is NOT here — see implementerFit. */
-  score: Partial<Record<Exclude<TeamRole, 'implementer'>, number>>;
-  /** Implementer fitness is COMPLEXITY-RELATIVE, not absolute. A single "best
-   *  implementer" number put GPT-5.6-sol on a 40-file rename and a CSS tweak:
-   *  the top tier is the right answer for the hardest work and the wrong answer
-   *  for a chore. Reading a column down this table is reading the doctrine. */
-  implementerFit: Record<Complexity, number>;
-  /** Doctrine: never let this model implement product-facing work. */
-  noProductFacing?: boolean;
-  /** Doctrine: may implement only from a plan written by a smarter model. */
-  needsPlan?: boolean;
-  note: string;
-}
-
-const MODELS: Record<ModelKey, ModelSpec> = {
-  fable51: {
-    label: 'Fable 5.1',
-    family: 'claude',
-    tier: 'frontier planner',
-    speed: 'slow',
-    cost: 'very-high',
-    power: 100,
-    score: { planner: 100, researcher: 95, reviewer: 78 },
-    implementerFit: { mechanical: 5, mid: 40, hard: 78 },
-    note: 'smartest: maps blindspots and complex relations before code exists',
-  },
-  // GPT-6 generation (live on the ChatGPT Codex accounts, probed 2026-09-24).
-  // Astra is Fable-tier: the codex frontier planner AND the "only the hardest"
-  // implementer slot GPT-5.6-sol held.
-  astra: {
-    label: 'GPT-6 Astra',
-    family: 'codex',
-    tier: 'frontier planner',
-    speed: 'slow',
-    cost: 'very-high',
-    power: 100,
-    score: { planner: 97, researcher: 92, reviewer: 88 },
-    implementerFit: { mechanical: 5, mid: 45, hard: 100 },
-    note: 'codex frontier: plans like Fable, implements the hardest work @ ultra; very expensive',
-  },
-  // Superseded by GPT-6 (2026-09-24); no account routes here any more. Kept as a
-  // named tier for `--model gpt-5.6-sol` overrides and old-session display.
-  sol: {
-    label: 'GPT-5.6-sol @ ultra',
-    family: 'codex',
-    tier: 'top implementer',
-    speed: 'slow',
-    cost: 'very-high',
-    power: 96,
-    score: { planner: 82, researcher: 80, reviewer: 86 },
-    implementerFit: { mechanical: 10, mid: 55, hard: 100 },
-    note: 'most diligent implementer; expensive — reserve for the hardest work',
-  },
-  // Opus-tier and CHEAPER than Opus 5.5. Replaces gpt-5.6-terra as the default
-  // reviewer and the codex generic implementer; unlike terra it needs no plan.
-  gpt6sol: {
-    label: 'GPT-6 Sol',
-    family: 'codex',
-    tier: 'top implementer / reviewer',
-    speed: 'medium',
-    cost: 'medium',
-    power: 95,
-    score: { planner: 84, researcher: 84, reviewer: 100 },
-    implementerFit: { mechanical: 15, mid: 78, hard: 95 },
-    note: 'Opus-class implementer and the default reviewer; cheaper than Opus 5.5',
-  },
-  opus55: {
-    label: 'Opus 5.5',
-    family: 'claude',
-    tier: 'top implementer',
-    speed: 'medium',
-    cost: 'high',
-    power: 95,
-    score: { planner: 86, researcher: 85, reviewer: 80 },
-    implementerFit: { mechanical: 12, mid: 60, hard: 98 },
-    note: 'same top tier as sol, faster; served by every Anthropic-backed account',
-  },
-  // RETIRED as a choice (2026-07-25, reconfirmed 2026-09-24): Opus 5.5 is now
-  // CHEAPER than 4.8 as well as smarter, so 4.8 is never the right pick. Kept
-  // only as the 'strong implementer' power threshold.
-  opus48: {
-    label: 'Opus 4.8',
-    family: 'claude',
-    tier: 'strong implementer',
-    speed: 'medium',
-    cost: 'high',
-    power: 80,
-    score: { planner: 70, researcher: 78, reviewer: 72 },
-    implementerFit: { mechanical: 25, mid: 100, hard: 70 },
-    note: 'next-best after the top tier; the generic-to-mid-high workhorse',
-  },
-  // Prev-gen (Sonnet-tier since GPT-6, 2026-09-24): GPT-6 Sol took its default
-  // reviewer and generic-implementer slots. Still needs a plan.
-  terra: {
-    label: 'GPT-5.6-terra',
-    family: 'codex',
-    tier: 'reviewer / plan-following implementer',
-    speed: 'medium',
-    cost: 'medium',
-    power: 72,
-    needsPlan: true,
-    score: { researcher: 70, reviewer: 90 },
-    implementerFit: { mechanical: 35, mid: 70, hard: 55 },
-    note: 'very strong reviewer; implements only against someone else’s plan',
-  },
-  gpt55: {
-    label: 'GPT-5.5',
-    family: 'codex',
-    tier: 'reviewer / plan-following implementer',
-    speed: 'medium',
-    cost: 'medium',
-    power: 68,
-    needsPlan: true,
-    score: { researcher: 64, reviewer: 92 },
-    implementerFit: { mechanical: 40, mid: 78, hard: 40 },
-    note: 'second-opinion reviewer; cheaper than terra, same review strength class',
-  },
-  glm52: {
-    label: 'GLM-5.3',
-    family: 'claude',
-    tier: 'mass-chore',
-    speed: 'slow',
-    cost: 'low',
-    power: 55,
-    score: { researcher: 50, 'fan-out': 100 },
-    implementerFit: { mechanical: 94, mid: 60, hard: 20 },
-    note: 'divide-and-conquer tier: 1 file = 1 agent; slow, cheap, use sparingly',
-  },
-  mm3: {
-    label: 'MiniMax M3',
-    family: 'claude',
-    tier: 'mass-chore',
-    speed: 'fast',
-    cost: 'low',
-    power: 45,
-    noProductFacing: true,
-    score: { researcher: 55, 'fan-out': 92 },
-    implementerFit: { mechanical: 92, mid: 35, hard: 0 },
-    note: 'fast; strong at UI/SVG/screenshot-to-code, but never product-facing',
-  },
-  sonnet55: {
-    label: 'Sonnet 5.5',
-    family: 'claude',
-    tier: 'mass-chore',
-    speed: 'fast',
-    cost: 'low',
-    power: 50,
-    score: { researcher: 58, 'fan-out': 80 },
-    implementerFit: { mechanical: 88, mid: 40, hard: 0 },
-    note: 'well-guarded mechanical work with a bit of judgement',
-  },
-  dsv4f: {
-    label: 'DeepSeek V4.1 Flash',
-    family: 'claude',
-    tier: 'mechanical',
-    speed: 'fast',
-    cost: 'low',
-    power: 30,
-    noProductFacing: true,
-    score: { researcher: 40, 'fan-out': 70 },
-    implementerFit: { mechanical: 80, mid: 15, hard: 0 },
-    note: 'fully-specified mechanical work only — no blindspots allowed',
-  },
-  // Haiku-tier, first-party (so NOT barred from product-facing work).
-  gpt6luna: {
-    label: 'GPT-6 Luna',
-    family: 'codex',
-    tier: 'trivial',
-    speed: 'fastest',
-    cost: 'low',
-    power: 25,
-    score: { researcher: 35, 'fan-out': 60 },
-    implementerFit: { mechanical: 70, mid: 8, hard: 0 },
-    note: 'cheap, fast codex fan-out for trivial mechanical work',
-  },
-  haiku: {
-    label: 'Haiku 5.5',
-    family: 'claude',
-    tier: 'trivial',
-    speed: 'fastest',
-    cost: 'low',
-    power: 20,
-    noProductFacing: true,
-    score: { 'fan-out': 50 },
-    implementerFit: { mechanical: 60, mid: 5, hard: 0 },
-    note: 'trivial mechanical work only',
-  },
-};
-
-interface AccountSpec {
-  match: RegExp;
-  /** loge accounts absorb ~70% of token spend (loge-first bias). */
-  loge?: boolean;
-  /** Present = never recommend, with the reason shown in the exclusions list. */
-  banned?: string;
-  /** First entry is the wrapper's kfleet default (no --model needed). */
-  options: Array<{ model: ModelKey; flag?: string }>;
-}
-
-const ACCOUNTS: AccountSpec[] = [
-  {
-    match: /^claude-auto-kirin$/,
-    banned: 'personal daily-driver Anthropic account — never route kteam work here',
-    options: [],
-  },
-  {
-    match: /^codex-auto-personal$/,
-    banned: 'personal daily-driver ChatGPT account — never route kteam work here',
-    options: [],
-  },
-  {
-    match: /^claude-auto-dsv4p$/,
-    banned: 'DeepSeek V4 Pro — too expensive for what it gives (doctrine: do not use)',
-    options: [],
-  },
-  {
-    // The kloge proxy serves the whole Anthropic lineup by REAL id, not alias.
-    // Its KTEAM_MODEL default is Opus 5.5; Fable bills as API usage here and is
-    // served (verified 2026-10-08), so it is reachable by its real 1M id.
-    match: /^claude-auto-loge$/,
-    loge: true,
-    options: [
-      { model: 'opus55' },
-      { model: 'fable51', flag: FABLE_PROXY_MODEL_ID },
-      { model: 'sonnet55', flag: 'claude-sonnet-5-5' },
-    ],
-  },
-  {
-    // Direct first-party Anthropic OAuth accounts: native aliases work here.
-    // No Fable: since 2026-10-08 their interactive TUI demands usage credits
-    // for it, and the human chose not to offer it (FABLE_ACCOUNTS below).
-    match: /^claude-auto-loge[1-6]$/,
-    options: [{ model: 'opus55' }, { model: 'sonnet55', flag: 'sonnet' }, { model: 'haiku', flag: 'haiku' }],
-  },
-  {
-    // Logged out as of 2026-10-08; kept routable for when it is restored.
-    match: /^claude-auto-atomi$/,
-    options: [{ model: 'opus55' }, { model: 'sonnet55', flag: 'sonnet' }, { model: 'haiku', flag: 'haiku' }],
-  },
-  {
-    // The one direct account where interactive Fable works without a dialog.
-    match: /^claude-auto-liftoff$/,
-    options: [
-      { model: 'opus55' },
-      { model: 'fable51', flag: 'fable' },
-      { model: 'sonnet55', flag: 'sonnet' },
-      { model: 'haiku', flag: 'haiku' },
-    ],
-  },
-  { match: /^claude-auto-glm52[ab]$/, options: [{ model: 'glm52' }] },
-  { match: /^claude-auto-mm3$/, options: [{ model: 'mm3' }] },
-  { match: /^claude-auto-dsv4f$/, options: [{ model: 'dsv4f' }] },
-  {
-    // GPT-6 generation probed live on these accounts 2026-09-24.
-    match: /^codex-auto-(loai|ernest|atomi|kirin)$/,
-    options: [
-      { model: 'gpt6sol' },
-      { model: 'astra', flag: 'gpt-6-astra' },
-      { model: 'gpt6luna', flag: 'gpt-6-luna' },
-      { model: 'terra', flag: 'gpt-5.6-terra' },
-    ],
-  },
-];
-
-function accountFor(binary: string): AccountSpec | undefined {
-  const base = path.basename(binary);
-  return ACCOUNTS.find(entry => entry.match.test(base));
-}
-
-const offersFable = (binary: string): boolean =>
-  accountFor(binary)?.options.some(option => option.model === 'fable51') ?? false;
-
-// --- classification --------------------------------------------------------
-
-export interface AxisEvidence {
-  axis: 'complexity' | 'kind' | 'risk' | 'size' | 'ambiguity' | 'audience';
-  value: string;
-  /** The literal words that drove it — so a wrong call is obvious. */
-  matched: string[];
-}
-
-export interface TaskClassification {
-  complexity: Complexity;
-  kind: TaskKind;
-  risk: 'low' | 'normal' | 'critical';
-  size: 'small' | 'medium' | 'large';
-  ambiguity: 'low' | 'high';
-  productFacing: boolean;
-  evidence: AxisEvidence[];
-}
-
-const hits = (text: string, pattern: RegExp): string[] => [
-  ...new Set((text.match(new RegExp(pattern.source, 'gi')) ?? []).map(word => word.toLowerCase().trim())),
-];
-
-const KIND_PATTERNS: Array<[TaskKind, RegExp]> = [
-  // Order matters: the first kind with evidence wins, so the narrow,
-  // strongly-signalled kinds come before the broad ones.
-  [
-    'bulk-chore',
-    /\b\d{2,}\s*(files?|packages?|modules?|call ?sites?|tests?|repos?)|every file|each file|bulk|fan.?out/,
-  ],
-  ['migration', /migrat\w*|upgrade|port(ing)? to|codemod|convert \w+ to|rollout/],
-  ['review', /review|critique|proofread|second opinion|sanity.?check/],
-  ['research', /research|investigate|inventory|survey|compare|explore|find out|spike|read the docs|understand how/],
-  ['debugging', /\bbugs?\b|debug|flaky|crash\w*|regression|broken|failing|stack ?trace|root.?cause|repro\w*/],
-  ['frontend', /front.?end|\bui\b|react|css|tailwind|landing|dashboard|svg|screenshot|component|responsive|animation/],
-  ['backend', /\bapi\b|server|database|\bsql\b|schema|endpoint|backend|queue|worker|daemon|microservice/],
-];
-
-const HARD =
-  /hard|complex|complicated|tricky|architect\w*|re-?design|re-?write|from scratch|concurren\w*|distributed|race condition|deadlock|protocol|algorithm|subtle|performance|refactor\w*|root.?cause|end.?to.?end/;
-const MECHANICAL =
-  /rename|typo|reformat|format\w*|lint|bump|reorder|boilerplate|mechanical|one.?liner|changelog|add a comment|copy.paste|find and replace/;
-const CRITICAL =
-  /security|auth\w*|credential|secret|token|payment|billing|invoice|production|\bprod\b|data ?loss|outage|compliance|\bpii\b|\bp0\b|critical|irreversible/;
-const LARGE =
-  /\b\d{2,}\s*(files?|packages?|modules?|call ?sites?|places|repos?)|entire (repo|codebase|service)|whole (repo|codebase)|monorepo|large|big context|across (all|every)/;
-const AMBIGUOUS =
-  /figure out|decide|design|plan\b|unclear|ambiguous|explore|options|how should|what.s the best|somehow|investigate/;
-const PLANNED = /per the plan|following the plan|as specified|spec:|checklist|step.by.step|already decided|the plan is/;
-const PRODUCT = /user.?facing|customer|product|marketing|landing|public|end users?/;
-
-export function classifyTask(task: string): TaskClassification {
-  const text = task.toLowerCase();
-  const evidence: AxisEvidence[] = [];
-  const record = (axis: AxisEvidence['axis'], value: string, matched: string[]) => {
-    evidence.push({ axis, value, matched });
-  };
-
-  const hardHits = hits(text, HARD);
-  const mechanicalHits = hits(text, MECHANICAL);
-  const criticalHits = hits(text, CRITICAL);
-  const largeHits = hits(text, LARGE);
-  const ambiguousHits = hits(text, AMBIGUOUS);
-  const plannedHits = hits(text, PLANNED);
-  const productHits = hits(text, PRODUCT);
-
-  const kindEntry = KIND_PATTERNS.map(([kind, pattern]) => ({ kind, matched: hits(text, pattern) })).find(
-    entry => entry.matched.length > 0,
-  );
-  const kind: TaskKind = kindEntry?.kind ?? 'general';
-  record('kind', kind, kindEntry?.matched ?? []);
-
-  // Mechanical only wins when nothing says the work is hard: "mechanically
-  // rename every call site of a concurrent scheduler" is not mechanical.
-  let complexity: Complexity = 'mid';
-  if (hardHits.length > 0) complexity = 'hard';
-  else if (mechanicalHits.length > 0) complexity = 'mechanical';
-  else if (kind === 'bulk-chore') complexity = 'mechanical';
-  record('complexity', complexity, complexity === 'hard' ? hardHits : mechanicalHits);
-
-  const risk = criticalHits.length > 0 ? 'critical' : complexity === 'mechanical' ? 'low' : 'normal';
-  record('risk', risk, criticalHits);
-
-  const size = largeHits.length > 0 || kind === 'bulk-chore' ? 'large' : task.length > 400 ? 'medium' : 'small';
-  record('size', size, largeHits);
-
-  // A plan already in hand removes the ambiguity a hard task would otherwise
-  // carry — that is exactly the condition under which terra may implement.
-  const ambiguity: 'low' | 'high' =
-    plannedHits.length > 0
-      ? 'low'
-      : ambiguousHits.length > 0 || (complexity === 'hard' && kind !== 'bulk-chore')
-        ? 'high'
-        : 'low';
-  record('ambiguity', ambiguity, plannedHits.length > 0 ? plannedHits : ambiguousHits);
-
-  const productFacing = productHits.length > 0 || kind === 'frontend';
-  record('audience', productFacing ? 'product-facing' : 'internal', productHits);
-
-  return { complexity, kind, risk, size, ambiguity, productFacing, evidence };
-}
-
-// --- candidate generation --------------------------------------------------
-
-export interface RoleOption {
-  binary: string;
-  model: ModelKey;
-  modelLabel: string;
-  /** The `--model` value to pass; absent = the wrapper default. */
-  modelFlag?: string;
-  family: Harness;
-  tier: string;
-  /** One line: quality / speed / cost. */
-  tradeoff: string;
-  command: string;
-  score: number;
-  /** Why this option is offered but not preferred. Below-floor and
-   *  same-family options stay on the menu (the lead may know something the
-   *  classifier does not) but always rank last and carry the reason — a bare
-   *  "below the doctrine floor" on the doctrine's own DEFAULT reviewer, which
-   *  was merely the wrong family, is misleading advice. */
-  caveat?: 'below-doctrine-floor' | 'same-model-family' | 'not-for-product-facing';
-}
-
-export interface RoleRecommendation {
-  role: TeamRole;
-  why: string;
-  /** Suggested agent count (fan-out roles only). */
-  count?: number;
-  primary: RoleOption;
-  alternatives: RoleOption[];
-}
-
-export interface TeamRecommendation {
-  task: string;
-  budget: Budget;
-  classification: TaskClassification;
-  reasoning: string;
-  roles: RoleRecommendation[];
-  exclusions: Array<{ binary: string; reason: string }>;
-  warnings: string[];
-}
-
-export interface RecommendOptions {
-  budget?: Budget;
-  /** Force the team shape instead of deriving it from the classification. */
-  roles?: TeamRole[];
-  usage?: AgentUsage[];
-  /** Label used in the generated `kteam start` commands. */
-  label?: string;
-}
-
-const COST_PENALTY: Record<Budget, Record<ModelSpec['cost'], number>> = {
-  // Steep on purpose: cost-first must be able to change the ANSWER, not just
-  // the ordering inside one tier.
-  cheap: { 'very-high': 60, high: 45, medium: 20, low: 0 },
-  balanced: { 'very-high': 8, high: 4, medium: 1, low: 0 },
-  max: { 'very-high': 0, high: 0, medium: 0, low: 0 },
-};
-
-/** The doctrine FLOOR: the least capable model allowed as primary for a role.
- *  This is what stops "hard/complex" from landing on GLM-5.3 again.
- *
- *  `--budget max` raises the floor a tier rather than nudging scores: buying
- *  quality means changing which tier is ELIGIBLE, not re-ranking within one.
- *  It never applies to mechanical work — the top tier on a rename is waste,
- *  not quality. `--budget cheap` leaves the floor alone (the doctrine's floors
- *  are not negotiable) and lets the cost penalties pick the cheapest model
- *  above it. */
-function primaryFloor(role: TeamRole, classification: TaskClassification, budget: Budget): number {
-  if (role === 'fan-out') return 0;
-  // Reviewer floor stays mid-tier: terra-class reviewers remain acceptable.
-  if (role === 'reviewer') return MODELS.terra.power;
-  if (role === 'planner') return MODELS.opus55.power;
-  const { complexity, risk, size } = classification;
-  const qualityFirst = budget === 'max' && complexity !== 'mechanical' ? MODELS.opus55.power : 0;
-  // Big-context IMPLEMENTATION is a top-tier-only job per the skill.
-  if (complexity === 'hard' && (risk === 'critical' || size === 'large')) return MODELS.opus55.power;
-  if (complexity === 'hard' || risk === 'critical') return Math.max(qualityFirst, MODELS.opus48.power);
-  if (complexity === 'mid') return Math.max(qualityFirst, MODELS.glm52.power);
-  return qualityFirst;
-}
-
-function shortTask(task: string): string {
-  const single = task.replace(/\s+/g, ' ').trim();
-  return single.length <= 70 ? single : `${single.slice(0, 67)}…`;
-}
-
-function commandFor(binary: string, flag: string | undefined, role: TeamRole, task: string, label?: string): string {
-  const parts = ['kteam start', `--agent ${binary}`];
-  if (flag) parts.push(`--model ${flag}`);
-  parts.push('--mode auto', '--cwd "$PWD"', `--name ${role}`);
-  if (label) parts.push(`--label ${label}`);
-  parts.push(`"${shortTask(task)}"`);
-  return parts.join(' ');
-}
-
-function tradeoffLine(spec: ModelSpec, account: AccountSpec): string {
-  const cost = { low: 'cheap', medium: 'mid-cost', high: 'expensive', 'very-high': 'very expensive' }[spec.cost];
-  return `${spec.note} — ${spec.speed}, ${cost}${account.loge ? ', loge account (preferred spend)' : ''}`;
-}
-
-function candidatesFor(
-  role: TeamRole,
-  agents: string[],
-  classification: TaskClassification,
-  budget: Budget,
-  usageByBinary: Map<string, AgentUsage>,
-  task: string,
-  label?: string,
-): RoleOption[] {
-  const options: RoleOption[] = [];
-  for (const binary of agents) {
-    const account = accountFor(binary);
-    if (!account || account.banned) continue;
-    for (const option of account.options) {
-      // The interactive TUI demanded usage-credit consent for Fable here.
-      if (option.model === 'fable51' && usageByBinary.get(binary)?.fableUnavailable) continue;
-      const spec = MODELS[option.model];
-      const base = role === 'implementer' ? spec.implementerFit[classification.complexity] : spec.score[role];
-      if (base === undefined || base === 0) continue;
-      let score = base;
-      score -= COST_PENALTY[budget][spec.cost];
-      if (account.loge) score += 6;
-      // Same tier, least-spent account first.
-      score -= usageScore(usageByBinary.get(binary)) / 8;
-      // A wrapper default needs no override; prefer it over reaching the same
-      // model through a flag on a busier account.
-      if (!option.flag) score += 2;
-      if (role === 'implementer' && classification.kind === 'frontend' && option.model === 'mm3') score += 12;
-      // A plan-following implementer DRAGS A PLANNER onto the team (the
-      // handoff chain forbids terra/5.5 planning their own work). On a cheap
-      // budget that is the most expensive teammate in the shape, added to save
-      // money — so cost-first prefers an implementer that needs no planner.
-      if (role === 'implementer' && budget === 'cheap' && spec.needsPlan) score -= 25;
-      if (role === 'researcher' && classification.size === 'large' && spec.power < MODELS.opus48.power) score -= 20;
-      options.push({
-        binary,
-        model: option.model,
-        modelLabel: spec.label,
-        modelFlag: option.flag,
-        family: spec.family,
-        tier: spec.tier,
-        tradeoff: tradeoffLine(spec, account),
-        command: commandFor(binary, option.flag, role, task, label),
-        score: Math.round(score * 10) / 10,
-      });
-    }
-  }
-  // One entry per model: the alternatives list is about MODEL choices, not the
-  // same model on four interchangeable accounts.
-  const byModel = new Map<ModelKey, RoleOption>();
-  for (const option of options.sort((a, b) => b.score - a.score)) {
-    if (!byModel.has(option.model)) byModel.set(option.model, option);
-  }
-  return [...byModel.values()].sort((a, b) => b.score - a.score);
-}
-
-function roleShape(classification: TaskClassification, budget: Budget): TeamRole[] {
-  const { complexity, kind, risk, ambiguity, size } = classification;
-  const roles: TeamRole[] = [];
-  const wantsPlanner =
-    budget === 'max' ||
-    ambiguity === 'high' ||
-    complexity === 'hard' ||
-    (risk === 'critical' && complexity !== 'mechanical');
-  if (wantsPlanner && !(budget === 'cheap' && ambiguity === 'low')) roles.push('planner');
-  const fanOut = kind === 'bulk-chore' || (kind === 'migration' && size === 'large');
-  if (kind === 'research') roles.push('researcher');
-  // A pure chore has no single implementer — the fan-out IS the implementation.
-  // Adding both put a top-tier implementer next to a 1-file-per-agent swarm.
-  else if (kind !== 'review' && !(fanOut && kind === 'bulk-chore')) roles.push('implementer');
-  if (fanOut) roles.push('fan-out');
-  const wantsReviewer =
-    budget === 'max' || risk === 'critical' || complexity !== 'mechanical' || kind === 'review' || kind === 'frontend';
-  if (wantsReviewer && !(budget === 'cheap' && risk === 'low')) roles.push('reviewer');
-  return roles.length > 0 ? roles : ['implementer'];
-}
-
-function roleWhy(role: TeamRole, classification: TaskClassification): string {
-  const { complexity, kind, risk, size, ambiguity } = classification;
-  switch (role) {
-    case 'planner':
-      return ambiguity === 'high'
-        ? 'ambiguity is high — pin the design down before any code is written'
-        : `${complexity} work with ${risk} risk: plan first, then hand the plan to an implementer`;
-    case 'implementer':
-      return `${complexity} ${kind} work, ${size} scope — this is the tier the doctrine allows here`;
-    case 'researcher':
-      return 'read-and-report work: no diff to defend, so favour reach and judgement over diligence';
-    case 'reviewer':
-      if (kind === 'research') return 'independent cross-family check of the findings before they are acted on';
-      return risk === 'critical'
-        ? 'security/production-critical change — review from a DIFFERENT model family'
-        : 'independent cross-family review of the diff before it lands';
-    case 'fan-out':
-      return 'divide-and-conquer chore: 1 file = 1 agent on the mass-chore tier';
-  }
-}
-
-function fanOutCount(classification: TaskClassification): number {
-  return classification.size === 'large' ? 4 : 2;
-}
-
-/** Build a full team recommendation: classification with its evidence, a team
- *  SHAPE per the handoff chain, and per role a primary plus ranked
- *  alternatives with launch commands. Never launches anything. */
-export function recommendTeam(task: string, agents: string[], options: RecommendOptions = {}): TeamRecommendation {
-  const budget = options.budget ?? 'balanced';
-  const usage = options.usage ?? [];
-  const usageByBinary = new Map(usage.map(item => [item.binary, item]));
-  const classification = classifyTask(task);
-  const warnings: string[] = [];
-  const exclusions: Array<{ binary: string; reason: string }> = [];
-
-  const pool: string[] = [];
-  for (const binary of agents) {
-    const account = accountFor(binary);
-    const health = usageByBinary.get(binary);
-    if (account?.banned) exclusions.push({ binary, reason: account.banned });
-    else if (!account) exclusions.push({ binary, reason: 'no doctrine entry for this wrapper — routed manually only' });
-    else if (health?.authOk === false)
-      exclusions.push({
-        binary,
-        reason: `credentials rejected (kfleet usage reports auth failure) — ${authFailureRemedy(health.provider)}`,
-      });
-    else if (health?.unavailable === true) exclusions.push({ binary, reason: unavailableAgentReason(health) });
-    else if (health?.atLimit === true) exclusions.push({ binary, reason: 'at its usage limit' });
-    else pool.push(binary);
-  }
-
-  const shape = options.roles?.length ? options.roles : roleShape(classification, budget);
-  const roles: RoleRecommendation[] = [];
-  for (const role of shape) {
-    const ranked = candidatesFor(role, pool, classification, budget, usageByBinary, task, options.label);
-    if (ranked.length === 0) {
-      warnings.push(`no usable account could fill the ${role} role`);
-      continue;
-    }
-    const floor = primaryFloor(role, classification, budget);
-    // Cross-family review: if an implementer is already chosen, the reviewer
-    // must come from the OTHER harness family.
-    const implementerFamily = roles.find(item => item.role === 'implementer' || item.role === 'researcher')?.primary
-      .family;
-    // Doctrine: M3 and DeepSeek must never be the PRIMARY on product-facing
-    // work — but M3 is also the doctrine's UI/SVG specialist, so dropping it
-    // from a frontend menu entirely loses real advice. It stays as a marked
-    // alternative instead.
-    const productBarred = (option: RoleOption) =>
-      role === 'implementer' && classification.productFacing && MODELS[option.model].noProductFacing === true;
-    const caveatFor = (option: RoleOption): NonNullable<RoleOption['caveat']> =>
-      MODELS[option.model].power < floor
-        ? 'below-doctrine-floor'
-        : productBarred(option)
-          ? 'not-for-product-facing'
-          : 'same-model-family';
-    let eligible = ranked.filter(option => MODELS[option.model].power >= floor && !productBarred(option));
-    if (role === 'reviewer' && implementerFamily) {
-      const cross = eligible.filter(option => option.family !== implementerFamily);
-      if (cross.length > 0) eligible = cross;
-      else warnings.push('no cross-family reviewer is available; the reviewer shares the implementer’s model family');
-    }
-    if (eligible.length === 0) {
-      const best = ranked[0]!;
-      warnings.push(
-        `no available account meets the ${role} floor for ${classification.complexity}/${classification.risk} work; ` +
-          `falling back to ${best.modelLabel} — treat its output as provisional`,
-      );
-      eligible = ranked;
-    }
-    const primary = eligible[0]!;
-    // Non-preferred options stay on the menu, ranked last and carrying the
-    // REASON they are not preferred: a below-floor model and the doctrine's own
-    // default reviewer sitting on the implementer's side are different advice.
-    const rest = ranked
-      .filter(option => !eligible.includes(option))
-      .map(option => ({ ...option, caveat: caveatFor(option) }));
-    const alternatives = [...eligible.slice(1), ...rest].slice(0, 3);
-    roles.push({
-      role,
-      why: roleWhy(role, classification),
-      ...(role === 'fan-out' ? { count: fanOutCount(classification) } : {}),
-      primary,
-      alternatives,
-    });
-  }
-
-  // Handoff-chain invariant: terra / GPT-5.5 may implement ONLY from a plan
-  // written by a smarter model. (GPT-6 Sol and Astra carry no such
-  // restriction; only the prev-gen needsPlan models do.) If one of them won the
-  // implementer slot and no planner is on the team, add one rather than
-  // silently breaking the chain.
-  const implementer = roles.find(item => item.role === 'implementer');
-  if (implementer && MODELS[implementer.primary.model].needsPlan && !roles.some(item => item.role === 'planner')) {
-    const ranked = candidatesFor('planner', pool, classification, budget, usageByBinary, task, options.label);
-    const floor = primaryFloor('planner', classification, budget);
-    const eligible = ranked.filter(option => MODELS[option.model].power >= floor);
-    if (eligible.length > 0) {
-      roles.unshift({
-        role: 'planner',
-        why: `${implementer.primary.modelLabel} implements only against a plan from a smarter model — that plan is this role`,
-        primary: eligible[0]!,
-        alternatives: eligible.slice(1, 4),
-      });
-    } else {
-      warnings.push(
-        `${implementer.primary.modelLabel} must not plan its own work, and no planner-tier account is available — ` +
-          'write the plan in the lead thread first',
-      );
-    }
-  }
-
-  const evidenceWords = classification.evidence
-    .filter(item => item.matched.length > 0)
-    .map(item => `${item.axis}=${item.value} (${item.matched.slice(0, 3).join(', ')})`);
-  const reasoning =
-    `Read as ${classification.complexity} ${classification.kind} work, ${classification.risk} risk, ` +
-    `${classification.size} scope, ${classification.ambiguity} ambiguity` +
-    `${classification.productFacing ? ', product-facing' : ''}` +
-    `${evidenceWords.length ? ` — from ${evidenceWords.join('; ')}` : ' — no strong keyword signal, defaults applied'}` +
-    `. Team shape: ${roles.map(item => item.role).join(' → ') || 'none'}.`;
-
-  return { task, budget, classification, reasoning, roles, exclusions, warnings };
-}
-
-/** Back-compat flat view of {@link recommendTeam} for callers that only want
- *  "which wrapper, which role, why" (the pre-rewrite shape). */
-export function recommendAgents(task: string, agents: string[], usage: AgentUsage[] = []): Recommendation[] {
-  return recommendTeam(task, agents, { usage }).roles.map(item => ({
-    binary: item.primary.binary,
-    role: item.role,
-    reason: `${item.primary.modelLabel}: ${item.why}`,
-  }));
 }
 
 /** The Remote Control shape, as kfleet declares it for the `crc-*` alias

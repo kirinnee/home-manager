@@ -275,8 +275,8 @@ function blocksMigration(verdict: InflightVerdict): boolean {
 }
 
 function routingCaution(wrapper: WrapperInfo): string | null {
-  return /(mm3|minimax|dsv4|glm52)/i.test(wrapper.name)
-    ? 'Restricted tier — check the routing policy before moving product-facing work here.'
+  return /^(?:codex-|claude-auto-(?:mm3|dsv4|glm52))/i.test(wrapper.name)
+    ? 'Not a kteam routing target — kteam routes only to Opus, Sonnet and Haiku 5.5. Manual use only.'
     : null;
 }
 

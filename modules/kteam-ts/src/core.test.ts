@@ -1,27 +1,23 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  FABLE_ACCOUNTS,
   ACCOUNT_SELECTION_POLICY,
   HARD_ACCOUNT_EXCLUSIONS,
   LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT,
-  PRODUCT_FACING_MODEL_GUARD,
+  MODEL_ALLOWLIST_GUARD,
   ROUTING_DOCTRINE,
-  classifyTask,
+  ROUTING_MODELS,
   harnessDisplayName,
   inferHarness,
   interactiveHarnessArgs,
   psStatusLabel,
   recommendDecisionGuide,
-  recommendTeam,
   renderRecommendationDecisionGuide,
   resolveDisplayModel,
   resolveParent,
+  routingExclusionReason,
   startWaitMsFor,
   usableAgent,
   usageScore,
-  type RoleOption,
-  type TeamRecommendation,
-  type TeamRole,
 } from './core';
 import type { SessionConfig, SessionState } from './types';
 
@@ -299,24 +295,71 @@ test('contextWindowForSession: [1m] on config survives a stripped served model (
 // ---------------------------------------------------------------------------
 
 describe('recommendDecisionGuide: teaches the decision without making it', () => {
-  test('encodes the human routing table as ordered data with the confirmed terra correction', () => {
+  test('encodes the owner routing table: Opus 5.5 / Sonnet 5.5 / Haiku 5.5 only', () => {
     expect(ROUTING_DOCTRINE.map(row => [row.work, row.models.map(model => model.model)])).toEqual([
-      [
-        'Mission-critical thinking/planning — where a blindspot or missed understanding causes large rework or impact',
-        ['Fable 5.1', 'GPT-6 Astra'],
-      ],
-      ['Normal planning', ['Opus 5.5']],
-      ['Implementing', ['Opus 5.5', 'GPT-6 Sol', 'GPT-6 Astra', 'glm-5.3']],
-      ['Review', ['GPT-6 Sol', 'Opus 5.5']],
-      ['Super-small mechanical', ['MiniMax M3']],
-      ['Internal docs/HTML', ['MiniMax M3']],
-      ['External docs/HTML', ['GPT-6 Sol']],
-      ['Small/medium mechanical', ['Sonnet 5.5', 'glm-5.3', 'gpt-5.6-terra', 'GPT-6 Luna']],
+      ['Planning — normal and mission-critical (where a blindspot causes large rework or impact)', ['Opus 5.5']],
+      ['Hardest / most critical implementation', ['Opus 5.5']],
+      ['Review', ['Opus 5.5']],
+      ['Generic implementation and mid-complexity work (incl. research, docs/HTML)', ['Sonnet 5.5', 'Opus 5.5']],
+      ['Trivial / mechanical', ['Haiku 5.5', 'Sonnet 5.5']],
     ]);
-    expect(ROUTING_DOCTRINE.find(row => row.work === 'Implementing')?.models.at(-1)?.caution).toBe('only if you must');
-    expect(ROUTING_DOCTRINE.find(row => row.work === 'Implementing')?.models.at(-2)?.caution).toBe('only the hardest');
-    expect(JSON.stringify(ROUTING_DOCTRINE)).not.toContain('gpt-5.5');
-    expect(PRODUCT_FACING_MODEL_GUARD.rule).toContain('Never route product-facing work');
+    expect(ROUTING_MODELS.map(item => item.model)).toEqual(['Opus 5.5', 'Sonnet 5.5', 'Haiku 5.5']);
+    expect(MODEL_ALLOWLIST_GUARD.models).toEqual(['Opus 5.5', 'Sonnet 5.5', 'Haiku 5.5']);
+  });
+
+  test('recommend never yields a model or wrapper outside Opus/Sonnet/Haiku 5.5', () => {
+    const allowed = new Set<string>(ROUTING_MODELS.map(item => item.model));
+    for (const row of ROUTING_DOCTRINE) for (const model of row.models) expect(allowed.has(model.model)).toBe(true);
+    const banned = /fable|astra|gpt|\bsol\b|luna|terra|glm|minimax|\bm3\b|deepseek|dsv4/i;
+    const fleet = [
+      'claude-auto-loge',
+      'claude-auto-loge1',
+      'claude-auto-liftoff',
+      'claude-auto-atomi',
+      'claude-auto-kirin',
+      'claude-auto-glm52a',
+      'claude-auto-glm52b',
+      'claude-auto-mm3',
+      'claude-auto-dsv4f',
+      'claude-auto-dsv4p',
+      'codex-auto-loai',
+      'codex-auto-atomi',
+      'codex-auto-personal',
+    ];
+    const guide = recommendDecisionGuide('Implement the reporting service', fleet, {
+      usage: fleet.map(binary => ({
+        binary,
+        ok: true,
+        authOk: true,
+        atLimit: false,
+        availability: 'available' as const,
+      })),
+    });
+    // Only Claude 5.5 accounts are offered; everything else is an exclusion.
+    expect(guide.accounts.map(account => account.binary)).toEqual([
+      'claude-auto-atomi',
+      'claude-auto-liftoff',
+      'claude-auto-loge',
+      'claude-auto-loge1',
+    ]);
+    expect(guide.accounts.every(account => routingExclusionReason(account.binary) === undefined)).toBe(true);
+    expect(guide.hardExclusions.map(item => item.binary).sort()).toEqual(
+      [
+        'claude-auto-dsv4f',
+        'claude-auto-dsv4p',
+        'claude-auto-glm52a',
+        'claude-auto-glm52b',
+        'claude-auto-kirin',
+        'claude-auto-mm3',
+        'codex-auto-atomi',
+        'codex-auto-loai',
+        'codex-auto-personal',
+      ].sort(),
+    );
+    expect(JSON.stringify(guide.doctrine.rows)).not.toMatch(banned);
+    // The only model ids the guide tells the caller to pass are the Claude 5.5 ones.
+    expect(guide.accountSelection.rules.join(' ')).toContain('claude-sonnet-5-5[1m]');
+    expect(guide.accountSelection.rules.join(' ')).not.toMatch(/fable|gpt-|glm-|minimax-|deepseek-/i);
   });
 
   test('hands over live quota inputs and evaluates only the named loge cutoff', () => {
@@ -384,13 +427,6 @@ describe('recommendDecisionGuide: teaches the decision without making it', () =>
       weeklyRemainingPercent: 15,
       logePreferenceEligible: false,
     });
-    // Fable is the priciest model, so it drops out long before the loge-preference
-    // cutoff does: 84% weekly still prefers loge, but is far past the 50% Fable gate.
-    expect(guide.accountSelection.fableMaxWeeklyUtilizationPercent).toBe(50);
-    expect(byBinary.get('claude-auto-loge1')).toMatchObject({ logePreferenceEligible: true, fableEligible: false });
-    expect(byBinary.get('claude-auto-loge2')).toMatchObject({ fableEligible: false });
-    // atomi does not offer Fable at all, whatever its quota.
-    expect(byBinary.get('claude-auto-atomi')).toMatchObject({ fableEligible: false });
     expect(byBinary.get('claude-auto-atomi')).toMatchObject({
       pool: 'own-fallback',
       usable: 'unknown',
@@ -399,7 +435,9 @@ describe('recommendDecisionGuide: teaches the decision without making it', () =>
       weeklyPercent: null,
       probeError: 'http 429',
     });
-    expect(byBinary.get('claude-auto-kirin')).toMatchObject({ pool: 'never-route', usable: 'unusable' });
+    // The daily driver is not offered at all — only listed as an exclusion.
+    expect(byBinary.has('claude-auto-kirin')).toBe(false);
+    expect(guide.hardExclusions.map(item => item.binary)).toContain('claude-auto-kirin');
   });
 
   test('--no-usage stays explicit: quota is missing/unknown and never fabricated as zero', () => {
@@ -445,374 +483,15 @@ describe('recommendDecisionGuide: teaches the decision without making it', () =>
     expect(HARD_ACCOUNT_EXCLUSIONS.map(item => item.binary)).toContain('claude-auto-kirin');
     expect(HARD_ACCOUNT_EXCLUSIONS.map(item => item.binary)).toContain('codex-auto-personal');
     expect(guide.hardExclusions).toEqual(HARD_ACCOUNT_EXCLUSIONS.map(item => ({ ...item })));
+    expect(guide.schemaVersion).toBe(2);
     expect(guide).not.toHaveProperty('roles');
     const text = renderRecommendationDecisionGuide(guide);
     expect(text).toContain('Decision owner: calling agent');
-    expect(text).toContain('Fable 5.1');
+    expect(text).toContain('Opus 5.5');
+    expect(text).toContain('Model guard: Route ONLY to Opus 5.5, Sonnet 5.5 or Haiku 5.5');
     expect(text).toContain('5h unknown');
     expect(text).not.toContain('PRIMARY');
     expect(text).not.toContain('kteam start');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Legacy core recommendation compatibility (the CLI no longer uses this path)
-// ---------------------------------------------------------------------------
-
-/** The whole installed fleet minus the wrappers doctrine bans outright. */
-const FLEET = [
-  'claude-auto-kirin',
-  'claude-auto-atomi',
-  'claude-auto-liftoff',
-  'claude-auto-loge',
-  'claude-auto-loge1',
-  'claude-auto-loge2',
-  'claude-auto-loge3',
-  'claude-auto-loge4',
-  'claude-auto-loge5',
-  'claude-auto-loge6',
-  'claude-auto-glm52a',
-  'claude-auto-glm52b',
-  'claude-auto-mm3',
-  'claude-auto-dsv4f',
-  'claude-auto-dsv4p',
-  'codex-auto-loai',
-  'codex-auto-ernest',
-  'codex-auto-atomi',
-  'codex-auto-personal',
-];
-
-const MASS_CHORE_TIER = ['glm52', 'mm3', 'dsv4f', 'haiku', 'sonnet55', 'gpt6luna'];
-const TOP_TIER = ['astra', 'sol', 'opus55'];
-// Opus-class power: GPT-6 Sol is in this class but priced mid-tier, so it is the
-// quality-first answer for mid work without being "the top tier on a chore".
-const OPUS_CLASS = [...TOP_TIER, 'gpt6sol'];
-
-const role = (team: TeamRecommendation, name: TeamRole) => team.roles.find(item => item.role === name);
-const everyone = (team: TeamRecommendation): RoleOption[] =>
-  team.roles.flatMap(item => [item.primary, ...item.alternatives]);
-
-describe('recommendTeam: classification axes are explicit', () => {
-  test('reports the axes AND the words that drove them', () => {
-    const classification = classifyTask('Fix the security bug in the production payment endpoint');
-    expect(classification.risk).toBe('critical');
-    expect(classification.kind).toBe('debugging');
-    const risk = classification.evidence.find(item => item.axis === 'risk');
-    expect(risk?.matched).toContain('security');
-    expect(risk?.matched.some(word => word.includes('payment'))).toBe(true);
-  });
-
-  test('a stated plan removes the ambiguity a hard task would carry', () => {
-    expect(classifyTask('Rewrite the scheduler').ambiguity).toBe('high');
-    expect(classifyTask('Rewrite the scheduler following the plan in PLAN.md').ambiguity).toBe('low');
-  });
-
-  test('"mechanically rename" stays hard when the subject is hard', () => {
-    // Mechanical words must not beat hardness evidence — the old regex router
-    // classified on whichever pattern it tested first.
-    expect(classifyTask('rename a variable').complexity).toBe('mechanical');
-    expect(classifyTask('rename the concurrent scheduler protocol handlers').complexity).toBe('hard');
-  });
-
-  test('the rendered reasoning names the read and the resulting shape', () => {
-    const team = recommendTeam('Redesign the distributed lock protocol', FLEET);
-    expect(team.reasoning).toContain('hard');
-    expect(team.reasoning).toContain('Team shape:');
-  });
-});
-
-describe('recommendTeam: table-driven tier floors', () => {
-  const cases: Array<{
-    name: string;
-    task: string;
-    expect: (team: TeamRecommendation) => void;
-  }> = [
-    {
-      name: 'frontend tweak',
-      task: 'Tweak the CSS on the landing page hero component so it is responsive',
-      expect: team => {
-        // Product-facing: M3 and DeepSeek are barred from the implementer slot
-        // even though frontend is M3's documented niche.
-        expect(team.classification.kind).toBe('frontend');
-        expect(team.classification.productFacing).toBe(true);
-        expect(role(team, 'implementer')!.primary.model).not.toBe('mm3');
-        expect(role(team, 'implementer')!.primary.model).not.toBe('dsv4f');
-        expect(role(team, 'reviewer')).toBeDefined();
-        // …and the top tier is overkill for a mid-difficulty CSS tweak.
-        expect(TOP_TIER).not.toContain(role(team, 'implementer')!.primary.model);
-      },
-    },
-    {
-      name: 'hard migration',
-      task: 'Design and execute a complex migration of the distributed event store to the new protocol',
-      expect: team => {
-        expect(team.classification.complexity).toBe('hard');
-        expect(role(team, 'planner')).toBeDefined();
-        expect(MASS_CHORE_TIER).not.toContain(role(team, 'implementer')!.primary.model);
-        expect(TOP_TIER).toContain(role(team, 'implementer')!.primary.model);
-      },
-    },
-    {
-      name: '40-file rename',
-      task: 'Rename the logger helper across 40 files, one file per agent',
-      expect: team => {
-        expect(team.classification.kind).toBe('bulk-chore');
-        expect(team.classification.complexity).toBe('mechanical');
-        const fanOut = role(team, 'fan-out');
-        expect(fanOut).toBeDefined();
-        expect(fanOut!.count).toBeGreaterThanOrEqual(2);
-        expect(MASS_CHORE_TIER).toContain(fanOut!.primary.model);
-        // The fan-out IS the implementation: no separate top-tier implementer
-        // parked next to a 1-file-per-agent swarm.
-        expect(role(team, 'implementer')).toBeUndefined();
-      },
-    },
-    {
-      name: 'security-critical fix',
-      task: 'Fix the auth token leak in the production credential store',
-      expect: team => {
-        expect(team.classification.risk).toBe('critical');
-        // Risky change → cross-family reviewer, never the mass-chore tier.
-        const implementer = role(team, 'implementer')!;
-        const reviewer = role(team, 'reviewer')!;
-        expect(reviewer.primary.family).not.toBe(implementer.primary.family);
-        expect(MASS_CHORE_TIER).not.toContain(implementer.primary.model);
-      },
-    },
-    {
-      name: 'research this API',
-      task: 'Research this API and report how its pagination works',
-      expect: team => {
-        expect(team.classification.kind).toBe('research');
-        expect(role(team, 'researcher')).toBeDefined();
-        expect(role(team, 'implementer')).toBeUndefined();
-      },
-    },
-  ];
-
-  for (const item of cases) {
-    test(item.name, () => item.expect(recommendTeam(item.task, FLEET)));
-  }
-});
-
-describe('recommendTeam: the top tier is not the answer to everything', () => {
-  // The mirror image of the GLM-for-hard-work bug: an ABSOLUTE "best
-  // implementer" score put GPT-5.6-sol on a rename and a CSS tweak. Implementer
-  // fitness is complexity-relative in both directions.
-  test('mechanical work does not burn the top implementer tier', () => {
-    const team = recommendTeam('Reformat and lint the config module', FLEET, { roles: ['implementer'] });
-    expect(team.classification.complexity).toBe('mechanical');
-    expect(TOP_TIER).not.toContain(team.roles[0]!.primary.model);
-    expect(MASS_CHORE_TIER).toContain(team.roles[0]!.primary.model);
-  });
-
-  test('mid work lands on the workhorse tier, not the top tier', () => {
-    const team = recommendTeam('Implement the reporting service endpoints', FLEET, { roles: ['implementer'] });
-    expect(team.classification.complexity).toBe('mid');
-    expect(TOP_TIER).not.toContain(team.roles[0]!.primary.model);
-    expect(MASS_CHORE_TIER).not.toContain(team.roles[0]!.primary.model);
-  });
-
-  test('but critical risk still pulls mid work up above the workhorse floor', () => {
-    const team = recommendTeam('Implement the production payment credential rotation', FLEET, {
-      roles: ['implementer'],
-    });
-    expect(team.classification.risk).toBe('critical');
-    expect(MASS_CHORE_TIER).not.toContain(team.roles[0]!.primary.model);
-  });
-});
-
-describe('recommendTeam: account rules', () => {
-  test('never recommends the personal daily-driver accounts or DeepSeek V4 Pro', () => {
-    const team = recommendTeam('Implement the billing reconciliation service', FLEET);
-    const banned = ['claude-auto-kirin', 'codex-auto-personal', 'claude-auto-dsv4p'];
-    for (const binary of banned) {
-      expect(everyone(team).some(option => option.binary === binary)).toBe(false);
-      expect(team.exclusions.some(item => item.binary === binary)).toBe(true);
-    }
-  });
-
-  test('excludes at-limit and auth-failed accounts with an ACHIEVABLE remedy per account kind', () => {
-    const team = recommendTeam(
-      'Implement the feature',
-      ['claude-auto-loge', 'codex-auto-atomi', 'claude-auto-mm3', 'claude-auto-atomi'],
-      {
-        usage: [
-          { binary: 'claude-auto-loge', atLimit: true },
-          { binary: 'codex-auto-atomi', authOk: false, provider: 'codex' }, // OAuth
-          { binary: 'claude-auto-mm3', authOk: false, provider: 'minimax' }, // API key
-        ],
-      },
-    );
-    expect(everyone(team).some(option => option.binary === 'claude-auto-loge')).toBe(false);
-    expect(everyone(team).some(option => option.binary === 'codex-auto-atomi')).toBe(false);
-    expect(everyone(team).some(option => option.binary === 'claude-auto-mm3')).toBe(false);
-    expect(team.exclusions.find(item => item.binary === 'claude-auto-loge')?.reason).toContain('usage limit');
-    // OAuth account → kfleet login is the real fix.
-    expect(team.exclusions.find(item => item.binary === 'codex-auto-atomi')?.reason).toContain('kfleet login');
-    // API-key account → NEVER kfleet login (a no-op for it); rotate the key in sops.
-    const mm3 = team.exclusions.find(item => item.binary === 'claude-auto-mm3')?.reason ?? '';
-    expect(mm3).toContain('$MINIMAX_API_KEY');
-    expect(mm3).not.toContain('kfleet login');
-  });
-
-  test('excludes a proxy-down wrapper with its cause instead of calling it generic quota', () => {
-    const team = recommendTeam('Implement the feature', ['claude-auto-loge', 'claude-auto-atomi'], {
-      usage: [
-        {
-          binary: 'claude-auto-loge',
-          ok: true,
-          unavailable: true,
-          unavailableReason: 'spend_limit',
-          atLimit: true,
-          authOk: true,
-        },
-      ],
-    });
-    expect(everyone(team).some(option => option.binary === 'claude-auto-loge')).toBe(false);
-    expect(team.exclusions.find(item => item.binary === 'claude-auto-loge')?.reason).toContain('monthly spend limit');
-  });
-
-  test('direct loge accounts use Anthropic aliases, offer no Fable, and do not inherit proxy semantics', () => {
-    for (let n = 1; n <= 6; n += 1) {
-      const binary = `claude-auto-loge${n}`;
-      const team = recommendTeam('Research how the API pagination works', [binary], { roles: ['researcher'] });
-      const options = everyone(team);
-      expect(team.exclusions).toEqual([]);
-      expect(options.every(option => option.binary === binary)).toBe(true);
-      expect(options.some(option => option.model === 'fable51')).toBe(false);
-      expect(options.find(option => option.model === 'opus55')?.modelFlag).toBeUndefined();
-      expect(options.find(option => option.model === 'sonnet55')?.modelFlag).toBe('sonnet');
-      expect(options.every(option => !option.command.includes('claude-opus-5-5'))).toBe(true);
-    }
-
-    const fanOut = recommendTeam('Rename one helper across 40 files, one file per agent', ['claude-auto-loge1'], {
-      roles: ['fan-out'],
-    });
-    expect(everyone(fanOut).find(option => option.model === 'haiku')?.modelFlag).toBe('haiku');
-
-    const proxy = recommendTeam('Research how the API pagination works', ['claude-auto-loge'], {
-      roles: ['researcher'],
-    });
-    // Opus 5.5 is the proxy wrapper's KTEAM_MODEL default (no flag needed).
-    expect(everyone(proxy).find(option => option.model === 'opus55')?.modelFlag).toBeUndefined();
-  });
-
-  test('Fable is offered only on claude-auto-liftoff (alias) and the loge proxy (real id)', () => {
-    expect(FABLE_ACCOUNTS).toEqual(['claude-auto-liftoff', 'claude-auto-loge']);
-    const task = 'Plan a mission-critical, hard, risky architecture migration across the large codebase';
-    const fableOn = (binary: string) =>
-      everyone(recommendTeam(task, [binary], { roles: ['planner'] })).find(option => option.model === 'fable51');
-    expect(fableOn('claude-auto-liftoff')?.modelFlag).toBe('fable');
-    const proxy = fableOn('claude-auto-loge');
-    expect(proxy?.modelFlag).toBe('claude-fable-5-1[1m]');
-    expect(proxy?.command).toContain('--model claude-fable-5-1[1m]');
-    for (const binary of ['claude-auto-atomi', 'claude-auto-loge1', 'claude-auto-loge6']) {
-      expect(fableOn(binary)).toBeUndefined();
-    }
-    const guide = recommendDecisionGuide(task, ['claude-auto-liftoff', 'claude-auto-loge2'], { usageProbed: false });
-    const byBinary = new Map(guide.accounts.map(account => [account.binary, account]));
-    expect(byBinary.get('claude-auto-liftoff')?.fableEligible).toBeNull(); // unknown quota stays unknown
-    expect(byBinary.get('claude-auto-loge2')?.fableEligible).toBe(false);
-    expect(guide.accountSelection.rules.some(rule => rule.includes('Fable is offered ONLY on'))).toBe(true);
-  });
-
-  test('loge-first: same tier, the loge account wins', () => {
-    const team = recommendTeam('Implement the hard distributed consensus rewrite', FLEET);
-    expect(role(team, 'implementer')!.primary.binary).toContain('loge');
-  });
-});
-
-describe('recommendTeam: options, alternatives, and the handoff chain', () => {
-  test('every role offers a primary plus ranked alternatives with launch commands', () => {
-    const team = recommendTeam('Implement the new billing reconciliation service', FLEET);
-    expect(team.roles.length).toBeGreaterThanOrEqual(2);
-    for (const item of team.roles) {
-      expect(item.alternatives.length).toBeGreaterThanOrEqual(2);
-      for (const option of [item.primary, ...item.alternatives]) {
-        expect(option.command).toContain('kteam start --agent ');
-        expect(option.tradeoff.length).toBeGreaterThan(10);
-        if (option.modelFlag) expect(option.command).toContain(`--model ${option.modelFlag}`);
-      }
-      // Alternatives never repeat the primary's model, and anything below the
-      // doctrine floor is marked and ranked last.
-      expect(item.alternatives.some(option => option.model === item.primary.model)).toBe(false);
-      expect(item.primary.caveat).toBeUndefined();
-      const preferred = item.alternatives.filter(option => !option.caveat);
-      expect([...preferred].sort((a, b) => b.score - a.score)).toEqual(preferred);
-      const firstCaveat = item.alternatives.findIndex(option => option.caveat);
-      if (firstCaveat >= 0) expect(item.alternatives.slice(firstCaveat).every(option => option.caveat)).toBe(true);
-    }
-  });
-
-  test('terra/5.5 never plan their own work: choosing them forces a planner', () => {
-    // Only codex terra-class accounts available → terra must implement, so the
-    // chain requires a planner even though the fleet is thin.
-    const team = recommendTeam('Implement the checklist in the ticket', ['codex-auto-loai', 'claude-auto-liftoff']);
-    const implementer = role(team, 'implementer')!;
-    if (['terra', 'gpt55'].includes(implementer.primary.model)) {
-      expect(role(team, 'planner')).toBeDefined();
-    }
-  });
-
-  test('GPT-6 Sol is the default cross-family reviewer and needs no planner', () => {
-    const team = recommendTeam('Review the reporting service diff', FLEET, { roles: ['reviewer'] });
-    const reviewer = role(team, 'reviewer')!;
-    expect(reviewer.primary.model).toBe('gpt6sol');
-    expect(reviewer.primary.modelFlag).toBeUndefined();
-    // As the codex implementer it carries no plan requirement.
-    const codexOnly = recommendTeam('Implement the reporting service endpoints', ['codex-auto-atomi'], {
-      roles: ['implementer'],
-    });
-    expect(codexOnly.roles[0]!.primary.model).toBe('gpt6sol');
-    expect(role(codexOnly, 'planner')).toBeUndefined();
-  });
-
-  test('GPT-6 Astra is the codex frontier planner', () => {
-    const planner = recommendTeam('Design the new distributed scheduler', ['codex-auto-ernest'], {
-      roles: ['planner'],
-    });
-    expect(planner.roles[0]!.primary.model).toBe('astra');
-    expect(planner.roles[0]!.primary.modelFlag).toBe('gpt-6-astra');
-  });
-
-  test('--budget max always plans and reviews; --budget cheap trims the shape', () => {
-    const task = 'Rename a helper across the config module';
-    const max = recommendTeam(task, FLEET, { budget: 'max' });
-    const cheap = recommendTeam(task, FLEET, { budget: 'cheap' });
-    expect(role(max, 'planner')).toBeDefined();
-    expect(role(max, 'reviewer')).toBeDefined();
-    expect(cheap.roles.length).toBeLessThan(max.roles.length);
-  });
-
-  test('the three budgets pick three different tiers for the same mid task', () => {
-    const task = 'Implement the reporting service endpoints';
-    const primary = (budget: 'cheap' | 'balanced' | 'max') =>
-      recommendTeam(task, FLEET, { budget, roles: ['implementer'] }).roles[0]!.primary.model;
-    expect(MASS_CHORE_TIER).toContain(primary('cheap'));
-    expect(new Set([primary('cheap'), primary('balanced'), primary('max')]).size).toBeGreaterThanOrEqual(2);
-    expect(primary('balanced')).not.toBe('opus48');
-    expect(OPUS_CLASS).toContain(primary('max'));
-  });
-
-  test('--budget max does not buy the top tier for a chore', () => {
-    // Quality-first raises the eligible tier; it is not "always spend more".
-    const primary = recommendTeam('Rename the logger helper in the config module', FLEET, {
-      budget: 'max',
-      roles: ['implementer'],
-    }).roles[0]!.primary.model;
-    expect(TOP_TIER).not.toContain(primary);
-  });
-
-  test('--roles forces the shape', () => {
-    const team = recommendTeam('anything at all', FLEET, { roles: ['reviewer'] });
-    expect(team.roles.map(item => item.role)).toEqual(['reviewer']);
-  });
-
-  test('a thin fleet warns instead of silently breaking a floor', () => {
-    const team = recommendTeam('Design the complex distributed migration', ['claude-auto-glm52a']);
-    expect(team.warnings.length).toBeGreaterThan(0);
-    expect(team.warnings.join(' ')).toContain('floor');
   });
 });
 
@@ -874,34 +553,6 @@ describe('psStatusLabel', () => {
     expect(psStatusLabel(state({ status: 'waiting', waiting: { since: 'x', peer: 'p1', peerName: 'mordecai' } }))).toBe(
       'waiting PARKED←mordecai',
     );
-  });
-});
-
-describe('Fable usage-credit consent marks (model-availability.ts → AgentUsage.fableUnavailable)', () => {
-  const reason = 'Fable needs usage credits on this account (interactive Claude Code asks to buy usage credits)';
-
-  test('the decision guide takes Fable off a marked account even with --no-usage', () => {
-    const guide = recommendDecisionGuide('Plan the migration', ['claude-auto-liftoff', 'claude-auto-loge'], {
-      usageProbed: false,
-      usage: [{ binary: 'claude-auto-liftoff', fableUnavailable: reason }],
-    });
-    const byBinary = new Map(guide.accounts.map(account => [account.binary, account]));
-    expect(byBinary.get('claude-auto-liftoff')).toMatchObject({ fableEligible: false, fableUnavailableReason: reason });
-    expect(byBinary.get('claude-auto-loge')).toMatchObject({ fableEligible: null, fableUnavailableReason: null });
-    expect(renderRecommendationDecisionGuide(guide)).toContain(`claude-auto-liftoff [own-fallback]`);
-    expect(renderRecommendationDecisionGuide(guide)).toContain(`Fable unavailable: ${reason}`);
-  });
-
-  test('recommendTeam never offers Fable on a marked account but keeps its other models', () => {
-    const task = 'Plan a mission-critical, hard, risky architecture migration across the large codebase';
-    const team = recommendTeam(task, ['claude-auto-liftoff'], {
-      usage: [{ binary: 'claude-auto-liftoff', fableUnavailable: reason }],
-    });
-    const options = everyone(team).filter(option => option.binary === 'claude-auto-liftoff');
-    expect(options.length).toBeGreaterThan(0);
-    expect(options.some(option => option.model === 'fable51')).toBe(false);
-    const unmarked = everyone(recommendTeam(task, ['claude-auto-liftoff']));
-    expect(unmarked.some(option => option.model === 'fable51')).toBe(true);
   });
 });
 

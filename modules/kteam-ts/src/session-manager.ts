@@ -4603,7 +4603,7 @@ export class SessionManager implements KTeamService {
           'cross-harness migration is not supported (v2: restart from a chat.jsonl digest)',
       );
     if (agent.includes(path.sep))
-      throw new Error('migrate target must be a bare fleet wrapper name (no path), e.g. claude-auto-glm52b');
+      throw new Error('migrate target must be a bare fleet wrapper name (no path), e.g. claude-auto-loge2');
     if (!agent.startsWith(`${harness}-auto-`)) throw new Error('kteam only migrates to auto-mode fleet wrappers');
     // Resolve ONLY within the kfleet bin (the discoverAutoAgents source) — never
     // the daemon's $PATH — so a caller (incl. a warden) cannot migrate a session

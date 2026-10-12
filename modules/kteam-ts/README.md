@@ -7,10 +7,10 @@ transcript JSONL with filesystem notifications and normalized into durable event
 ```text
 kteam daemon install                 # launchd (macOS) or systemd --user (Linux)
 kteam daemon status
-kteam recommend "build and review a frontend"          # --budget cheap|balanced|max, --roles, --json
-kteam start --agent claude-auto-mm3 --mode auto --file reference.png "build the frontend"
-kteam start --agent codex-auto-atomi --file brief.pdf --file notes.md "review these documents"
-kteam start --agent codex-auto-atomi --mode interactive "review it with me"
+kteam recommend "build and review a frontend"          # decision guide (Opus/Sonnet/Haiku 5.5 only); --json
+kteam start --agent claude-auto-loge1 --model sonnet --mode auto --file reference.png "build the frontend"
+kteam start --agent claude-auto-loge2 --file brief.pdf --file notes.md "review these documents"
+kteam start --agent claude-auto-liftoff --mode interactive "review it with me"
 kteam stream <id>
 kteam send <id> --file report.docx "summarize the report"
 kteam send <id> --image screenshot.png "compare this with the UI"  # compatibility alias
