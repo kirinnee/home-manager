@@ -583,7 +583,6 @@ rec {
       kfleet
       kloge
       kloge-deploy
-      kslack
       atomi.clickup_cli
       atomi.nsc
       grafana-loki

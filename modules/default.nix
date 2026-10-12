@@ -119,14 +119,6 @@ rec {
     echo "✓ all hosts deployed. NOTE: this machine's own ~/.secrets is refreshed"
     echo "  by \`hms\` (needs sudo on darwin), so run that separately if the pool changed."
   '';
-  # kslack: read-only Slack CLI for the agent fleet (token: $SLACK_USER_TOKEN
-  # from sops via ~/.secrets). Run-from-source like kloge; node_modules is
-  # gitignored, so a fresh checkout (e.g. a box) installs it on first run.
-  kslack = nixpkgs.writeShellScriptBin "kslack" ''
-    dir="$HOME/.config/home-manager/modules/kslack-ts"
-    [ -d "$dir/node_modules" ] || ${nixpkgs.bun}/bin/bun install --cwd "$dir" --frozen-lockfile --silent >&2
-    exec ${nixpkgs.bun}/bin/bun run "$dir/src/index.ts" "$@"
-  '';
   # kfleet: run-from-source wrapper. Generates the claude/codex/gemini/opencode
   # account wrappers + config dirs from ~/.kfleet/config.yaml (replaces the old
   # Nix multi-* agent modules). Also generates `commands` (flag-prepended
