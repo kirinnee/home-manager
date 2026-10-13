@@ -957,7 +957,7 @@ export function classifyAgent(
     // Keyed by IDENTITY (not config dir): the quota window is account-level, so
     // every variant dir of one account shares a single probe.
     if (!baseUrl || baseUrl.includes('anthropic.com')) {
-      // Direct first-party wrappers (notably loge1..6) may explicitly declare
+      // Direct first-party wrappers (notably loge1..3) may explicitly declare
       // a secrets-file key. Key by the RESOLVED token so each account gets its
       // own real probe; never fall back to an identity donor or wrapper env.
       const external = resolveExternal(agent);

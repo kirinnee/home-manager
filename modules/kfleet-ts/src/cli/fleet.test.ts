@@ -123,18 +123,18 @@ describe('partitionByCredential', () => {
   const agents: ResolvedAgent[] = [
     { name: 'kirin', kind: 'claude', base: 'kirin', variant: 'default' },
     {
-      name: 'loge4',
+      name: 'loge2',
       kind: 'claude',
-      base: 'loge4',
+      base: 'loge2',
       variant: 'default',
-      credential: { source: 'secrets-file', key: 'K4' },
+      credential: { source: 'secrets-file', key: 'K2' },
     },
     {
-      name: 'auto-loge4',
+      name: 'auto-loge2',
       kind: 'claude',
-      base: 'loge4',
+      base: 'loge2',
       variant: 'auto',
-      credential: { source: 'secrets-file', key: 'K4' },
+      credential: { source: 'secrets-file', key: 'K2' },
     },
     {
       name: 'loge1',
@@ -148,7 +148,7 @@ describe('partitionByCredential', () => {
   test('groups every variant of a tokenless agent into one skip entry', () => {
     const { agents: kept, skipped } = partitionByCredential(agents, new Set(['K1']));
     expect(kept.map(a => a.name)).toEqual(['kirin', 'loge1']);
-    expect(skipped).toEqual([{ agent: 'loge4', key: 'K4', wrappers: ['claude-loge4', 'claude-auto-loge4'] }]);
+    expect(skipped).toEqual([{ agent: 'loge2', key: 'K2', wrappers: ['claude-loge2', 'claude-auto-loge2'] }]);
   });
 
   test('null (unreadable secrets) keeps everyone', () => {

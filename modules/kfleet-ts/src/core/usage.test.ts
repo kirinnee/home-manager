@@ -583,7 +583,7 @@ const OVERAGE_ALLOWED = {
   'anthropic-ratelimit-unified-overage-reset': '1793491200',
   'anthropic-ratelimit-unified-fallback-percentage': '0.5',
 };
-// loge4..6: HTTP 429, member credit limit set to zero by an org admin.
+// An org-admin-disabled account: HTTP 429, member credit limit set to zero by an org admin.
 const OVERAGE_ADMIN_DISABLED = {
   'anthropic-ratelimit-unified-fallback-percentage': '0.5',
   'anthropic-ratelimit-unified-overage-disabled-reason': 'member_zero_credit_limit',

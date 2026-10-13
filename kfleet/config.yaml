@@ -201,7 +201,7 @@ agents:
   # claude profile supplies KTEAM_MODEL=opus; each agent maps Opus/Sonnet to its
   # 1M-context model. Upstream-following: `kfleet apply` only generates wrappers
   # for the logeN whose LOGE_CLAUDE_N_TOKEN is in ~/.secrets (load-secrets projects
-  # whatever `kloge pull` fetched), so keep all six here — more tokens upstream =
+  # whatever `kloge pull` fetched), so list every account here — more tokens upstream =
   # more accounts. 2026-10-08: no ANTHROPIC_DEFAULT_FABLE_MODEL — Fable needs usage
   # credits on these direct accounts (interactive dialog) and the human chose
   # "don't offer it"; Fable lives on claude-auto-liftoff and the claude-auto-loge
@@ -236,39 +236,6 @@ agents:
       key: LOGE_CLAUDE_3_TOKEN
     env:
       CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_3_TOKEN
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
-      ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5-5[1m]
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-5-5
-  - name: loge4
-    kind: claude
-    profiles: [claude]
-    credential:
-      source: secrets-file
-      key: LOGE_CLAUDE_4_TOKEN
-    env:
-      CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_4_TOKEN
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
-      ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5-5[1m]
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-5-5
-  - name: loge5
-    kind: claude
-    profiles: [claude]
-    credential:
-      source: secrets-file
-      key: LOGE_CLAUDE_5_TOKEN
-    env:
-      CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_5_TOKEN
-      ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
-      ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5-5[1m]
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-5-5
-  - name: loge6
-    kind: claude
-    profiles: [claude]
-    credential:
-      source: secrets-file
-      key: LOGE_CLAUDE_6_TOKEN
-    env:
-      CLAUDE_CODE_OAUTH_TOKEN: $LOGE_CLAUDE_6_TOKEN
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-5-5[1m]
       ANTHROPIC_DEFAULT_SONNET_MODEL: claude-sonnet-5-5[1m]
       ANTHROPIC_DEFAULT_HAIKU_MODEL: claude-haiku-5-5

@@ -573,13 +573,13 @@ describe('overage-billed Anthropic accounts (no 5h/weekly windows)', () => {
   });
 
   test('an in-use overage reading is positive headroom and drives the loge cutoff', () => {
-    const guide = recommendDecisionGuide('Fix a bug', ['claude-auto-loge1', 'claude-auto-loge2', 'claude-auto-loge4'], {
+    const guide = recommendDecisionGuide('Fix a bug', ['claude-auto-loge1', 'claude-auto-loge2', 'claude-auto-loge3'], {
       usage: [
         overage('claude-auto-loge1'),
         overage('claude-auto-loge2', { overagePercent: LOGE_WEEKLY_UTILIZATION_CUTOFF_PERCENT }),
         {
-          binary: 'claude-auto-loge4',
-          account: 'loge4',
+          binary: 'claude-auto-loge3',
+          account: 'loge3',
           provider: 'anthropic',
           ok: false,
           authOk: true,
@@ -601,7 +601,7 @@ describe('overage-billed Anthropic accounts (no 5h/weekly windows)', () => {
       logePreferenceEligible: true,
     });
     expect(byBinary.get('claude-auto-loge2')).toMatchObject({ usable: 'usable', logePreferenceEligible: false });
-    expect(byBinary.get('claude-auto-loge4')).toMatchObject({
+    expect(byBinary.get('claude-auto-loge3')).toMatchObject({
       usable: 'unusable',
       usabilityReason: 'disabled by admin (member_zero_credit_limit)',
     });

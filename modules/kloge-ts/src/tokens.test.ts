@@ -15,9 +15,9 @@ agents:
   - name: loge2
     kind: claude
     credential: { source: secrets-file, key: LOGE_CLAUDE_2_TOKEN }
-  - name: loge6
+  - name: loge3
     kind: claude
-    credential: { source: secrets-file, key: LOGE_CLAUDE_6_TOKEN }
+    credential: { source: secrets-file, key: LOGE_CLAUDE_3_TOKEN }
 `;
 
 describe('claudeCredentialDestinations', () => {
@@ -25,7 +25,7 @@ describe('claudeCredentialDestinations', () => {
     expect([...claudeCredentialDestinations(configYaml)]).toEqual([
       ['loge1', 'LOGE_CLAUDE_1_TOKEN'],
       ['loge2', 'LOGE_CLAUDE_2_TOKEN'],
-      ['loge6', 'LOGE_CLAUDE_6_TOKEN'],
+      ['loge3', 'LOGE_CLAUDE_3_TOKEN'],
     ]);
   });
 
@@ -45,25 +45,25 @@ describe('claudeCredentialDestinations', () => {
 });
 
 describe('hasDirectClaudeCredential', () => {
-  test('matches only direct slots 1 through 6', () => {
+  test('matches numbered slots starting at 1', () => {
     expect(hasDirectClaudeCredential({ CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_1: 'one' })).toBe(true);
     expect(hasDirectClaudeCredential({ CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_0: 'zero' })).toBe(false);
-    expect(hasDirectClaudeCredential({ CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_7: 'seven' })).toBe(false);
+    expect(hasDirectClaudeCredential({ CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_7: 'seven' })).toBe(true);
     expect(hasDirectClaudeCredential({ CODEX_OAUTH_TOKEN_PE_LLM_1: 'codex' })).toBe(false);
   });
 });
 
 describe('claudeSopsEnvTokens', () => {
-  test('maps only the six direct Claude slots to their declared SOPS env names', () => {
+  test('maps only the declared direct Claude slots to their declared SOPS env names', () => {
     const tokens = claudeSopsEnvTokens(
       {
-        CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_6: ' sk-ant-oat-sixth-token\n',
+        CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_3: ' sk-ant-oat-third-token\n',
         CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_2: JSON.stringify({
           accessToken: 'sk-ant-oat-second-token',
           refreshToken: 'refresh-token',
         }),
         CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_0: 'sk-ant-oat-slot-zero',
-        CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_7: 'proxy-only-token',
+        CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_4: 'removed-account-token',
         CODEX_OAUTH_TOKEN_PE_LLM_1: 'codex-token',
         OTHER_SECRET: 'ignored',
       },
@@ -77,9 +77,9 @@ describe('claudeSopsEnvTokens', () => {
         value: 'sk-ant-oat-second-token',
       },
       {
-        source: 'CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_6',
-        destination: 'LOGE_CLAUDE_6_TOKEN',
-        value: 'sk-ant-oat-sixth-token',
+        source: 'CLAUDE_CODE_OAUTH_TOKEN_PE_LLM_3',
+        destination: 'LOGE_CLAUDE_3_TOKEN',
+        value: 'sk-ant-oat-third-token',
       },
     ]);
   });

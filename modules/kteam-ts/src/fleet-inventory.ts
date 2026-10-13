@@ -40,8 +40,8 @@ const ANTHROPIC_RUNTIME_MODELS: RuntimeModelOption[] = [
 ];
 
 // Fable is offered only on FABLE_ACCOUNTS (2026-10-08). The other direct
-// first-party accounts (kirin, atomi, loge1..6) keep native aliases minus Fable:
-// loge1..6 demand usage credits for it in the interactive TUI.
+// first-party accounts (kirin, atomi, loge1..3) keep native aliases minus Fable:
+// loge1..3 demand usage credits for it in the interactive TUI.
 const ANTHROPIC_NO_FABLE_RUNTIME_MODELS = ANTHROPIC_RUNTIME_MODELS.filter(model => model.value !== 'fable');
 
 const LOGE_RUNTIME_MODELS: RuntimeModelOption[] = [
@@ -68,7 +68,7 @@ const DEEPSEEK_RUNTIME_MODELS: RuntimeModelOption[] = [
 export function runtimeModelsForWrapper(binary: string): RuntimeModelOption[] {
   const name = path.basename(binary);
   let models: RuntimeModelOption[] | undefined;
-  if (/^claude-auto-(kirin|liftoff|atomi|loge[1-6])$/.test(name)) {
+  if (/^claude-auto-(kirin|liftoff|atomi|loge[1-3])$/.test(name)) {
     models = (FABLE_ACCOUNTS as readonly string[]).includes(name)
       ? ANTHROPIC_RUNTIME_MODELS
       : ANTHROPIC_NO_FABLE_RUNTIME_MODELS;

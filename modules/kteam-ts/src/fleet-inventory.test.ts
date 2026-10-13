@@ -47,7 +47,7 @@ test('listWrappers marks harness + auto/interactive and sorts launchable-first',
 
 test('runtime model choices are account-aware and never leak Anthropic ids to provider wrappers', () => {
   // Fable only where it works without a usage-credits dialog (2026-10-08):
-  // liftoff by alias, the loge proxy by real id. kirin/atomi/loge1..6 drop it.
+  // liftoff by alias, the loge proxy by real id. kirin/atomi/loge1..3 drop it.
   expect(runtimeModelsForWrapper('claude-auto-liftoff').map(model => model.value)).toEqual([
     'fable',
     'opus',
@@ -69,7 +69,7 @@ test('runtime model choices are account-aware and never leak Anthropic ids to pr
   ]);
 
   const directLogeAliases = ['opus', 'sonnet', 'haiku'];
-  for (let n = 1; n <= 6; n += 1) {
+  for (let n = 1; n <= 3; n += 1) {
     const choices = runtimeModelsForWrapper(`/fleet/bin/claude-auto-loge${n}`).map(model => model.value);
     expect(choices).toEqual(directLogeAliases);
     expect(choices).not.toContain('fable');
@@ -82,7 +82,7 @@ test('runtime model choices are account-aware and never leak Anthropic ids to pr
     'claude-sonnet-5-5',
     'claude-haiku-5-5',
   ]);
-  expect(runtimeModelsForWrapper('claude-auto-loge7')).toEqual([]);
+  expect(runtimeModelsForWrapper('claude-auto-loge4')).toEqual([]);
   expect(runtimeModelsForWrapper('claude-auto-unknown')).toEqual([]);
   expect(runtimeModelsForWrapper('codex-auto-loge')).toEqual([]);
 });

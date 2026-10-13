@@ -157,7 +157,7 @@ Other rules of thumb:
 - NEVER route kteam work to `claude-auto-kirin` or `codex-auto-personal` — those are the user's personal daily-driver accounts.
 - Among Claude accounts, prefer loge at roughly **9:1** over non-loge (about one in ten selections goes to non-loge).
 - When a loge account reaches **85% weekly utilization** (about 15% remaining), stop preferring it and move to the atomi/liftoff fallbacks. Unknown weekly usage stays unknown; never treat it as zero.
-- `claude-auto-loge1..6` are direct first-party accounts and use the native aliases. Only the loge accounts with a token upstream exist: `kfleet apply` skips any `LOGE_CLAUDE_N_TOKEN` missing from `~/.secrets`. An account whose org admin disabled its usage allocation (seen on loge4..6, 2026-10-09) fails EVERY model — `kteam recommend` shows it unusable; route elsewhere. The pooled `claude-auto-loge` proxy uses real model IDs (no aliases).
+- `claude-auto-loge1..3` are direct first-party accounts and use the native aliases. Only the loge accounts with a token upstream exist: `kfleet apply` skips any `LOGE_CLAUDE_N_TOKEN` missing from `~/.secrets`. An account whose org admin disabled its usage allocation fails EVERY model — `kteam recommend` shows it unusable; route elsewhere. The pooled `claude-auto-loge` proxy uses real model IDs (no aliases).
 
 ## Launch and supervise
 

@@ -4010,3 +4010,5 @@ peer-relayed answers (1323).
   `modules/kfleet-ts/src/core/harness-probe.ts`, cc205d7), so the verbatim SDK tag means the running kteamd
   predates it. **Workaround:** `kteam daemon restart`; route to loge1..3 until the org admin re-enables
   loge4..6.
+
+- **Update (2026-10-12):** loge4..6 removed from the fleet entirely (config, skills, tests); the org-admin-disabled accounts are no longer offered.

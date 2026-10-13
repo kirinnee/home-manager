@@ -348,7 +348,7 @@ const accountNameFor = (binary: string, usage?: AgentUsage): string =>
 
 const accountPoolFor = (binary: string, account: string): RecommendationAccountPool => {
   if (routingExclusionReason(binary)) return 'never-route';
-  if (/^claude-auto-loge(?:[1-6])?$/.test(binary)) return 'loge';
+  if (/^claude-auto-loge(?:\d+)?$/.test(binary)) return 'loge';
   if ((ACCOUNT_SELECTION_POLICY.ownAccountFallbacks as readonly string[]).includes(account)) return 'own-fallback';
   return 'other';
 };
@@ -366,7 +366,7 @@ function usabilityFor(
     return {
       usable: 'unusable',
       reason: `credentials rejected — ${
-        /^claude-auto-loge[1-6]$/.test(binary)
+        /^claude-auto-loge\d+$/.test(binary)
           ? 'refresh the declared token with `kloge pull`, run `hms`, then re-check `kfleet usage`'
           : authFailureRemedy(usage.provider)
       }`,
