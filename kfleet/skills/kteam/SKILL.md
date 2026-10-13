@@ -1,11 +1,11 @@
 ---
 name: kteam
-description: Coordinate full-strength Claude teammates (Opus, Sonnet and Haiku 5.5 only) in detached tmux sessions with external stall monitoring, durable file channels, completion markers, and resumable conversations. Use when work can be divided into independent tasks, when the user asks for teammates or subagents, or when delegating research, implementation, frontend, review, or long-running work across model accounts.
+description: Coordinate full-strength Claude teammates (Opus 5.5 only, for now) in detached tmux sessions with external stall monitoring, durable file channels, completion markers, and resumable conversations. Use when work can be divided into independent tasks, when the user asks for teammates or subagents, or when delegating research, implementation, frontend, review, or long-running work across model accounts.
 ---
 
 # KTeam
 
-Use `kteam` instead of harness-native subagents. Keep the current conversation as team lead; delegate bounded tasks to full-strength Claude harnesses running Opus, Sonnet or Haiku 5.5. Teammates always run as interactive TUIs inside tmux; never replace that base with Claude `--print` or Codex `exec`.
+Use `kteam` instead of harness-native subagents. Keep the current conversation as team lead; delegate bounded tasks to full-strength Claude harnesses running Opus 5.5 (Opus only for now — see Model routing). Teammates always run as interactive TUIs inside tmux; never replace that base with Claude `--print` or Codex `exec`.
 
 `kteam` is a client of the long-running `kteamd` daemon. Check `kteam daemon status`; start or install it when unavailable. The daemon owns tmux, transcript watching, state, health, attachments, and event streaming.
 
@@ -124,6 +124,8 @@ Whenever you use kteam (one member or many) — both when proposing the team AND
 Fill the Model column with the resolved model (the wrapper's `KTEAM_MODEL` default, or the `--model` override you passed) — never leave it implied.
 
 ### Pick the MODEL first, then the account
+
+> **2026-10-13 OVERRIDE (owner): Opus 5.5 ONLY for now.** Sonnet 5.5 made zero progress on the `claude-auto-loge` gateway, so `sonnet`/`haiku` are mapped to Opus in kfleet config. Ignore the Sonnet/Haiku rows below until this note is removed; never pass `--model sonnet`/`--model haiku`.
 
 kteam routes to **exactly three models: Opus 5.5, Sonnet 5.5 and Haiku 5.5** (the owner, 2026-10-09: "that's the best 3"). Model choice is driven by the task: how much thinking it needs, how confident you must be in correctness, and how fast/cheap it should run. Claude wrappers default to `opus` (kfleet `KTEAM_MODEL`); pass `--model sonnet` or `--model haiku` for the other two.
 
