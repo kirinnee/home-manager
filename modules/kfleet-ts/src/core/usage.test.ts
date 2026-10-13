@@ -266,7 +266,7 @@ describe('probeUsage: direct Claude secrets-file inference quota headers (0..1 f
       expect(headers.get('anthropic-version')).toBe('2023-06-01');
       expect(headers.get('anthropic-beta')).toBe('oauth-2025-04-20');
       expect(JSON.parse(String(init?.body))).toEqual({
-        model: 'claude-haiku-4-5-20251001',
+        model: 'claude-haiku-5-5',
         max_tokens: 1,
         messages: [{ role: 'user', content: '.' }],
       });

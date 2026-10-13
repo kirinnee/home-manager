@@ -295,7 +295,7 @@ export async function probeAnthropicStoredUsage(
   return result;
 }
 
-const ANTHROPIC_EXTERNAL_PROBE_MODEL = 'claude-haiku-4-5-20251001';
+const ANTHROPIC_EXTERNAL_PROBE_MODEL = 'claude-haiku-5-5';
 const ANTHROPIC_EXTERNAL_PROBE_BODY = JSON.stringify({
   model: ANTHROPIC_EXTERNAL_PROBE_MODEL,
   max_tokens: 1,
