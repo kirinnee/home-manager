@@ -54,7 +54,7 @@ Host box
   IdentityFile $BOX_SSH_PRIVATE_KEY_PATH
   IdentitiesOnly yes
   StrictHostKeyChecking accept-new
-  # codex OAuth callback: \`codex login\` / \`kfleet login\` on the box listen on
+  # codex OAuth callback: \`codex login\` on the box listens on
   # ITS localhost:1455; this forward lets the browser redirect on THIS machine
   # reach it, so logins work from any plain \`ssh box\` terminal. (Extra
   # concurrent sessions just print a harmless bind warning.)

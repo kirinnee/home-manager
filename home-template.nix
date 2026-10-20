@@ -15,38 +15,6 @@
 
 let
   modules = import ./modules/default.nix { nixpkgs = pkgs; };
-  kfleetAssets = ./kfleet;
-  linkDirs = prefix: src:
-    let entries = builtins.readDir src; in
-    builtins.listToAttrs (map
-      (name: {
-        name = "${prefix}/${name}";
-        value = {
-          source = src + "/${name}";
-          force = true;
-        };
-      })
-      (builtins.filter (name: entries.${name} == "directory") (builtins.attrNames entries)));
-  kfleetHomeFiles = {
-    ".kfleet/config.yaml" = {
-      source = kfleetAssets + "/config.yaml";
-      force = true;
-    };
-    ".kfleet/CLAUDE.md" = {
-      source = kfleetAssets + "/CLAUDE.md";
-      force = true;
-    };
-    ".kfleet/CLAUDE.auto.md" = {
-      source = kfleetAssets + "/CLAUDE.auto.md";
-      force = true;
-    };
-    ".kfleet/templates" = {
-      source = kfleetAssets + "/templates";
-      force = true;
-    };
-  }
-  // (linkDirs ".kfleet/skills" (kfleetAssets + "/skills"))
-  // (linkDirs ".kfleet/skills-codex" (kfleetAssets + "/skills-codex"));
 
   # `systemctl` is NOT on PATH inside a home-manager activation script — the
   # generated activate runs with a minimal PATH that does not include /usr/bin.
@@ -256,12 +224,10 @@ rec {
     };
   };
 
-  # Claude Code statusline (prettified, version-controlled)
-  # kfleet source assets. Home Manager owns the top-level config/assets, while
-  # kfleet owns generated wrappers and per-agent homes.
-  home.file = kfleetHomeFiles // {
+  home.file = {
+    # Claude Code statusline (prettified, version-controlled)
     ".config/claude-statusline.zsh" = {
-      source = ./kfleet/statusline.zsh;
+      source = ./claude-statusline.zsh;
       executable = true;
     };
 
@@ -326,37 +292,6 @@ rec {
     '';
   };
 
-  # Nightly WAL checkpoint for the shared kfleet codex sqlite (Linux boxes
-  # only). Concurrent fleet codex sessions grow the WAL unchecked until a cold
-  # start times out opening it and codex reports the DB as damaged — see
-  # scripts/kfleet/codex-db-maint.sh. Off the 03:00 backup slot.
-  xdg.configFile."systemd/user/kfleet-codex-db.service" = {
-    enable = profile.kernel == "linux";
-    text = ''
-      [Unit]
-      Description=kfleet codex sqlite WAL checkpoint
-
-      [Service]
-      Type=oneshot
-      ExecStart=%h/.config/home-manager/scripts/kfleet/codex-db-maint.sh
-    '';
-  };
-  xdg.configFile."systemd/user/kfleet-codex-db.timer" = {
-    enable = profile.kernel == "linux";
-    text = ''
-      [Unit]
-      Description=Nightly kfleet codex sqlite maintenance
-
-      [Timer]
-      OnCalendar=*-*-* 04:17:00
-      Persistent=true
-      RandomizedDelaySec=10m
-
-      [Install]
-      WantedBy=timers.target
-    '';
-  };
-
   # Continuous Obsidian Sync for the HQ vault (Linux boxes only; inert on
   # darwin, where the Obsidian desktop app does this itself). `ob` is
   # atomi.obsidian_headless, installed via home.packages below.
@@ -372,38 +307,6 @@ rec {
   # what gets stored; safer than a password and unaffected by MFA.
   xdg.configFile."systemd/user/obsidian-sync-hq.service" = obsidianSyncUnit "HQ";
   xdg.configFile."systemd/user/obsidian-sync-main.service" = obsidianSyncUnit "Main";
-
-  # kslack-proxy: the machine's ONE Slack MCP login, served read-only on
-  # 127.0.0.1:37373 to every claude-*/codex-* account (kfleet wires them).
-  # Linux here; darwin uses launchd.agents below. Without a login it stays up and
-  # answers "run `kslack-proxy login`" instead of crash-looping.
-  xdg.configFile."systemd/user/kslack-proxy.service" = {
-    enable = profile.kernel == "linux";
-    text = ''
-      [Unit]
-      Description=kslack-proxy (shared Slack MCP login on 127.0.0.1:37373)
-
-      [Service]
-      ExecStart=${modules.kslack-proxy}/bin/kslack-proxy serve
-      Restart=always
-      RestartSec=5
-
-      [Install]
-      WantedBy=default.target
-    '';
-  };
-  launchd.agents.kslack-proxy = lib.mkIf (profile.kernel == "darwin") {
-    enable = true;
-    config = {
-      ProgramArguments = [ "${modules.kslack-proxy}/bin/kslack-proxy" "serve" ];
-      RunAtLoad = true;
-      KeepAlive = true;
-      ThrottleInterval = 10;
-      EnvironmentVariables.HOME = home.homeDirectory;
-      StandardOutPath = "${home.homeDirectory}/Library/Logs/kslack-proxy.log";
-      StandardErrorPath = "${home.homeDirectory}/Library/Logs/kslack-proxy.log";
-    };
-  };
 
   home.activation.load-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     export SECRETS_FILE="${./secrets.enc.yaml}"
@@ -422,12 +325,6 @@ rec {
     done
   '';
 
-  # After load-secrets: apply skips secrets-file agents (loge1..3) whose token is
-  # absent from the freshly projected ~/.secrets, so the fleet follows upstream.
-  home.activation.kfleet-apply = lib.hm.dag.entryAfter [ "writeBoundary" "load-secrets" ] ''
-    ${modules.kfleet}/bin/kfleet apply
-  '';
-
   home.activation.enable-backup-timer = lib.hm.dag.entryAfter [ "writeBoundary" ] (
     lib.optionalString (profile.kernel == "linux") ''
       export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -440,7 +337,6 @@ rec {
         wants="$HOME/.config/systemd/user/timers.target.wants"
         mkdir -p "$wants"
         ln -sf "$HOME/.config/systemd/user/box-backup.timer" "$wants/box-backup.timer"
-        ln -sf "$HOME/.config/systemd/user/kfleet-codex-db.timer" "$wants/kfleet-codex-db.timer"
         "$sctl" --user daemon-reload || true
         "$sctl" --user start box-backup.timer || true
       fi
@@ -513,23 +409,6 @@ rec {
         ''
       );
 
-  # Enable + (re)start kslack-proxy on Linux boxes. Same hand-made want as the
-  # units above (`enable` no-ops on nix-store symlinked units); restart so a
-  # switch picks up source changes. A box with no Slack login yet still starts.
-  home.activation.enable-kslack-proxy = lib.hm.dag.entryAfter [ "writeBoundary" ] (
-    lib.optionalString (profile.kernel == "linux") ''
-      export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-      ${systemctlPrelude}
-      if [ -n "$sctl" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
-        wants="$HOME/.config/systemd/user/default.target.wants"
-        mkdir -p "$wants"
-        ln -sf "$HOME/.config/systemd/user/kslack-proxy.service" "$wants/kslack-proxy.service"
-        "$sctl" --user daemon-reload || true
-        "$sctl" --user restart kslack-proxy.service || true
-      fi
-    ''
-  );
-
   programs.home-manager.enable = true;
 
   #########################
@@ -540,12 +419,10 @@ rec {
     [
       loctl
 
-      # AI agent CLIs. Provides the underlying `claude` binary on PATH; the
-      # per-account wrappers in ~/.kfleet/bin (claude-<name>, codex-<name>, …),
-      # generated by `kfleet` from repo-managed kfleet/config.yaml, exec it.
+      # AI agent CLIs. Provides the underlying `claude` binary on PATH; Ferretry
+      # (`fy`) launches its runtimes on top of it.
       # NOTE: `codex` is NOT installed here on darwin — it comes from the
-      # system/app install (kfleet's codex-<name> wrappers resolve `codex`
-      # from PATH). Linux boxes DO get it from nix — see the
+      # system/app install. Linux boxes DO get it from nix — see the
       # profile.kernel == "linux" optionals at the end of this list.
       claude-code-pkg
 
@@ -625,23 +502,11 @@ rec {
       hms
       k8s-merge
       oci-oke-allow-my-ip
-      kloop
-      kautopilot
-      kteam
-      kteamd
-      kfleet
-      kloge
-      kloge-deploy
-      kslack-proxy
       atomi.clickup_cli
       atomi.nsc
       grafana-loki
       prometheus.cli
       grafanactl
-
-      # AI
-      # (rtk removed 2026-07-25: unused since the kfleet/kteam stack replaced it,
-      # and its source build blocked home-manager generations.)
 
 
       # liftoff
@@ -678,13 +543,8 @@ rec {
           nerd-fonts.jetbrains-mono
         ]
     )
-    # Host-exposure suite (SSH + CLIProxyAPI over Cloudflare Tunnel). Only the
-    # designated tunnel host gets the `khost` controller; inert everywhere else.
-    ++ lib.optionals (profile.tunnelHost or false) [
-      khost
-    ]
-    # codex CLI (nightly, sadjow/codex-cli-nix) for the kfleet codex-<name>
-    # wrappers. Linux boxes only: on darwin it stays the system/app install
+    # codex CLI (nightly, sadjow/codex-cli-nix) for the Ferretry codex
+    # runtimes. Linux boxes only: on darwin it stays the system/app install
     # (see the claude-code-pkg note).
     ++ lib.optionals (profile.kernel == "linux") [
       codex-pkg
@@ -712,7 +572,6 @@ rec {
   # Addtional PATH #
   ##################
   home.sessionPath = [
-    "$HOME/.kfleet/bin" # kfleet-generated agent wrappers (claude-<name>, codex-<name>, …)
     "$HOME/.local/bin"
     "$HOME/bin"
     "$HOME/.npm-global/bin"
@@ -723,10 +582,6 @@ rec {
   #######################
   services = (if profile.kernel == "linux" then linuxService else { });
 
-  # NOTE: the kloop/kautopilot dashboards are no longer managed here. They run as
-  # self-installed per-user services (launchd on macOS, systemd --user on Linux)
-  # via the binaries themselves: `kloop service install` / `kautopilot service
-  # install`. Nix only distributes the binaries; it does not own the daemon.
 
   ##########################
   # Program Configurations #
@@ -993,37 +848,6 @@ rec {
               aws sts get-caller-identity
             }
 
-            # Start a DETACHED kteam interactive session on the personal Claude
-            # account, in the current directory. The callsign is picked BEFORE
-            # launch so kteam can name the Claude-side session `[Name] Task`;
-            # `--name` itself stays the plain task title (the TASK column).
-            #
-            #   ki "Fix Login Flow"                   -> bare, you type the first turn
-            #   ki "Fix Login Flow" "start in auth.ts" -> opens with that instruction
-            #
-            # Attach afterwards with `kteam attach <name>` (printed on start).
-            ki() {
-              if [ "$#" -lt 1 ]; then
-                echo 'usage: ki "<Task Name>" [opening instruction...]' >&2
-                echo '       task title: natural Title Case, up to 5 words' >&2
-                return 1
-              fi
-
-              local task=$1
-              shift
-
-              local mate
-              mate=$(kteam name) || return 1
-
-              kteam start \
-                --agent claude-auto-kirin \
-                --model 'claude-opus-5-5[1m]' \
-                --mode interactive \
-                --teammate "$mate" \
-                --name "$task" \
-                --cwd "$PWD" \
-                "$@"
-            }
 
           '';
           wtShell = lib.mkOrder 5000 ''
@@ -1097,9 +921,9 @@ rec {
         # has zero SG ingress and no public IP, so there is nothing to ssh to
         # directly. Resolves the instance BY TAG so it survives a replace.
         # `ssh pebox` also works (see ~/.ssh/config.d/pebox.conf) and is what
-        # rsync-based tooling (kloge push, scripts/box/replicate.sh) needs.
+        # rsync-based tooling (scripts/box/replicate.sh) needs.
         pebox = "aws ssm start-session --region us-east-1 --target \"$(aws ec2 describe-instances --region us-east-1 --filters 'Name=tag:Name,Values=kirin-devbox' 'Name=instance-state-name,Values=running' --query 'Reservations[0].Instances[0].InstanceId' --output text)\"";
-        # Codex/kfleet OAuth on the PE box: `codex login` there listens on ITS
+        # Codex OAuth on the PE box: `codex login` there listens on ITS
         # localhost:1455 and prints a URL; this forward lets the redirect on THIS
         # machine reach it. Kept OUT of ~/.ssh/config.d/pebox.conf on purpose — a
         # Host-level LocalForward binds on every session and collides with `ssh
@@ -1189,28 +1013,6 @@ rec {
         # liftoff
         tfi = "tfswitch && tf init && vaultlogin";
 
-        # kautopilot
-        kap = "kautopilot";
-        kapi = "kautopilot init";
-        kaps = "kautopilot start";
-        kapst = "kautopilot status";
-        kapps = "kautopilot ps";
-        kapx = "kautopilot stop";
-
-        # kteam
-        kt = "kteam";
-        ktps = "kteam ps";
-        ktr = "kteam recommend";
-
-        # kloop
-        kp = "kloop";
-        kpi = "kloop init";
-        kpr = "kloop run";
-        kps = "kloop status";
-        kpc = "kloop cancel";
-        kpl = "kloop logs";
-        # Restart the self-installed kloop dashboard service (picks up edited src/).
-        kpsr = "kloop service restart";
         klg = "tail -f ./.kagent/run.log";
         vpr = "gh pr view --web";
 
