@@ -429,6 +429,7 @@ rec {
       # system
       coreutils
       uutils-coreutils
+      curl
       doggo
       jq
       yq-go
