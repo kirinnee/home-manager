@@ -145,6 +145,64 @@ if [ ! -f "$gh_hosts" ] && [ "$(yq -r '.gh.tokens // {} | length' <<<"$yaml")" !
 fi
 unset gh_hosts
 
+# Work OCI CLI profile on a never-expiring API signing key. Session-token logins
+# (`oci session authenticate`) last ~1 h and refresh only up to a ~24 h max, so
+# long-running jobs kept losing access, and a headless box cannot do the browser
+# login at all. An API key does not expire; carrying it here gives every box the
+# same working profile.
+#
+# Neutral key names (.oci.work.*) on purpose: sops encrypts VALUES but leaves
+# keys readable, and this repo is public, so the profile and tenancy names stay
+# values. ~/.oci/config itself stays CLI-owned (session logins rewrite it): only
+# the one [<profile>] section is replaced, every other profile is left alone, and
+# nothing is written when that section is already current.
+# Absent key => skip, so a box without the work key still activates.
+oci_key="$(yq -r '.oci.work.private_key // ""' <<<"$yaml")"
+if [ -n "$oci_key" ]; then
+  oci_cfg="$HOME/.oci/config"
+  oci_pem="$HOME/.oci/work_api_key.pem"
+  oci_profile="$(yq -r '.oci.work.profile' <<<"$yaml")"
+  mkdir -p "$HOME/.oci"
+  (
+    umask 077
+    printf '%s\n' "$oci_key" >"$oci_pem"
+  )
+  chmod 0600 "$oci_pem"
+
+  oci_section="$(
+    echo "[$oci_profile]"
+    yq -r '.oci.work | "user=\(.user)\nfingerprint=\(.fingerprint)\ntenancy=\(.tenancy)\nregion=\(.region)"' <<<"$yaml"
+    echo "key_file=$oci_pem"
+  )"
+  # Print this profile's section (1) or everything else (0). Headers match with
+  # trailing whitespace ignored, so a hand-edited header can never leave a
+  # duplicate section behind (the CLI refuses to parse those).
+  oci_section_of() {
+    awk -v want="[$oci_profile]" -v keep="$1" '
+      { h = $0; sub(/[ \t\r]+$/, "", h) }
+      /^\[/ { mine = (h == want) }
+      (mine ? 1 : 0) == keep
+    ' "$oci_cfg" 2>/dev/null || true
+  }
+  oci_current="$(oci_section_of 1)"
+  if [ "$oci_current" != "$oci_section" ]; then
+    oci_rest="$(oci_section_of 0)"
+    (
+      umask 077
+      {
+        [ -z "$oci_rest" ] || printf '%s\n\n' "$oci_rest"
+        printf '%s\n' "$oci_section"
+      } >"$oci_cfg.tmp"
+    )
+    mv "$oci_cfg.tmp" "$oci_cfg"
+    chmod 0600 "$oci_cfg"
+    echo "🔑 oci: wrote the work API-key profile into ~/.oci/config"
+  fi
+  unset -f oci_section_of
+  unset oci_cfg oci_pem oci_profile oci_section oci_current oci_rest
+fi
+unset oci_key
+
 # load gpg keys — batch/loopback so secret-key import also works headless:
 # over ssh there is no tty, and gpg-agent's pinentry would otherwise die with
 # "Inappropriate ioctl for device" and fail the whole activation
