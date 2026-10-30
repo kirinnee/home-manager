@@ -438,7 +438,9 @@ rec {
       nano
       unixtools.watch
       gnutar
-      tmux
+      # tmux from unstable: we want >= 3.8 (stable 26.05 ships 3.6a).
+      # The assert fails the build instead of silently installing an older one.
+      (assert lib.versionAtLeast pkgs-unstable.tmux.version "3.8"; pkgs-unstable.tmux)
       dust
       fd
       procs
