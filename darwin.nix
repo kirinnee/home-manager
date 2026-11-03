@@ -25,7 +25,6 @@
       "obsidian"
       "alt-tab"
       "rectangle"
-      "jetbrains-toolbox"
       "orbstack"
       "beeper"
       "ghostty"
