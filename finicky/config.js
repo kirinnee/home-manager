@@ -32,7 +32,7 @@ export default {
       match: ({ urlString }) => /durian/i.test(urlString),
       browser: {
         name: 'Microsoft Edge',
-        profile: 'Profile 5',
+        profile: 'Profile 7',
       },
     },
     {
