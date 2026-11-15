@@ -21,15 +21,15 @@ export default {
     },
     {
       // Atomi profile
-      match: ({ urlString }) => /atomi|clickup/i.test(urlString),
+      match: ({ urlString }) => /atomi/i.test(urlString),
       browser: {
         name: 'Microsoft Edge',
         profile: 'Profile 2',
       },
     },
     {
-      // Durian profile (DurianCloud)
-      match: ({ urlString }) => /durian/i.test(urlString),
+      // Durian profile (DurianCloud, ClickUp)
+      match: ({ urlString }) => /durian|clickup/i.test(urlString),
       browser: {
         name: 'Microsoft Edge',
         profile: 'Profile 7',
