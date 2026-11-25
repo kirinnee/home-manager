@@ -111,6 +111,15 @@ if command -v tailscale >/dev/null 2>&1 && tailscale status >/dev/null 2>&1; the
     for fqdn in "${ts_peers[@]}"; do
       [ -n "$fqdn" ] || continue
       short="${fqdn%%.*}"
+      # TS_K8S_OPERATOR_EXCLUDE: space-separated short peer names that are
+      # online but dead as API proxies; their kubeconfig is removed, not written.
+      case " ${TS_K8S_OPERATOR_EXCLUDE:-} " in
+      *" $short "*)
+        echo "Skipping excluded Tailscale operator $fqdn"
+        rm -f -- "$AGENT_DIRECTORY/$short.yaml"
+        continue
+        ;;
+      esac
       echo "Writing Tailscale kubeconfig for $fqdn"
       if ! KUBECONFIG="$AGENT_DIRECTORY/$short.yaml" tailscale configure kubeconfig "$fqdn"; then
         echo "Failed to configure kubeconfig for $fqdn; skipping" >&2

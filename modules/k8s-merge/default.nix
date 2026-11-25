@@ -10,6 +10,7 @@ trivialBuilders.writeShellApplication {
     coreutils
     findutils
     kubectl
+    yq-go
   ];
   text = script;
 }
